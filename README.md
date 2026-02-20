@@ -1,6 +1,6 @@
-# 📰 Paper Trans
+# 📰 Paper Hub
 
-> 自动抓取 Hugging Face 每日 / 每周 / 每月热门 AI 论文，LLM 翻译摘要，gpt-academic 生成全文中文 PDF，现代化 Web 界面对外发布。
+> 自动抓取 Hugging Face 每日 / 每周 / 每月热门 AI 论文，LLM 翻译摘要 + 全文中文 PDF，现代化 Web 界面对外发布。支持手动输入 arXiv ID 按需翻译，内置收藏夹功能。
 
 **Web 访问**：http://xxxxxxxxx:18080
 

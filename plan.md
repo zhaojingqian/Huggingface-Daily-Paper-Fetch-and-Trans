@@ -1,7 +1,7 @@
-# Paper Trans 项目计划
+# Paper Hub 项目计划
 
 ## 项目目标
-每周自动抓取 Hugging Face Weekly Top 10 Papers，进行 AI 摘要翻译和全文中文 PDF 翻译，通过 Web 界面对外提供访问。
+自动抓取 Hugging Face 每日/每周/每月热门 AI 论文，LLM 翻译摘要 + 全文中文 PDF，Web 界面对外发布；支持手动按需翻译任意 arXiv 论文。
 
 ## 核心功能
 
@@ -165,3 +165,14 @@ tail -f /root/workspace/paper-trans/logs/web.log
 - [ ] RSS 订阅支持
 - [ ] 全文翻译并行执行（多篇同时）
 - [ ] 邮件/钉钉通知翻译完成
+
+## Phase 4（已完成）—— 手动添加 & 品牌升级
+
+| # | 功能 | 状态 |
+|---|------|------|
+| 1 | /submit 页面：手动输入 arXiv ID 按需翻译 | ✅ 已完成 |
+| 2 | 后台任务队列 + 实时状态追踪 + 自动刷新 | ✅ 已完成 |
+| 3 | 品牌更名 Paper Trans → Paper Hub | ✅ 已完成 |
+| 4 | 磁盘清理定时任务（每月 1 日自动清 gpt_log）| ✅ 已完成 |
+| 5 | nginx 路径前缀部署（zzzgry.top/paper/）| ✅ 已完成 |
+| 6 | BASE_PATH / BIND_HOST 环境变量控制 | ✅ 已完成 |

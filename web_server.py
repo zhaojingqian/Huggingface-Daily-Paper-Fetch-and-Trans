@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Paper Trans Web Server — 端口 18080"""
+"""Paper Hub Web Server — 端口 18080"""
 
-import http.server, os, json, re, threading
+import http.server, os, json, re, threading, subprocess, sys
 from urllib.parse import unquote
-from datetime import datetime
+from datetime import datetime, date
+import urllib.request
+import xml.etree.ElementTree as ET
 
 PORT       = 18080
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +17,175 @@ _bm_lock   = threading.Lock()
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
 # 通过环境变量注入：Environment=BASE_PATH=/paper
 BASE_PATH  = os.environ.get("BASE_PATH", "").rstrip("/")
+
+
+
+# ── 手动提交任务 ──────────────────────────────────────────────────────────────
+MANUAL_DIR       = os.path.join(DATA_DIR, "manual")
+SUBMIT_JOBS_FILE = os.path.join(MANUAL_DIR, "jobs.json")
+_submit_lock     = threading.Lock()
+_submit_queue    = []
+_submit_running  = False
+
+os.makedirs(MANUAL_DIR, exist_ok=True)
+
+
+def _load_jobs():
+    try:
+        with open(SUBMIT_JOBS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_jobs(jobs):
+    with open(SUBMIT_JOBS_FILE, "w", encoding="utf-8") as f:
+        json.dump(jobs, f, ensure_ascii=False, indent=2)
+
+
+def _update_job(arxiv_id, **kw):
+    with _submit_lock:
+        jobs = _load_jobs()
+        if arxiv_id not in jobs:
+            jobs[arxiv_id] = {"arxiv_id": arxiv_id}
+        jobs[arxiv_id].update(kw)
+        jobs[arxiv_id]["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _save_jobs(jobs)
+
+
+def fetch_arxiv_meta(arxiv_id):
+    """从 arXiv API 获取论文元数据"""
+    clean_id = arxiv_id.strip().split("v")[0]
+    url = "http://export.arxiv.org/api/query?id_list=" + clean_id
+    xml_data = None
+    try:
+        proxy = urllib.request.ProxyHandler(
+            {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"})
+        opener = urllib.request.build_opener(proxy)
+        with opener.open(url, timeout=30) as resp:
+            xml_data = resp.read()
+    except Exception:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            xml_data = resp.read()
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    root = ET.fromstring(xml_data)
+    entry = root.find("atom:entry", ns)
+    if entry is None:
+        raise ValueError("arXiv 未找到论文: " + clean_id)
+    title   = (entry.findtext("atom:title", "", ns) or "").strip().replace("\n", " ")
+    summary = (entry.findtext("atom:summary", "", ns) or "").strip().replace("\n", " ")
+    authors_list = [a.findtext("atom:name", "", ns)
+                    for a in entry.findall("atom:author", ns)]
+    published = (entry.findtext("atom:published", "", ns) or "")[:10]
+    return {
+        "arxiv_id": clean_id,
+        "title": title,
+        "summary": summary,
+        "authors": "Authors:" + ", ".join(authors_list),
+        "submitted": published,
+        "url": "https://arxiv.org/abs/" + clean_id,
+    }
+
+
+def _upsert_manual_index(mode, key, paper_entry):
+    idx_dir  = os.path.join(MANUAL_DIR, key)
+    idx_file = os.path.join(idx_dir, "index.json")
+    os.makedirs(idx_dir, exist_ok=True)
+    try:
+        with open(idx_file, encoding="utf-8") as f:
+            idx = json.load(f)
+    except Exception:
+        idx = {"mode": mode, "key": key, "generated_at": "", "total": 0, "papers": []}
+    papers = idx.get("papers", [])
+    aid = paper_entry.get("arxiv_id", "")
+    for i, p in enumerate(papers):
+        if p.get("arxiv_id") == aid:
+            papers[i] = paper_entry
+            break
+    else:
+        papers.insert(0, paper_entry)
+    idx["papers"] = papers
+    idx["total"]  = len(papers)
+    idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(idx_file, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=2)
+
+
+def _do_submit_job(arxiv_id):
+    """后台线程：抓元数据 -> 摘要翻译 -> 全文 PDF"""
+    global _submit_running
+    today = date.today().strftime("%Y-%m-%d")
+    mode, key = "manual", today
+    papers_dir = os.path.join(MANUAL_DIR, key, "papers")
+    os.makedirs(papers_dir, exist_ok=True)
+    try:
+        _update_job(arxiv_id, status="fetching", msg="正在从 arXiv 获取元数据...")
+        meta = fetch_arxiv_meta(arxiv_id)
+        _update_job(arxiv_id, title=meta["title"],
+                    submitted=meta.get("submitted", ""),
+                    authors=meta.get("authors", ""),
+                    mode=mode, key=key,
+                    status="abstract", msg="正在翻译摘要...")
+        sys.path.insert(0, BASE_DIR)
+        from translate_arxiv import load_api_config, translate_and_save
+        config = load_api_config()
+        result = translate_and_save(
+            arxiv_id=arxiv_id,
+            output_dir=papers_dir,
+            rank=0,
+            week_str=mode + "/" + key,
+            config=config,
+        )
+        paper_entry = dict(list(meta.items()) + list(result.items()))
+        paper_entry["html_file"] = "papers/" + arxiv_id + ".html"
+        paper_entry["rank"] = 0
+        _upsert_manual_index(mode, key, paper_entry)
+        _update_job(arxiv_id, title_zh=result.get("title_zh", ""),
+                    status="full_pdf", msg="正在翻译全文 PDF（耗时较长）...")
+        from translate_full import translate_full
+        r = translate_full(arxiv_id=arxiv_id, output_dir=papers_dir,
+                           no_cache=False, timeout=3600)
+        if r.get("pdf_path"):
+            paper_entry["pdf_zh"] = "papers/" + arxiv_id + "_zh.pdf"
+            _upsert_manual_index(mode, key, paper_entry)
+            _update_job(arxiv_id, status="done", msg="完成",
+                        pdf_zh="papers/" + arxiv_id + "_zh.pdf")
+        else:
+            _update_job(arxiv_id, status="done_no_pdf",
+                        msg="摘要完成，全文PDF失败: " + r.get("error", ""))
+    except Exception as e:
+        _update_job(arxiv_id, status="error", msg=str(e))
+    finally:
+        with _submit_lock:
+            _submit_running = False
+        _drain_submit_queue()
+
+
+def _drain_submit_queue():
+    global _submit_running, _submit_queue
+    with _submit_lock:
+        if _submit_running or not _submit_queue:
+            return
+        next_id = _submit_queue.pop(0)
+        _submit_running = True
+    t = threading.Thread(target=_do_submit_job, args=(next_id,), daemon=True)
+    t.start()
+
+
+def enqueue_submit(arxiv_id):
+    with _submit_lock:
+        jobs = _load_jobs()
+        if arxiv_id in jobs and jobs[arxiv_id].get("status") not in ("error", "done_no_pdf"):
+            return False, "已存在或正在处理中"
+        jobs[arxiv_id] = {
+            "arxiv_id": arxiv_id, "status": "queued",
+            "msg": "排队等待中",
+            "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _save_jobs(jobs)
+        _submit_queue.append(arxiv_id)
+    _drain_submit_queue()
+    return True, "已加入队列"
 
 
 # ── 收藏存储 ──────────────────────────────────────────────────────────────────
@@ -447,10 +618,11 @@ BM_MODAL = """
 # ── HTML 工具 ─────────────────────────────────────────────────────────────────
 def page(title, body, active_tab="home"):
     tab_items = [
-        ("home",      "📅 每日",   "/"),
+        ("home",      "📅 每日",   "/daily"),
         ("weekly",    "📚 每周",   "/weekly"),
         ("monthly",   "📆 每月",   "/monthly"),
         ("bookmarks", "⭐ 收藏",   "/bookmarks"),
+        ("submit",    "➕ 手动",   "/submit"),
     ]
     tabs_html = "".join(
         f'<a class="tab{" active" if t==active_tab else ""}" href="{href}">{label}</a>'
@@ -459,13 +631,13 @@ def page(title, body, active_tab="home"):
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} — Paper Trans</title>
+<title>{title} — Paper Hub</title>
 <style>{CSS}</style>
 <script>window.BP="{BASE_PATH}";</script>
 </head><body>
 <div class="topbar">
   <div class="topbar-inner">
-    <h1>📰 Paper Trans <span>HF Papers 中文精选</span></h1>
+    <h1><a href="/" style="color:inherit;text-decoration:none">📰 Paper Hub</a> <span>HF Papers 中文精选</span></h1>
     <div class="tabs">{tabs_html}</div>
   </div>
 </div>
@@ -900,6 +1072,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         raw = unquote(self.path).split("?")[0]
+
+        # ── /api/submit  手动提交 arxiv_id ─────────────────
+        if raw == "/api/submit":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception:
+                self.send_json({"error": "bad json"}, 400); return
+            arxiv_id = req.get("arxiv_id", "").strip()
+            arxiv_id = re.sub(r'\s+', '', arxiv_id).split("v")[0]
+            if not re.match(r'^\d{4}\.\d{4,5}$', arxiv_id):
+                self.send_json({"error": "无效的 arXiv ID，格式示例：2602.12345"}, 400)
+                return
+            ok, msg = enqueue_submit(arxiv_id)
+            self.send_json({"ok": ok, "msg": msg, "arxiv_id": arxiv_id})
+            return
+
         if raw != "/api/bookmarks":
             self.send_json({"error": "not found"}, 404)
             return
@@ -996,6 +1185,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raw  = unquote(self.path).split("?")[0]
         parts = [p for p in raw.strip("/").split("/") if p]
 
+        # ── /api/submit/status  任务状态 ───────────────────
+        if raw == "/api/submit/status":
+            with _submit_lock:
+                jobs = _load_jobs()
+            return self.send_json(jobs)
+
+        # ── /api/submit  提交（POST only，此处仅防误访问）──
+        if raw == "/api/submit":
+            return self.send_json({"error": "POST only"}, 405)
+
+        # ── /submit  手动提交页面 ─────────────────────────
+        if raw == "/submit":
+            return self.send_html(build_submit_page())
+
         # ── /api/bookmarks  JSON 接口 ─────────────────────
         if raw == "/api/bookmarks":
             return self.send_json(load_bookmarks())
@@ -1068,12 +1271,154 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_404(raw)
 
 
+def build_submit_page():
+    STATUS_LABEL = {
+        "queued":      ("⏳", "#94a3b8", "排队中"),
+        "fetching":    ("🔍", "#60a5fa", "获取元数据"),
+        "abstract":    ("✍️",  "#a78bfa", "翻译摘要"),
+        "full_pdf":    ("🔬", "#f59e0b", "翻译全文 PDF"),
+        "done":        ("✅", "#22c55e", "完成"),
+        "done_no_pdf": ("⚠️",  "#f97316", "完成（无 PDF）"),
+        "error":       ("❌", "#ef4444", "失败"),
+    }
+    jobs = _load_jobs()
+    job_list = sorted(jobs.values(),
+                      key=lambda j: j.get("submitted_at", ""), reverse=True)
+
+    has_active = any(j.get("status") in ("queued","fetching","abstract","full_pdf")
+                     for j in job_list)
+    auto_refresh = '<meta http-equiv="refresh" content="8">' if has_active else ""
+
+    # ── 进行中任务状态条 ────────────────────────────────────────
+    active_rows = ""
+    for j in job_list:
+        status = j.get("status", "queued")
+        if status not in ("queued","fetching","abstract","full_pdf","error"):
+            continue
+        aid   = j.get("arxiv_id", "")
+        icon, color, label = STATUS_LABEL.get(status, ("?", "#94a3b8", status))
+        title = j.get("title") or aid
+        msg   = j.get("msg", "")
+        spin  = ' <span class="spin">↻</span>' if status not in ("error",) else ""
+        retry = ""
+        if status == "error":
+            retry = (f'<button onclick="submitId(\'{aid}\')" '
+                     f'style="margin-left:8px;padding:2px 8px;font-size:12px;'
+                     f'background:#334155;color:#e2e8f0;border:none;'
+                     f'border-radius:4px;cursor:pointer">重试</button>')
+        active_rows += (
+            f'<div style="display:flex;align-items:center;gap:10px;'
+            f'padding:10px 0;border-bottom:1px solid #1e293b">'
+            f'<span style="color:{color};white-space:nowrap">{icon} {label}{spin}</span>'
+            f'<span style="font-family:monospace;color:#93c5fd;white-space:nowrap">{aid}</span>'
+            f'<span style="color:#94a3b8;font-size:13px;overflow:hidden;'
+            f'text-overflow:ellipsis;white-space:nowrap">{title}</span>'
+            f'<span style="color:#64748b;font-size:12px;white-space:nowrap;margin-left:auto">{msg}</span>'
+            f'{retry}</div>'
+        )
+    active_section = ""
+    if active_rows:
+        active_section = (
+            f'<div style="background:#1e293b;border-radius:10px;'
+            f'padding:16px 20px;margin-bottom:24px">'
+            f'<div style="font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:4px">'
+            f'进行中任务</div>{active_rows}</div>'
+        )
+
+    # ── 已完成的论文：复用 paper_card ──────────────────────────
+    done_cards = ""
+    done_modes = {}   # key -> papers_dir
+    for j in job_list:
+        status = j.get("status", "")
+        if status not in ("done", "done_no_pdf"):
+            continue
+        aid     = j.get("arxiv_id", "")
+        key_val = j.get("key", "")
+        if not key_val:
+            continue
+        pdir = os.path.join(MANUAL_DIR, key_val, "papers")
+        # 从 index.json 里取完整 paper entry
+        idx_file = os.path.join(MANUAL_DIR, key_val, "index.json")
+        paper_entry = {"arxiv_id": aid}
+        try:
+            with open(idx_file, encoding="utf-8") as f:
+                idx_data = json.load(f)
+            for p in idx_data.get("papers", []):
+                if p.get("arxiv_id") == aid:
+                    paper_entry = p
+                    break
+        except Exception:
+            pass
+        done_cards += paper_card(paper_entry, "manual", key_val, pdir)
+
+    if done_cards:
+        done_section = (
+            f'<h3 style="color:#e2e8f0;margin:0 0 16px">已翻译论文</h3>'
+            f'<div class="grid">{done_cards}</div>'
+        )
+    elif not active_rows:
+        done_section = '<p style="color:#64748b;margin-top:8px">暂无提交记录</p>'
+    else:
+        done_section = ""
+
+    body = f"""{auto_refresh}
+<div style="max-width:900px;margin:0 auto;padding:20px 0">
+  <h2 style="color:#e2e8f0;margin-bottom:16px">➕ 手动添加论文</h2>
+  <div style="background:#1e293b;border-radius:12px;padding:20px 24px;margin-bottom:20px">
+    <p style="color:#94a3b8;margin:0 0 12px;font-size:14px">
+      输入 arXiv ID（如 <code style="color:#93c5fd">2602.12345</code>），
+      系统自动翻译摘要 + 全文 PDF。</p>
+    <div style="display:flex;gap:10px;align-items:center">
+      <input id="aid-input" type="text" placeholder="2602.12345"
+        style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid #334155;
+               background:#0f172a;color:#e2e8f0;font-size:15px;outline:none"
+        onkeydown="if(event.key==='Enter')submitForm()">
+      <button onclick="submitForm()"
+        style="padding:10px 22px;border-radius:8px;border:none;
+               background:#4f46e5;color:#fff;font-size:15px;cursor:pointer;font-weight:600">
+        提交
+      </button>
+    </div>
+    <div id="submit-msg" style="margin-top:10px;font-size:13px;color:#94a3b8"></div>
+  </div>
+  {active_section}
+  {done_section}
+</div>
+<style>
+  .spin{{display:inline-block;animation:spin 1s linear infinite;margin-left:4px}}
+  @keyframes spin{{to{{transform:rotate(360deg)}}}}
+</style>
+<script>
+async function submitForm() {{
+  const aid = document.getElementById('aid-input').value.trim();
+  if (!aid) return;
+  const msgEl = document.getElementById('submit-msg');
+  msgEl.textContent = '提交中...'; msgEl.style.color='#94a3b8';
+  try {{
+    const r = await fetch((window.BP||'')+'/api/submit',{{
+      method:'POST',headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{arxiv_id:aid}})
+    }});
+    const d = await r.json();
+    if (d.ok) {{
+      msgEl.style.color='#22c55e'; msgEl.textContent='✅ '+d.msg+'，页面将自动刷新';
+      setTimeout(()=>location.reload(),1500);
+    }} else {{
+      msgEl.style.color='#ef4444'; msgEl.textContent='❌ '+(d.error||d.msg);
+    }}
+  }} catch(e) {{ msgEl.style.color='#ef4444'; msgEl.textContent='❌ 网络错误'; }}
+}}
+async function submitId(aid) {{ document.getElementById('aid-input').value=aid; await submitForm(); }}
+</script>"""
+    return page("手动添加", body, active_tab="submit")
+
+
 def main():
     import socketserver
     HOST = os.environ.get("BIND_HOST", "127.0.0.1")   # 默认只监听本机
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
-        print(f"Paper Trans Web → http://{HOST}:{PORT}", flush=True)
+        print(f"Paper Hub Web → http://{HOST}:{PORT}", flush=True)
         httpd.serve_forever()
 
 if __name__ == "__main__":
