@@ -460,3 +460,26 @@ python3 main.py 2026-W08 --full
 
 #### 修复 submit 页面卡片布局
 - 修复手动添加页面已完成论文卡片单列问题，改为与其他页面一致的响应式多列网格（minmax 340px）
+
+## v3.5 — 2026-02-20
+
+### 新功能
+
+#### 系统状态监控页面（/status）
+- 新增「📊 状态」导航 Tab
+- 实时展示：磁盘使用进度条、Docker 容器翻译进程（CPU/内存/运行时长）、任务队列全览
+- 支持一键「⏹ 终止」当前翻译任务
+- 页面每 8 秒轮询 /api/status，有活跃任务时自动刷新
+- 新增 GET /api/status、POST /api/status/kill 接口
+
+### 修复与改进
+
+#### server 重启后任务自动恢复
+- web server 启动时调用 _recover_stuck_jobs()
+- 将中断状态（queued/fetching/abstract/full_pdf）的任务自动重新入队继续执行
+- 防止 server 重启导致翻译任务永久卡死
+
+#### 每日凌晨 5 点自动重启 Docker 容器
+- 新增 cron：0 5 * * * docker restart gpt-academic-latex
+- 定期清除累积的僵尸 pdflatex 进程（无害但会占用进程表条目）
+- 重启日志写入 logs/docker-restart.log
