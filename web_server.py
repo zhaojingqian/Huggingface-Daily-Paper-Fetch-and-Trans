@@ -719,7 +719,7 @@ def paper_card(p, mode, key, pdir):
     btns.append(f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文PDF</a>')
 
     del_btn = (f'<button class="btn btn-del" '
-               f'onclick="deletePaper(\'{{mode}}\',\'{{key}}\',\'{{aid}}\')" '
+               f'onclick="deletePaper(\'{mode}\',\'{key}\',\'{aid}\')" '
                f'title="删除论文（含本地文件）">🗑️</button>')
 
     return f"""<div class="card" id="card-{aid}">
