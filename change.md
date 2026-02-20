@@ -435,3 +435,13 @@ python3 main.py 2026-W08 --full
 - web_server.py 支持 BASE_PATH 环境变量，nginx strip-prefix 路径前缀透明处理
 - nginx zzzgry.top 配置：/paper/ 路径反代到 127.0.0.1:18080，不暴露端口号
 - BIND_HOST 环境变量控制监听地址（127.0.0.1 仅本机 / 0.0.0.0 公网）
+
+## v3.3 — 2026-02-20
+
+### 新功能
+
+#### 论文删除功能
+- 所有卡片（每日/每周/每月/手动）右下角新增「🗑️」删除按钮
+- 删除操作同时清除：本地 HTML 及 PDF 文件、index.json 条目、收藏夹中对应记录、manual 模式的 jobs.json 记录
+- 点击前弹窗确认，删除后卡片淡出消失（无需刷新页面）
+- 后端 API：POST /api/paper/delete，接收 mode / key / arxiv_id

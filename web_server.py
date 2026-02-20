@@ -374,6 +374,9 @@ a{text-decoration:none;color:inherit}
 .btn-bm{position:absolute;top:10px;right:10px;background:transparent;border:none;
         cursor:pointer;font-size:20px;line-height:1;padding:2px 4px;
         border-radius:6px;transition:all .2s;color:#94a3b8;z-index:2}
+.btn-del{background:transparent;border:none;cursor:pointer;font-size:14px;
+        padding:2px 6px;border-radius:6px;color:#64748b;transition:all .2s;margin-left:4px}
+.btn-del:hover{color:#ef4444;background:#1e293b}
 .btn-bm:hover{background:#fef3c7;color:#f59e0b;transform:scale(1.2)}
 .btn-bm.bm-active{color:#f59e0b}
 /* ── 收藏模态框 ── */
@@ -591,6 +594,22 @@ document.getElementById('bm-overlay').addEventListener('click', function(e){
 document.getElementById('bm-new-name').addEventListener('keydown', e => {
   if (e.key === 'Enter') BM.confirmCreate();
 });
+
+async function deletePaper(mode, key, aid) {
+  if (!confirm('确定删除这篇论文？\n将同时删除本地 HTML/PDF 文件及收藏记录，不可恢复。')) return;
+  const r = await fetch((window.BP||'') + '/api/paper/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mode, key, arxiv_id: aid})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    const el = document.getElementById('card-' + aid);
+    if (el) { el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(),300); }
+  } else {
+    alert('删除失败: ' + (d.error || '未知错误'));
+  }
+}
 </script>"""
 
 BM_MODAL = """
@@ -699,7 +718,11 @@ def paper_card(p, mode, key, pdir):
     btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
     btns.append(f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文PDF</a>')
 
-    return f"""<div class="card">
+    del_btn = (f'<button class="btn btn-del" '
+               f'onclick="deletePaper(\'{{mode}}\',\'{{key}}\',\'{{aid}}\')" '
+               f'title="删除论文（含本地文件）">🗑️</button>')
+
+    return f"""<div class="card" id="card-{aid}">
   <div class="card-hdr">
     {bm_btn}
     <div>{rank_badge}{pdf_badge}{up_badge}</div>
@@ -710,7 +733,7 @@ def paper_card(p, mode, key, pdir):
     {"<p class='summary'>" + summary_zh[:300] + "</p>" if summary_zh else ""}
     {"<div>" + kw_html + "</div>" if kw_html else ""}
     <div class="meta-row">{"".join(meta_parts)}</div>
-    <div class="btns">{"".join(btns)}</div>
+    <div class="btns">{"".join(btns)}{del_btn}</div>
   </div>
 </div>"""
 
@@ -781,6 +804,57 @@ def build_papers_page(mode, key):
             f'{stats}'
             f'<div class="cards">{cards if cards else "<div class=empty><div class=empty-icon>📭</div><p>暂无数据</p></div>"}</div>')
     return page(key, body, active_tab=mode)
+
+
+def _delete_paper(mode, key, arxiv_id):
+    """删除一篇论文：本地文件 + index.json 条目 + 收藏记录"""
+    import glob as _glob
+
+    # 1. 删本地文件（papers/ 目录下所有以 arxiv_id 开头的文件）
+    papers_dir = os.path.join(DATA_DIR, mode, key, "papers")
+    if not os.path.isdir(papers_dir):
+        papers_dir = os.path.join(BASE_DIR, "weekly", key, "papers")
+    if os.path.isdir(papers_dir):
+        for fpath in _glob.glob(os.path.join(papers_dir, arxiv_id + "*")):
+            try:
+                os.remove(fpath)
+            except Exception:
+                pass
+
+    # 2. 从 index.json 移除条目
+    idx_file = os.path.join(DATA_DIR, mode, key, "index.json")
+    if os.path.exists(idx_file):
+        try:
+            with open(idx_file, encoding="utf-8") as f:
+                idx = json.load(f)
+            idx["papers"] = [p for p in idx.get("papers", [])
+                             if p.get("arxiv_id") != arxiv_id]
+            idx["total"] = len(idx["papers"])
+            with open(idx_file, "w", encoding="utf-8") as f:
+                json.dump(idx, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # 3. 从 bookmarks.json 移除对应条目
+    with _bm_lock:
+        bm = load_bookmarks()
+        changed = False
+        for lst in bm.get("lists", {}).values():
+            before = len(lst.get("papers", []))
+            lst["papers"] = [p for p in lst.get("papers", [])
+                             if p.get("arxiv_id") != arxiv_id]
+            if len(lst["papers"]) != before:
+                changed = True
+        if changed:
+            save_bookmarks(bm)
+
+    # 4. manual 模式同步从 jobs.json 移除
+    if mode == "manual":
+        with _submit_lock:
+            jobs = _load_jobs()
+            if arxiv_id in jobs:
+                del jobs[arxiv_id]
+                _save_jobs(jobs)
 
 
 def build_home():
@@ -1072,6 +1146,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         raw = unquote(self.path).split("?")[0]
+
+        # ── /api/paper/delete  删除论文 ────────────────────
+        if raw == "/api/paper/delete":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception:
+                self.send_json({"error": "bad json"}, 400); return
+            mode     = req.get("mode", "")
+            key      = req.get("key", "")
+            arxiv_id = req.get("arxiv_id", "").strip()
+            if not (mode and key and arxiv_id):
+                self.send_json({"error": "缺少参数"}, 400); return
+            try:
+                _delete_paper(mode, key, arxiv_id)
+                self.send_json({"ok": True})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+            return
 
         # ── /api/submit  手动提交 arxiv_id ─────────────────
         if raw == "/api/submit":
