@@ -643,6 +643,7 @@ def page(title, body, active_tab="home"):
         ("bookmarks", "⭐ 收藏",   "/bookmarks"),
         ("submit",    "➕ 手动",   "/submit"),
         ("search",    "🔍 搜索",   "/search"),
+        ("status",    "📊 状态",   "/status"),
     ]
     tabs_html = "".join(
         f'<a class="tab{" active" if t==active_tab else ""}" href="{href}">{label}</a>'
@@ -1293,6 +1294,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if raw == "/submit":
             return self.send_html(build_submit_page())
 
+        # ── /status  状态监控 ─────────────────────────────
+        if raw == "/status":
+            return self.send_html(build_status_page())
+
+        # ── /api/status  系统状态 JSON ────────────────────
+        if raw == "/api/status":
+            return self.send_json(get_system_status())
+
+        # ── /api/status/kill  终止当前翻译任务 ───────────
+        if raw.startswith("/api/status/kill"):
+            return self.send_json(kill_current_translation())
+
         # ── /search  搜索页面 ─────────────────────────────
         if raw == "/search":
             return self.send_html(build_search_page())
@@ -1612,6 +1625,238 @@ const _uq = new URLSearchParams(location.search).get('q');
 if (_uq) { document.getElementById('sq').value = _uq; doSearch(); }
 </script>"""
     return page("搜索", body, active_tab="search")
+
+
+
+def get_system_status():
+    """收集系统状态快照"""
+    import shutil
+
+    with _submit_lock:
+        jobs = _load_jobs()
+    job_list = sorted(jobs.values(),
+                      key=lambda j: j.get("submitted_at", ""), reverse=True)
+
+    total, used, free = shutil.disk_usage("/")
+    disk = {
+        "total_gb": round(total / 1e9, 1),
+        "used_gb":  round(used  / 1e9, 1),
+        "free_gb":  round(free  / 1e9, 1),
+        "pct":      round(used / total * 100, 1),
+    }
+
+    docker_procs = []
+    zombie_count = 0
+    try:
+        out = subprocess.check_output(
+            ["docker", "exec", "gpt-academic-latex", "ps", "aux"],
+            timeout=5, stderr=subprocess.DEVNULL
+        ).decode(errors="replace")
+        for line in out.splitlines()[1:]:
+            parts = line.split(None, 10)
+            if len(parts) < 8:
+                continue
+            stat = parts[7]
+            cmd  = parts[10] if len(parts) > 10 else ""
+            if "defunct" in cmd or "Z" in stat:
+                zombie_count += 1
+            elif "full_translate_driver" in cmd:
+                arxiv_id = cmd.strip().split()[-1] if cmd.strip().split() else ""
+                docker_procs.append({
+                    "arxiv_id": arxiv_id,
+                    "cpu": parts[2], "mem": parts[3],
+                    "start": parts[8], "etime": parts[9] if len(parts) > 9 else "",
+                })
+    except Exception as e:
+        docker_procs = [{"error": str(e)}]
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "now": now,
+        "disk": disk,
+        "jobs": job_list,
+        "docker_procs": docker_procs,
+        "zombie_count": zombie_count,
+    }
+
+
+def kill_current_translation():
+    """终止容器内当前正在运行的翻译进程"""
+    try:
+        out = subprocess.check_output(
+            ["docker", "exec", "gpt-academic-latex",
+             "sh", "-c", "pgrep -f full_translate_driver || echo ''"],
+            timeout=5, stderr=subprocess.DEVNULL
+        ).decode().strip()
+        if not out:
+            return {"ok": False, "msg": "没有正在运行的翻译进程"}
+        pids = out.split()
+        for pid in pids:
+            subprocess.call(
+                ["docker", "exec", "gpt-academic-latex", "kill", "-9", pid],
+                timeout=5, stderr=subprocess.DEVNULL
+            )
+        with _submit_lock:
+            jobs = _load_jobs()
+            for j in jobs.values():
+                if j.get("status") in ("full_pdf", "abstract", "fetching"):
+                    j["status"] = "error"
+                    j["msg"] = "已手动终止"
+                    j["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_jobs(jobs)
+        return {"ok": True, "msg": "已终止 PID: " + ", ".join(pids)}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+def build_status_page():
+    st   = get_system_status()
+    jobs = st["jobs"]
+    disk = st["disk"]
+
+    STATUS_META = {
+        "queued":      ("#475569", "⏳", "排队中"),
+        "fetching":    ("#3b82f6", "🔍", "获取元数据"),
+        "abstract":    ("#8b5cf6", "✍️",  "翻译摘要"),
+        "full_pdf":    ("#f59e0b", "🔬", "翻译全文"),
+        "done":        ("#22c55e", "✅", "完成"),
+        "done_no_pdf": ("#f97316", "⚠️",  "完成(无PDF)"),
+        "error":       ("#ef4444", "❌", "失败"),
+    }
+
+    pct = disk["pct"]
+    bar_color = "#ef4444" if pct > 90 else "#f59e0b" if pct > 75 else "#22c55e"
+    disk_html = (
+        '<div style="background:#1e293b;border-radius:12px;padding:20px 24px;margin-bottom:20px">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
+        '<span style="color:#e2e8f0;font-weight:600">💾 磁盘使用</span>'
+        f'<span style="color:{bar_color};font-weight:700">{pct}% &nbsp;'
+        f'({disk["used_gb"]} / {disk["total_gb"]} GB，剩余 {disk["free_gb"]} GB)</span>'
+        '</div>'
+        '<div style="background:#0f172a;border-radius:6px;height:10px;overflow:hidden">'
+        f'<div style="width:{min(pct,100)}%;height:100%;background:{bar_color};border-radius:6px"></div>'
+        '</div></div>'
+    )
+
+    dp = st["docker_procs"]
+    zombies = st["zombie_count"]
+    zombie_tag = f'<span style="color:#f97316;font-size:12px;margin-left:8px">⚠️ {zombies} 个僵尸进程</span>' if zombies else '<span style="color:#64748b;font-size:12px;margin-left:8px">无僵尸进程</span>'
+    if dp and "error" not in dp[0]:
+        proc_rows = "".join(
+            '<tr>'
+            f'<td style="font-family:monospace;color:#93c5fd;padding:8px 6px">{p.get("arxiv_id","?")}</td>'
+            f'<td style="color:#fbbf24;padding:8px 6px">{p.get("cpu","?")}%</td>'
+            f'<td style="color:#a78bfa;padding:8px 6px">{p.get("mem","?")}%</td>'
+            f'<td style="color:#94a3b8;padding:8px 6px">{p.get("start","?")} / {p.get("etime","?")}</td>'
+            '<td style="padding:8px 6px"><button onclick="killJob()" style="padding:3px 10px;border-radius:6px;border:none;background:#ef4444;color:#fff;cursor:pointer;font-size:12px">⏹ 终止</button></td>'
+            '</tr>'
+            for p in dp
+        )
+        docker_html = (
+            '<div style="background:#1e293b;border-radius:12px;padding:20px 24px;margin-bottom:20px">'
+            f'<div style="color:#e2e8f0;font-weight:600;margin-bottom:12px">🐳 容器翻译进程{zombie_tag}</div>'
+            '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+            '<thead><tr style="color:#64748b;border-bottom:1px solid #0f172a">'
+            '<th style="text-align:left;padding:4px 6px">arXiv ID</th>'
+            '<th style="text-align:left;padding:4px 6px">CPU</th>'
+            '<th style="text-align:left;padding:4px 6px">MEM</th>'
+            '<th style="text-align:left;padding:4px 6px">启动时间 / 运行时长</th>'
+            '<th style="text-align:left;padding:4px 6px">操作</th>'
+            '</tr></thead>'
+            f'<tbody style="color:#e2e8f0">{proc_rows}</tbody>'
+            '</table></div>'
+        )
+    else:
+        idle_msg = dp[0].get("error", "") if dp else ""
+        idle_txt = "当前无翻译进程运行" if not idle_msg else "获取失败: " + idle_msg
+        docker_html = (
+            '<div style="background:#1e293b;border-radius:12px;padding:20px 24px;margin-bottom:20px">'
+            f'<div style="color:#e2e8f0;font-weight:600;margin-bottom:8px">🐳 容器翻译进程{zombie_tag}</div>'
+            f'<p style="color:#64748b;font-size:13px">{idle_txt}</p>'
+            '</div>'
+        )
+
+    STATUS_ORDER = ["fetching", "abstract", "full_pdf", "queued", "done", "done_no_pdf", "error"]
+    jobs_sorted = sorted(jobs, key=lambda j: (
+        STATUS_ORDER.index(j.get("status", "queued")) if j.get("status") in STATUS_ORDER else 99,
+        j.get("submitted_at", "")
+    ))
+
+    rows = ""
+    for j in jobs_sorted:
+        aid    = j.get("arxiv_id", "")
+        status = j.get("status", "queued")
+        color, icon, label = STATUS_META.get(status, ("#94a3b8", "?", status))
+        title  = j.get("title_zh") or j.get("title") or aid
+        t_sub  = j.get("submitted_at", "")[:16]
+        t_upd  = j.get("updated_at", "")[:16]
+        spin   = ' <span class="spin">↻</span>' if status in ("fetching", "abstract", "full_pdf") else ""
+        key_v  = j.get("key", "")
+        links  = ""
+        if j.get("pdf_zh") and key_v:
+            links += f'<a href="/manual/{key_v}/{j["pdf_zh"]}" style="color:#34d399;font-size:12px;margin-right:6px">PDF</a>'
+        if key_v:
+            links += f'<a href="/manual/{key_v}/papers/{aid}" style="color:#60a5fa;font-size:12px">详情</a>'
+        title_esc = title.replace('"', '&quot;')
+        rows += (
+            '<tr style="border-bottom:1px solid #1e293b">'
+            f'<td style="font-family:monospace;color:#93c5fd;padding:8px 6px;white-space:nowrap">{aid}</td>'
+            f'<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e2e8f0;padding:8px 6px" title="{title_esc}">{title}</td>'
+            f'<td style="padding:8px 6px;white-space:nowrap"><span style="color:{color}">{icon} {label}</span>{spin}</td>'
+            f'<td style="color:#64748b;font-size:12px;padding:8px 6px;white-space:nowrap">{t_sub}</td>'
+            f'<td style="color:#475569;font-size:12px;padding:8px 6px;white-space:nowrap">{t_upd}</td>'
+            f'<td style="padding:8px 6px">{links}</td>'
+            '</tr>'
+        )
+
+    queue_html = (
+        '<div style="background:#1e293b;border-radius:12px;padding:20px 24px;margin-bottom:20px">'
+        f'<div style="color:#e2e8f0;font-weight:600;margin-bottom:12px">📋 任务队列 <span style="font-size:12px;color:#64748b;font-weight:400;margin-left:8px">共 {len(jobs)} 条</span></div>'
+        '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
+        '<thead><tr style="color:#64748b;border-bottom:1px solid #0f172a">'
+        '<th style="text-align:left;padding:4px 6px">arXiv ID</th>'
+        '<th style="text-align:left;padding:4px 6px">标题</th>'
+        '<th style="text-align:left;padding:4px 6px">状态</th>'
+        '<th style="text-align:left;padding:4px 6px">提交时间</th>'
+        '<th style="text-align:left;padding:4px 6px">更新时间</th>'
+        '<th style="text-align:left;padding:4px 6px">链接</th>'
+        '</tr></thead>'
+        f'<tbody>{rows if rows else "<tr><td colspan=6 style=color:#64748b;padding:12px>暂无任务</td></tr>"}</tbody>'
+        '</table></div></div>'
+    )
+
+    now = st["now"]
+    body = (
+        '<div style="max-width:960px;margin:0 auto;padding:20px 0">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
+        '<h2 style="color:#e2e8f0;margin:0">📊 系统状态</h2>'
+        f'<div><span id="last-update" style="color:#475569;font-size:12px">更新于 {now}</span>'
+        '&nbsp;<button onclick="manualRefresh()" style="padding:4px 12px;border-radius:6px;border:none;'
+        'background:#334155;color:#e2e8f0;font-size:13px;cursor:pointer">刷新</button></div>'
+        '</div>'
+        + disk_html + docker_html + queue_html +
+        '</div>'
+        '<style>.spin{display:inline-block;animation:spin 1s linear infinite;margin-left:4px}'
+        '@keyframes spin{to{transform:rotate(360deg)}}</style>'
+        '<script>\n'
+        'setInterval(() => {\n'
+        '  fetch((window.BP||"")+"/api/status").then(r=>r.json()).then(d=>{\n'
+        '    document.getElementById("last-update").textContent="更新于 "+d.now;\n'
+        '    const active = d.jobs.some(j=>["fetching","abstract","full_pdf","queued"].includes(j.status));\n'
+        '    if(active) setTimeout(()=>location.reload(), 500);\n'
+        '  }).catch(()=>{});\n'
+        '}, 8000);\n'
+        'function manualRefresh(){location.reload();}\n'
+        'async function killJob(){\n'
+        '  if(!confirm("确定终止当前翻译任务？")) return;\n'
+        '  const r=await fetch((window.BP||"")+"/api/status/kill",{method:"POST"});\n'
+        '  const d=await r.json();\n'
+        '  alert(d.ok?"✅ "+d.msg:"❌ "+d.msg);\n'
+        '  setTimeout(()=>location.reload(),1000);\n'
+        '}\n'
+        '</script>'
+    )
+    return page("系统状态", body, active_tab="status")
 
 
 def main():
