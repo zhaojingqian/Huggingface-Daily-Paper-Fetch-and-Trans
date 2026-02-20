@@ -1,14 +1,44 @@
 #!/usr/bin/env python3
 """Paper Trans Web Server — 端口 18080"""
 
-import http.server, os, json, re
+import http.server, os, json, re, threading
 from urllib.parse import unquote
 from datetime import datetime
 
-PORT      = 18080
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR  = os.path.join(BASE_DIR, "data")
+PORT       = 18080
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR   = os.path.join(BASE_DIR, "data")
 WEEKLY_DIR = os.path.join(BASE_DIR, "weekly")   # 兼容旧目录
+BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
+_bm_lock   = threading.Lock()
+
+
+# ── 收藏存储 ──────────────────────────────────────────────────────────────────
+def load_bookmarks():
+    """返回 {lists: {lid: {name, papers: [{arxiv_id,mode,key,added}]}}}"""
+    if os.path.exists(BOOKMARKS_FILE):
+        try:
+            with open(BOOKMARKS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"lists": {}}
+
+
+def save_bookmarks(data):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(BOOKMARKS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_paper_entry(mode, key, arxiv_id):
+    """从 index.json 取论文元数据，找不到返回最小字典"""
+    idx = load_index(mode, key)
+    if idx:
+        for p in idx.get("papers", []):
+            if p.get("arxiv_id") == arxiv_id:
+                return p
+    return {"arxiv_id": arxiv_id}
 
 
 # ── 数据加载 ──────────────────────────────────────────────────────────────────
@@ -164,14 +194,259 @@ a{text-decoration:none;color:inherit}
   .stats{flex-direction:column}
   .tabs .tab{padding:4px 12px;font-size:12px}
 }
+/* ── 收藏按钮（卡片右上角）── */
+.card-hdr{position:relative}
+.btn-bm{position:absolute;top:10px;right:10px;background:transparent;border:none;
+        cursor:pointer;font-size:20px;line-height:1;padding:2px 4px;
+        border-radius:6px;transition:all .2s;color:#94a3b8;z-index:2}
+.btn-bm:hover{background:#fef3c7;color:#f59e0b;transform:scale(1.2)}
+.btn-bm.bm-active{color:#f59e0b}
+/* ── 收藏模态框 ── */
+#bm-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);
+            z-index:9999;align-items:center;justify-content:center}
+#bm-overlay.bm-show{display:flex}
+#bm-box{background:#fff;border-radius:18px;padding:24px 24px 20px;width:360px;max-width:94vw;
+        box-shadow:0 24px 64px rgba(0,0,0,.3);display:flex;flex-direction:column;gap:0;
+        max-height:88vh;overflow:hidden}
+.bm-hdr{margin-bottom:14px}
+.bm-hdr-title{font-size:16px;font-weight:700;color:#1e293b}
+.bm-hdr-sub{font-size:12px;color:#64748b;margin-top:2px;
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#bm-list-items{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;
+               max-height:46vh;padding-right:2px;margin-bottom:12px}
+.bm-item{display:flex;align-items:center;gap:10px;padding:10px 12px;
+         border-radius:10px;border:1.5px solid #e2e8f0;cursor:pointer;
+         transition:all .15s;user-select:none}
+.bm-item:hover{border-color:#4f46e5;background:#f5f3ff}
+.bm-item.bm-in{border-color:#059669;background:#f0fdf4}
+.bm-check{width:18px;height:18px;border-radius:5px;border:2px solid #cbd5e1;flex-shrink:0;
+          display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+.bm-item.bm-in .bm-check{background:#059669;border-color:#059669;color:#fff}
+.bm-item-name{flex:1;font-size:13px;font-weight:600;color:#334155}
+.bm-item-cnt{font-size:11px;color:#94a3b8}
+/* move arrows in list view */
+.bm-item-move{font-size:11px;color:#7c3aed;background:#f5f3ff;
+              border:none;border-radius:6px;padding:3px 8px;cursor:pointer;
+              font-weight:600;white-space:nowrap}
+.bm-item-move:hover{background:#ede9fe}
+#bm-new-row{display:none;margin-bottom:10px}
+.bm-new-wrap{display:flex;gap:8px}
+.bm-new-wrap input{flex:1;padding:8px 12px;border:1.5px solid #e2e8f0;
+                   border-radius:8px;font-size:13px;outline:none}
+.bm-new-wrap input:focus{border-color:#4f46e5}
+.bm-footer{display:flex;gap:8px;flex-wrap:wrap;padding-top:4px;border-top:1px solid #f1f5f9}
+.bm-btn{padding:7px 16px;border-radius:8px;border:none;cursor:pointer;
+        font-size:12px;font-weight:600;transition:all .15s;white-space:nowrap}
+.bm-btn-primary{background:#4f46e5;color:#fff}.bm-btn-primary:hover{background:#4338ca}
+.bm-btn-ghost{background:#f1f5f9;color:#475569}.bm-btn-ghost:hover{background:#e2e8f0}
+.bm-btn-danger{background:#fef2f2;color:#ef4444}.bm-btn-danger:hover{background:#fee2e2}
+/* ── 收藏页 ── */
+.bm-pg-toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:10px}
+.bm-pg-title{font-size:22px;font-weight:700;color:#1e293b}
+.bm-pg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.bm-list-card{background:#fff;border-radius:14px;padding:20px;border:1px solid #e2e8f0;
+              box-shadow:0 2px 8px rgba(0,0,0,.06);transition:all .2s;cursor:default}
+.bm-list-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.1)}
+.bm-list-card-name{font-size:16px;font-weight:700;color:#1e293b;margin-bottom:4px;
+                   display:flex;align-items:center;gap:8px}
+.bm-list-card-meta{font-size:12px;color:#64748b;margin-bottom:14px}
+.bm-list-actions{display:flex;gap:6px;flex-wrap:wrap}
+.bm-inline-btn{padding:5px 12px;border-radius:8px;border:none;cursor:pointer;
+               font-size:11px;font-weight:600;transition:all .15s}
+.bm-inline-view{background:#4f46e5;color:#fff}.bm-inline-view:hover{background:#4338ca}
+.bm-inline-rename{background:#f1f5f9;color:#475569}.bm-inline-rename:hover{background:#e2e8f0}
+.bm-inline-del{background:#fef2f2;color:#ef4444}.bm-inline-del:hover{background:#fee2e2}
+/* ── 收藏列表视图的卡片操作 ── */
+.bm-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;padding-top:8px;
+                 border-top:1px solid #f1f5f9}
+.bm-rm-btn{background:#fef2f2;color:#ef4444;padding:4px 12px;border-radius:8px;
+           border:none;cursor:pointer;font-size:11px;font-weight:600}
+.bm-rm-btn:hover{background:#fee2e2}
+.bm-mv-sel{padding:4px 8px;border-radius:8px;border:1px solid #e2e8f0;
+           font-size:11px;color:#475569;cursor:pointer;background:#fff}
 """
 
+# ── 收藏 JS ───────────────────────────────────────────────────────────────────
+BM_JS = r"""
+<script>
+const BM = {
+  data: {lists: {}},
+
+  async init() {
+    try {
+      const r = await fetch('/api/bookmarks');
+      BM.data = await r.json();
+    } catch(e) { BM.data = {lists: {}}; }
+    BM.refreshButtons();
+  },
+
+  isIn(aid, lid) {
+    const list = (BM.data.lists||{})[lid];
+    return list ? list.papers.some(p => p.arxiv_id === aid) : false;
+  },
+
+  anyIn(aid) {
+    return Object.keys(BM.data.lists||{}).some(lid => BM.isIn(aid, lid));
+  },
+
+  refreshButtons() {
+    document.querySelectorAll('.btn-bm').forEach(btn => {
+      const aid = btn.dataset.aid;
+      const on  = BM.anyIn(aid);
+      btn.textContent = on ? '★' : '☆';
+      btn.classList.toggle('bm-active', on);
+      btn.title = on ? '已收藏 — 点击管理' : '添加到收藏';
+    });
+  },
+
+  /* ── 打开模态框 ── */
+  open(aid, mode, key, titleZh) {
+    BM._aid = aid; BM._mode = mode; BM._key = key;
+    document.getElementById('bm-sub').textContent = titleZh || aid;
+    BM.renderItems();
+    document.getElementById('bm-overlay').classList.add('bm-show');
+  },
+  close() {
+    document.getElementById('bm-overlay').classList.remove('bm-show');
+    document.getElementById('bm-new-row').style.display = 'none';
+    document.getElementById('bm-new-name').value = '';
+  },
+
+  renderItems() {
+    const lists = BM.data.lists || {};
+    const el = document.getElementById('bm-list-items');
+    el.innerHTML = '';
+    const lids = Object.keys(lists);
+    if (!lids.length) {
+      el.innerHTML = '<div style="color:#94a3b8;text-align:center;padding:20px;font-size:13px">暂无收藏列表<br>请点击「新建列表」创建</div>';
+      return;
+    }
+    lids.forEach(lid => {
+      const list = lists[lid];
+      const inList = BM.isIn(BM._aid, lid);
+      const div = document.createElement('div');
+      div.className = 'bm-item' + (inList ? ' bm-in' : '');
+      div.innerHTML = `<div class="bm-check">${inList ? '✓' : ''}</div>
+        <span class="bm-item-name">${list.name}</span>
+        <span class="bm-item-cnt">${list.papers.length} 篇</span>`;
+      div.onclick = () => BM.toggle(lid);
+      el.appendChild(div);
+    });
+  },
+
+  /* ── 切换收藏状态 ── */
+  async toggle(lid) {
+    const r = await fetch('/api/bookmarks', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action:'toggle', list_id:lid,
+                            arxiv_id:BM._aid, mode:BM._mode, key:BM._key})
+    });
+    BM.data = await r.json();
+    BM.renderItems();
+    BM.refreshButtons();
+  },
+
+  showNewInput() {
+    document.getElementById('bm-new-row').style.display = 'block';
+    document.getElementById('bm-new-name').focus();
+  },
+
+  async confirmCreate() {
+    const name = document.getElementById('bm-new-name').value.trim();
+    if (!name) return;
+    const r = await fetch('/api/bookmarks', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action:'create_list', name,
+                            arxiv_id:BM._aid, mode:BM._mode, key:BM._key})
+    });
+    BM.data = await r.json();
+    BM.renderItems();
+    BM.refreshButtons();
+    document.getElementById('bm-new-row').style.display = 'none';
+    document.getElementById('bm-new-name').value = '';
+  },
+
+  /* ── 收藏页操作（通过 data 属性在页面元素上触发）── */
+  async deleteList(lid) {
+    if (!confirm('确认删除收藏列表？其中的论文记录也会清除。')) return;
+    const r = await fetch('/api/bookmarks', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action:'delete_list', list_id:lid})
+    });
+    BM.data = await r.json();
+    location.reload();
+  },
+
+  async renameList(lid, oldName) {
+    const name = prompt('新列表名称：', oldName);
+    if (!name || name === oldName) return;
+    const r = await fetch('/api/bookmarks', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action:'rename_list', list_id:lid, name})
+    });
+    BM.data = await r.json();
+    location.reload();
+  },
+
+  async removePaper(arxivId, lid) {
+    const r = await fetch('/api/bookmarks', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action:'remove', arxiv_id:arxivId, list_id:lid})
+    });
+    BM.data = await r.json();
+    document.getElementById('bm-paper-' + arxivId)?.remove();
+  },
+
+  async movePaper(arxivId, fromLid, toLid) {
+    if (!toLid || toLid === fromLid) return;
+    const r = await fetch('/api/bookmarks', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action:'move', arxiv_id:arxivId,
+                            from_list:fromLid, to_list:toLid})
+    });
+    BM.data = await r.json();
+    document.getElementById('bm-paper-' + arxivId)?.remove();
+  }
+};
+
+document.addEventListener('DOMContentLoaded', () => BM.init());
+document.getElementById('bm-overlay').addEventListener('click', function(e){
+  if (e.target === this) BM.close();
+});
+document.getElementById('bm-new-name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') BM.confirmCreate();
+});
+</script>"""
+
+BM_MODAL = """
+<div id="bm-overlay">
+  <div id="bm-box">
+    <div class="bm-hdr">
+      <div class="bm-hdr-title">⭐ 添加到收藏</div>
+      <div class="bm-hdr-sub" id="bm-sub"></div>
+    </div>
+    <div id="bm-list-items"></div>
+    <div id="bm-new-row">
+      <div class="bm-new-wrap">
+        <input id="bm-new-name" placeholder="新列表名称…">
+        <button class="bm-btn bm-btn-primary" onclick="BM.confirmCreate()">创建</button>
+      </div>
+    </div>
+    <div class="bm-footer">
+      <button class="bm-btn bm-btn-ghost" onclick="BM.showNewInput()">＋ 新建列表</button>
+      <button class="bm-btn bm-btn-ghost" onclick="BM.close()">关闭</button>
+    </div>
+  </div>
+</div>"""
+
+
 # ── HTML 工具 ─────────────────────────────────────────────────────────────────
-def page(title, body, active_tab="weekly"):
+def page(title, body, active_tab="home"):
     tab_items = [
-        ("daily",   "📅 每日", "/"),
-        ("weekly",  "📚 每周", "/weekly"),
-        ("monthly", "📆 每月", "/monthly"),
+        ("home",      "📅 每日",   "/"),
+        ("weekly",    "📚 每周",   "/weekly"),
+        ("monthly",   "📆 每月",   "/monthly"),
+        ("bookmarks", "⭐ 收藏",   "/bookmarks"),
     ]
     tabs_html = "".join(
         f'<a class="tab{" active" if t==active_tab else ""}" href="{href}">{label}</a>'
@@ -190,6 +465,8 @@ def page(title, body, active_tab="weekly"):
   </div>
 </div>
 <div class="main">{body}</div>
+{BM_MODAL}
+{BM_JS}
 </body></html>"""
 
 def paper_card(p, mode, key, pdir):
@@ -223,6 +500,12 @@ def paper_card(p, mode, key, pdir):
         short_au = authors[:50] + ("…" if len(authors) > 50 else "")
         meta_parts.append(f'<span class="meta-item">👥 {short_au}</span>')
 
+    # 收藏按钮（JS 初始化后自动更新 ☆/★）
+    title_esc = (title_zh or title).replace("'", "\\'")[:60]
+    bm_btn = (f'<button class="btn-bm" data-aid="{aid}" '
+              f'onclick="BM.open(\'{aid}\',\'{mode}\',\'{key}\',\'{title_esc}\')"'
+              f' title="收藏">☆</button>')
+
     # buttons
     btns = []
     if has_html:
@@ -235,6 +518,7 @@ def paper_card(p, mode, key, pdir):
 
     return f"""<div class="card">
   <div class="card-hdr">
+    {bm_btn}
     <div>{rank_badge}{pdf_badge}{up_badge}</div>
     <div class="card-title">{title[:120]}</div>
     {"<div class='card-title-zh'>" + title_zh[:100] + "</div>" if title_zh else ""}
@@ -429,6 +713,140 @@ def build_detail_page(mode, key, arxiv_id):
     return page(title_zh or title, body, active_tab=mode)
 
 
+# ── 收藏页面 ──────────────────────────────────────────────────────────────────
+def build_bookmarks_overview():
+    """所有收藏列表的概览页"""
+    bm   = load_bookmarks()
+    lists = bm.get("lists", {})
+
+    if not lists:
+        cards_html = """<div class="empty">
+  <div class="empty-icon">⭐</div>
+  <p>还没有收藏列表</p>
+  <p style="font-size:13px;margin-top:8px;color:#94a3b8">
+    点击任意论文卡片右上角的 ☆ 按钮即可收藏
+  </p>
+</div>"""
+    else:
+        cards = []
+        for lid, lst in lists.items():
+            cnt   = len(lst.get("papers", []))
+            cdate = lst.get("created", "")[:10]
+            cards.append(f"""<div class="bm-list-card">
+  <div class="bm-list-card-name">📚 {lst['name']}</div>
+  <div class="bm-list-card-meta">{cnt} 篇论文{f' · 创建于 {cdate}' if cdate else ''}</div>
+  <div class="bm-list-actions">
+    <a class="bm-inline-btn bm-inline-view" href="/bookmarks/{lid}">查看</a>
+    <button class="bm-inline-btn bm-inline-rename"
+            onclick="BM.renameList('{lid}','{lst['name'].replace(chr(39),chr(39))}')">重命名</button>
+    <button class="bm-inline-btn bm-inline-del"
+            onclick="BM.deleteList('{lid}')">删除</button>
+  </div>
+</div>""")
+        cards_html = f'<div class="bm-pg-grid">{"".join(cards)}</div>'
+
+    body = f"""<div class="bm-pg-toolbar">
+  <div class="bm-pg-title">⭐ 我的收藏</div>
+  <button class="bm-btn bm-btn-primary"
+          onclick="BM._aid='';BM._mode='';BM._key='';
+                   document.getElementById('bm-sub').textContent='新建收藏列表';
+                   BM.renderItems();
+                   BM.showNewInput();
+                   document.getElementById('bm-overlay').classList.add('bm-show')">
+    ＋ 新建列表
+  </button>
+</div>
+{cards_html}"""
+    return page("我的收藏", body, active_tab="bookmarks")
+
+
+def build_bookmark_list_page(lid):
+    """某个收藏列表的论文详情页"""
+    bm    = load_bookmarks()
+    lists = bm.get("lists", {})
+
+    if lid not in lists:
+        return None
+
+    lst     = lists[lid]
+    papers  = lst.get("papers", [])
+    other_lists = {k: v["name"] for k, v in lists.items() if k != lid}
+
+    if not papers:
+        cards_html = '<div class="empty"><div class="empty-icon">📭</div><p>这个列表还没有论文</p></div>'
+    else:
+        cards = []
+        for entry in papers:
+            aid   = entry.get("arxiv_id", "")
+            mode  = entry.get("mode", "")
+            key   = entry.get("key", "")
+            added = entry.get("added", "")[:10]
+            # 从 index.json 拉取完整元数据
+            p    = get_paper_entry(mode, key, aid)
+            pdir = papers_dir(mode, key) if mode and key else None
+
+            # 构造卡片 HTML（复用 paper_card 的大部分逻辑）
+            title    = p.get("title","") or aid
+            title_zh = p.get("title_zh","")
+            sum_zh   = p.get("summary_zh","")
+            kws      = p.get("keywords_zh",[]) or []
+            has_pdf  = bool(p.get("pdf_zh") and pdir and
+                            os.path.exists(os.path.join(pdir,
+                                p["pdf_zh"].replace("papers/","",1))))
+
+            kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
+            pdf_btn = (f'<a class="btn btn-full-pdf" href="/{mode}/{key}/{p["pdf_zh"]}" target="_blank">📄 全文PDF</a>'
+                       if has_pdf else "")
+
+            # 移动到其他列表的 <select>
+            mv_opts = "".join(f'<option value="{k}">{v}</option>' for k, v in other_lists.items())
+            mv_sel  = (f'<select class="bm-mv-sel" onchange="BM.movePaper(\'{aid}\',\'{lid}\',this.value)">'
+                       f'<option value="">移动到…</option>{mv_opts}</select>'
+                       if mv_opts else "")
+
+            cards.append(f"""<div class="card" id="bm-paper-{aid}">
+  <div class="card-hdr">
+    <div><span class="badge-pdf" style="background:#fef3c7;color:#92400e">⭐ {added}</span>
+         {"<span class='badge-pdf'>✅ PDF</span>" if has_pdf else ""}
+    </div>
+    <div class="card-title">{title[:120]}</div>
+    {"<div class='card-title-zh'>" + title_zh[:100] + "</div>" if title_zh else ""}
+  </div>
+  <div class="card-body">
+    {"<p class='summary'>" + sum_zh[:300] + "</p>" if sum_zh else ""}
+    {"<div>" + kw_html + "</div>" if kw_html else ""}
+    <div class="btns">
+      {f'<a class="btn btn-detail" href="/{mode}/{key}/papers/{aid}">🔍 详情</a>' if mode and key else ""}
+      {pdf_btn}
+      <a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>
+    </div>
+    <div class="bm-card-actions">
+      <button class="bm-rm-btn" onclick="BM.removePaper('{aid}','{lid}')">✕ 移出列表</button>
+      {mv_sel}
+    </div>
+  </div>
+</div>""")
+        cards_html = f'<div class="cards">{"".join(cards)}</div>'
+
+    cnt  = len(papers)
+    body = f"""<div class="bm-pg-toolbar">
+  <div>
+    <a class="btn btn-back" href="/bookmarks">← 所有列表</a>
+  </div>
+  <div class="bm-pg-title">📚 {lst['name']}
+    <span style="font-size:14px;color:#64748b;font-weight:400">（{cnt} 篇）</span>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="bm-btn bm-btn-ghost"
+            onclick="BM.renameList('{lid}','{lst['name']}')">重命名</button>
+    <button class="bm-btn bm-btn-danger"
+            onclick="BM.deleteList('{lid}')">删除列表</button>
+  </div>
+</div>
+{cards_html}"""
+    return page(lst["name"], body, active_tab="bookmarks")
+
+
 # ── HTTP Handler ──────────────────────────────────────────────────────────────
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -461,9 +879,125 @@ class Handler(http.server.BaseHTTPRequestHandler):
         html = f"<html><body style='font-family:sans-serif;padding:40px'><h2>404 — {msg}</h2><a href='/'>← 返回首页</a></body></html>"
         self.send_html(html, 404)
 
+    def send_json(self, data, code=200):
+        b = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_POST(self):
+        raw = unquote(self.path).split("?")[0]
+        if raw != "/api/bookmarks":
+            self.send_json({"error": "not found"}, 404)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length)
+        try:
+            req = json.loads(body.decode("utf-8"))
+        except Exception:
+            self.send_json({"error": "bad json"}, 400)
+            return
+
+        action = req.get("action", "")
+        with _bm_lock:
+            bm = load_bookmarks()
+            lists = bm.setdefault("lists", {})
+
+            if action == "toggle":
+                lid     = req.get("list_id", "")
+                aid     = req.get("arxiv_id", "")
+                mode    = req.get("mode", "")
+                key     = req.get("key", "")
+                if lid not in lists:
+                    self.send_json({"error": "list not found"}, 404); return
+                papers = lists[lid].setdefault("papers", [])
+                idx    = next((i for i, p in enumerate(papers) if p["arxiv_id"] == aid), -1)
+                if idx >= 0:
+                    papers.pop(idx)          # 已有 → 移除
+                else:
+                    papers.append({"arxiv_id": aid, "mode": mode, "key": key,
+                                   "added": datetime.now().strftime("%Y-%m-%d")})
+
+            elif action == "create_list":
+                name = req.get("name", "").strip()
+                if not name:
+                    self.send_json({"error": "name required"}, 400); return
+                lid = re.sub(r'[^a-z0-9_-]', '', name.lower().replace(" ", "_")) or \
+                      f"list_{len(lists)}"
+                if lid in lists:
+                    lid = lid + f"_{len(lists)}"
+                lists[lid] = {
+                    "name": name,
+                    "created": datetime.now().strftime("%Y-%m-%d"),
+                    "papers": []
+                }
+                # 创建列表后，若同时传了论文 ID，立刻收藏
+                aid = req.get("arxiv_id", "")
+                if aid:
+                    lists[lid]["papers"].append({
+                        "arxiv_id": aid,
+                        "mode": req.get("mode",""), "key": req.get("key",""),
+                        "added": datetime.now().strftime("%Y-%m-%d")
+                    })
+
+            elif action == "delete_list":
+                lid = req.get("list_id", "")
+                lists.pop(lid, None)
+
+            elif action == "rename_list":
+                lid  = req.get("list_id", "")
+                name = req.get("name", "").strip()
+                if lid in lists and name:
+                    lists[lid]["name"] = name
+
+            elif action == "remove":
+                lid = req.get("list_id", "")
+                aid = req.get("arxiv_id", "")
+                if lid in lists:
+                    lists[lid]["papers"] = [
+                        p for p in lists[lid].get("papers", [])
+                        if p["arxiv_id"] != aid
+                    ]
+
+            elif action == "move":
+                from_lid = req.get("from_list", "")
+                to_lid   = req.get("to_list", "")
+                aid      = req.get("arxiv_id", "")
+                if from_lid in lists and to_lid in lists:
+                    entry = next((p for p in lists[from_lid].get("papers",[])
+                                  if p["arxiv_id"] == aid), None)
+                    if entry:
+                        lists[from_lid]["papers"] = [
+                            p for p in lists[from_lid]["papers"] if p["arxiv_id"] != aid
+                        ]
+                        if not any(p["arxiv_id"] == aid
+                                   for p in lists[to_lid].get("papers",[])):
+                            lists[to_lid].setdefault("papers", []).append(entry)
+            else:
+                self.send_json({"error": "unknown action"}, 400); return
+
+            save_bookmarks(bm)
+        self.send_json(bm)
+
     def do_GET(self):
         raw  = unquote(self.path).split("?")[0]
         parts = [p for p in raw.strip("/").split("/") if p]
+
+        # ── /api/bookmarks  JSON 接口 ─────────────────────
+        if raw == "/api/bookmarks":
+            return self.send_json(load_bookmarks())
+
+        # ── /bookmarks  /bookmarks/{id}  收藏页 ──────────
+        if parts and parts[0] == "bookmarks":
+            if len(parts) == 1:
+                return self.send_html(build_bookmarks_overview())
+            if len(parts) == 2:
+                html = build_bookmark_list_page(parts[1])
+                if html:
+                    return self.send_html(html)
+                return self.send_404("收藏列表不存在")
 
         # ── /  首页 ──────────────────────────────────────
         if not parts:
