@@ -1227,7 +1227,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_html(build_papers_page(mode, key))
 
         # ── /MODE/KEY/papers/NAME  详情页 或 文件下载 ────────
-        if len(parts) == 4 and parts[0] in ("daily","weekly","monthly") and parts[2] == "papers":
+        if len(parts) == 4 and parts[0] in ("daily","weekly","monthly","manual") and parts[2] == "papers":
             mode, key, _, name = parts
             # arXiv ID 格式：YYMM.NNNNN（纯数字 + 一个点）
             # PDF/HTML 文件名含 "_zh" 或 ".html" 等后缀，不匹配此模式
@@ -1246,7 +1246,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_404(f"{name} 未找到")
 
         # ── /MODE/KEY/...  其他文件（兼容 5 段以上路径）────────
-        if len(parts) >= 4 and parts[0] in ("daily","weekly","monthly"):
+        if len(parts) >= 4 and parts[0] in ("daily","weekly","monthly","manual"):
             mode = parts[0]; key = parts[1]
             rel  = "/".join(parts[2:])
             for base in [os.path.join(DATA_DIR, mode, key),
