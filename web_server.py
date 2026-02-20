@@ -12,6 +12,10 @@ WEEKLY_DIR = os.path.join(BASE_DIR, "weekly")   # 兼容旧目录
 BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
 _bm_lock   = threading.Lock()
 
+# 部署路径前缀，如 /paper（nginx strip-prefix 模式）
+# 通过环境变量注入：Environment=BASE_PATH=/paper
+BASE_PATH  = os.environ.get("BASE_PATH", "").rstrip("/")
+
 
 # ── 收藏存储 ──────────────────────────────────────────────────────────────────
 def load_bookmarks():
@@ -274,7 +278,7 @@ const BM = {
 
   async init() {
     try {
-      const r = await fetch('/api/bookmarks');
+      const r = await fetch((window.BP||'') + '/api/bookmarks');
       BM.data = await r.json();
     } catch(e) { BM.data = {lists: {}}; }
     BM.refreshButtons();
@@ -336,7 +340,7 @@ const BM = {
 
   /* ── 切换收藏状态 ── */
   async toggle(lid) {
-    const r = await fetch('/api/bookmarks', {
+    const r = await fetch((window.BP||'') + '/api/bookmarks', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({action:'toggle', list_id:lid,
                             arxiv_id:BM._aid, mode:BM._mode, key:BM._key})
@@ -354,7 +358,7 @@ const BM = {
   async confirmCreate() {
     const name = document.getElementById('bm-new-name').value.trim();
     if (!name) return;
-    const r = await fetch('/api/bookmarks', {
+    const r = await fetch((window.BP||'') + '/api/bookmarks', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({action:'create_list', name,
                             arxiv_id:BM._aid, mode:BM._mode, key:BM._key})
@@ -369,7 +373,7 @@ const BM = {
   /* ── 收藏页操作（通过 data 属性在页面元素上触发）── */
   async deleteList(lid) {
     if (!confirm('确认删除收藏列表？其中的论文记录也会清除。')) return;
-    const r = await fetch('/api/bookmarks', {
+    const r = await fetch((window.BP||'') + '/api/bookmarks', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({action:'delete_list', list_id:lid})
     });
@@ -380,7 +384,7 @@ const BM = {
   async renameList(lid, oldName) {
     const name = prompt('新列表名称：', oldName);
     if (!name || name === oldName) return;
-    const r = await fetch('/api/bookmarks', {
+    const r = await fetch((window.BP||'') + '/api/bookmarks', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({action:'rename_list', list_id:lid, name})
     });
@@ -389,7 +393,7 @@ const BM = {
   },
 
   async removePaper(arxivId, lid) {
-    const r = await fetch('/api/bookmarks', {
+    const r = await fetch((window.BP||'') + '/api/bookmarks', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({action:'remove', arxiv_id:arxivId, list_id:lid})
     });
@@ -399,7 +403,7 @@ const BM = {
 
   async movePaper(arxivId, fromLid, toLid) {
     if (!toLid || toLid === fromLid) return;
-    const r = await fetch('/api/bookmarks', {
+    const r = await fetch((window.BP||'') + '/api/bookmarks', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({action:'move', arxiv_id:arxivId,
                             from_list:fromLid, to_list:toLid})
@@ -452,11 +456,12 @@ def page(title, body, active_tab="home"):
         f'<a class="tab{" active" if t==active_tab else ""}" href="{href}">{label}</a>'
         for t, label, href in tab_items
     )
-    return f"""<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} — Paper Trans</title>
 <style>{CSS}</style>
+<script>window.BP="{BASE_PATH}";</script>
 </head><body>
 <div class="topbar">
   <div class="topbar-inner">
@@ -468,6 +473,12 @@ def page(title, body, active_tab="home"):
 {BM_MODAL}
 {BM_JS}
 </body></html>"""
+    # 统一把所有内部绝对路径加上 BASE_PATH 前缀（仅当设置了前缀时）
+    if BASE_PATH:
+        html = html.replace('href="/', f'href="{BASE_PATH}/')
+        html = html.replace("href='/", f"href='{BASE_PATH}/")
+        html = html.replace('action="/', f'action="{BASE_PATH}/')
+    return html
 
 def paper_card(p, mode, key, pdir):
     aid        = p.get("arxiv_id","")
