@@ -1059,9 +1059,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     import socketserver
+    HOST = os.environ.get("BIND_HOST", "127.0.0.1")   # 默认只监听本机
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"Paper Trans Web → http://0.0.0.0:{PORT}", flush=True)
+    with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
+        print(f"Paper Trans Web → http://{HOST}:{PORT}", flush=True)
         httpd.serve_forever()
 
 if __name__ == "__main__":
