@@ -642,6 +642,7 @@ def page(title, body, active_tab="home"):
         ("monthly",   "📆 每月",   "/monthly"),
         ("bookmarks", "⭐ 收藏",   "/bookmarks"),
         ("submit",    "➕ 手动",   "/submit"),
+        ("search",    "🔍 搜索",   "/search"),
     ]
     tabs_html = "".join(
         f'<a class="tab{" active" if t==active_tab else ""}" href="{href}">{label}</a>'
@@ -1292,6 +1293,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if raw == "/submit":
             return self.send_html(build_submit_page())
 
+        # ── /search  搜索页面 ─────────────────────────────
+        if raw == "/search":
+            return self.send_html(build_search_page())
+
+        # ── /api/search  搜索 JSON 接口 ───────────────────
+        if raw.startswith("/api/search"):
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query).get("q", [""])[0].strip()
+            results = search_papers(q) if q else []
+            cards_html = "".join(
+                paper_card(p, p["_mode"], p["_key"],
+                           os.path.join(DATA_DIR, p["_mode"], p["_key"], "papers"))
+                for p in results
+            )
+            html_block = (f'<div class="cards">{cards_html}</div>'
+                          if cards_html else "")
+            return self.send_json({"q": q, "total": len(results), "html": html_block})
+
         # ── /api/bookmarks  JSON 接口 ─────────────────────
         if raw == "/api/bookmarks":
             return self.send_json(load_bookmarks())
@@ -1447,7 +1466,7 @@ def build_submit_page():
     if done_cards:
         done_section = (
             f'<h3 style="color:#e2e8f0;margin:0 0 16px">已翻译论文</h3>'
-            f'<div class="grid">{done_cards}</div>'
+            f'<div class="cards">{done_cards}</div>'
         )
     elif not active_rows:
         done_section = '<p style="color:#64748b;margin-top:8px">暂无提交记录</p>'
@@ -1504,6 +1523,95 @@ async function submitForm() {{
 async function submitId(aid) {{ document.getElementById('aid-input').value=aid; await submitForm(); }}
 </script>"""
     return page("手动添加", body, active_tab="submit")
+
+
+def search_papers(query, limit=60):
+    """在所有 index.json 里模糊搜索，返回匹配的 paper dict 列表（含 mode/key）"""
+    q = query.lower().strip()
+    if not q:
+        return []
+
+    results = []
+    modes = ["daily", "weekly", "monthly", "manual"]
+    for mode in modes:
+        mode_dir = os.path.join(DATA_DIR, mode)
+        if not os.path.isdir(mode_dir):
+            continue
+        for key in sorted(os.listdir(mode_dir), reverse=True):
+            idx_file = os.path.join(mode_dir, key, "index.json")
+            if not os.path.isfile(idx_file):
+                continue
+            try:
+                with open(idx_file, encoding="utf-8") as f:
+                    idx = json.load(f)
+            except Exception:
+                continue
+            for p in idx.get("papers", []):
+                fields = " ".join([
+                    p.get("arxiv_id", ""),
+                    p.get("title", ""),
+                    p.get("title_zh", ""),
+                    p.get("summary_zh", ""),
+                    p.get("authors", ""),
+                    " ".join(p.get("keywords_zh", []) or []),
+                ]).lower()
+                if q in fields:
+                    hit = dict(p)
+                    hit["_mode"] = mode
+                    hit["_key"]  = key
+                    results.append(hit)
+                if len(results) >= limit:
+                    return results
+    return results
+
+
+def build_search_page():
+    body = """
+<div style="max-width:900px;margin:0 auto;padding:20px 0">
+  <h2 style="color:#e2e8f0;margin-bottom:16px">🔍 搜索论文</h2>
+  <div style="background:#1e293b;border-radius:12px;padding:20px 24px;margin-bottom:24px">
+    <p style="color:#94a3b8;margin:0 0 12px;font-size:14px">支持中英文模糊搜索：标题、摘要、作者、关键词、arXiv ID</p>
+    <div style="display:flex;gap:10px;align-items:center">
+      <input id="sq" type="text" placeholder="输入关键词…"
+        style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid #334155;
+               background:#0f172a;color:#e2e8f0;font-size:15px;outline:none"
+        oninput="debounceSearch()" onkeydown="if(event.key==='Enter')doSearch()">
+      <button onclick="doSearch()"
+        style="padding:10px 22px;border-radius:8px;border:none;
+               background:#4f46e5;color:#fff;font-size:15px;cursor:pointer;font-weight:600">
+        搜索
+      </button>
+    </div>
+    <div id="search-info" style="margin-top:10px;font-size:13px;color:#64748b"></div>
+  </div>
+  <div id="search-results"></div>
+</div>
+<script>
+let _st = null;
+function debounceSearch() {
+  clearTimeout(_st);
+  _st = setTimeout(doSearch, 400);
+}
+async function doSearch() {
+  const q = document.getElementById('sq').value.trim();
+  const info = document.getElementById('search-info');
+  const box  = document.getElementById('search-results');
+  if (!q) { box.innerHTML=''; info.textContent=''; return; }
+  info.textContent = '搜索中…';
+  try {
+    const r = await fetch((window.BP||'') + '/api/search?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    info.textContent = d.total ? `找到 ${d.total} 篇` : '未找到匹配论文';
+    box.innerHTML = d.html || '';
+  } catch(e) {
+    info.textContent = '搜索失败：' + e;
+  }
+}
+// 支持 URL 中带 ?q= 直接搜索
+const _uq = new URLSearchParams(location.search).get('q');
+if (_uq) { document.getElementById('sq').value = _uq; doSearch(); }
+</script>"""
+    return page("搜索", body, active_tab="search")
 
 
 def main():

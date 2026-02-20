@@ -445,3 +445,18 @@ python3 main.py 2026-W08 --full
 - 删除操作同时清除：本地 HTML 及 PDF 文件、index.json 条目、收藏夹中对应记录、manual 模式的 jobs.json 记录
 - 点击前弹窗确认，删除后卡片淡出消失（无需刷新页面）
 - 后端 API：POST /api/paper/delete，接收 mode / key / arxiv_id
+
+## v3.4 — 2026-02-20
+
+### 新功能
+
+#### 全局搜索（/search）
+- 新增「🔍 搜索」导航 Tab，访问 /search 页面
+- 支持中英文模糊搜索：标题、中文标题、摘要、作者、关键词、arXiv ID
+- 覆盖所有模式（每日/每周/每月/手动），实时 debounce 搜索（400ms 延迟）
+- 搜索结果以卡片形式展示，与其他页面完全一致
+- 支持 URL 参数 /search?q=xxx 直接触发搜索
+- 后端 GET /api/search?q= 接口，返回服务端渲染的卡片 HTML
+
+#### 修复 submit 页面卡片布局
+- 修复手动添加页面已完成论文卡片单列问题，改为与其他页面一致的响应式多列网格（minmax 340px）
