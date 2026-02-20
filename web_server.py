@@ -1859,12 +1859,32 @@ def build_status_page():
     return page("系统状态", body, active_tab="status")
 
 
+def _recover_stuck_jobs():
+    """server 启动时把上次中断的任务重新入队"""
+    try:
+        with _submit_lock:
+            jobs = _load_jobs()
+            stuck = [j["arxiv_id"] for j in jobs.values()
+                     if j.get("status") in ("queued","fetching","abstract","full_pdf")]
+            for aid in stuck:
+                jobs[aid]["status"] = "error"
+                jobs[aid]["msg"] = "server重启导致中断，请重试"
+            if stuck:
+                _save_jobs(jobs)
+        for aid in stuck:
+            enqueue_submit(aid)
+            print(f"[recover] re-queued: {aid}", flush=True)
+    except Exception as e:
+        print(f"[recover] error: {e}", flush=True)
+
+
 def main():
     import socketserver
     HOST = os.environ.get("BIND_HOST", "127.0.0.1")   # 默认只监听本机
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
         print(f"Paper Hub Web → http://{HOST}:{PORT}", flush=True)
+        _recover_stuck_jobs()
         httpd.serve_forever()
 
 if __name__ == "__main__":
