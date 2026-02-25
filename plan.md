@@ -166,13 +166,38 @@ tail -f /root/workspace/paper-trans/logs/web.log
 - [ ] 全文翻译并行执行（多篇同时）
 - [ ] 邮件/钉钉通知翻译完成
 
-## Phase 4（已完成）—— 手动添加 & 品牌升级
+## ✅ Phase 4 — 手动添加 & 品牌升级（v3.2）
 
 | # | 功能 | 状态 |
 |---|------|------|
-| 1 | /submit 页面：手动输入 arXiv ID 按需翻译 | ✅ 已完成 |
-| 2 | 后台任务队列 + 实时状态追踪 + 自动刷新 | ✅ 已完成 |
-| 3 | 品牌更名 Paper Trans → Paper Hub | ✅ 已完成 |
-| 4 | 磁盘清理定时任务（每月 1 日自动清 gpt_log）| ✅ 已完成 |
-| 5 | nginx 路径前缀部署（zzzgry.top/paper/）| ✅ 已完成 |
-| 6 | BASE_PATH / BIND_HOST 环境变量控制 | ✅ 已完成 |
+| 1 | /submit 页面：手动输入 arXiv ID 按需翻译 | ✅ |
+| 2 | 后台任务队列 + 实时状态追踪 + 自动刷新 | ✅ |
+| 3 | 品牌更名 Paper Trans → Paper Hub | ✅ |
+| 4 | 磁盘清理定时任务（每月 1 日自动清 gpt_log）| ✅ |
+| 5 | nginx 路径前缀部署（zzzgry.top/paper/）| ✅ |
+| 6 | BASE_PATH / BIND_HOST 环境变量控制 | ✅ |
+
+## ✅ Phase 5 — 社交功能 & 搜索（v3.3 ~ v3.4）
+
+| # | 功能 | 状态 |
+|---|------|------|
+| 1 | 论文删除功能（卡片 🗑️ 按钮，清除文件 + 索引 + 收藏记录）| ✅ |
+| 2 | 全局搜索 /search（中英文模糊，覆盖所有模式）| ✅ |
+| 3 | 收藏夹系统 /bookmarks（多列表、收藏/移出/移动）| ✅ |
+
+## ✅ Phase 6 — 稳定性 & 运维（v3.5）
+
+| # | 功能 | 状态 |
+|---|------|------|
+| 1 | 系统状态监控 /status（磁盘、Docker 进程、任务队列）| ✅ |
+| 2 | server 重启后任务自动恢复（_recover_stuck_jobs）| ✅ |
+| 3 | 每日凌晨 5 点自动重启 Docker 容器（清僵尸进程）| ✅ |
+| 4 | ICP 备案号展示（苏ICP备2026009771号）| ✅ |
+
+## ✅ Phase 7 — UI 细节（v3.6）
+
+| # | 功能 | 状态 |
+|---|------|------|
+| 1 | 页脚增加个人网站链接（zhaojingqian.top/about）| ✅ |
+| 2 | 标签页 📰 favicon（SVG emoji 内嵌，无需图片文件）| ✅ |
+| 3 | 修复 web_server.py 多处缩进 bug（for-else / try-except）| ✅ |

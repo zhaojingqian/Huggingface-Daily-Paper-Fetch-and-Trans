@@ -2,6 +2,24 @@
 
 ---
 
+## v3.6 — 2026-02-25
+
+### UI 优化
+
+#### 页脚增加个人网站链接
+- 底部 footer 新增「关于作者」链接，指向 `https://zhaojingqian.top/about`，与 ICP 备案号并排显示
+
+#### 标签页 favicon
+- 使用 SVG emoji 内嵌方式添加 📰 favicon，无需额外图片文件，所有页面标签页均显示报纸图标
+
+### Bug 修复
+
+#### web_server.py 缩进错误修复
+- 修复 `_upsert_manual_index()` 中 `for…else` 语句的缩进错误（`else` 误缩进为 16 空格）
+- 修复 `_do_submit_job()` 中 `if…else` 及 `try…except` 的缩进错误（导致服务启动失败 / 502）
+
+---
+
 ## 2026-02-20 (v3.1) - 收藏功能
 
 ### 新增功能

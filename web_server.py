@@ -653,6 +653,7 @@ def page(title, body, active_tab="home"):
 <html lang="zh-CN"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} — Paper Hub</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📰</text></svg>">
 <style>{CSS}</style>
 <script>window.BP="{BASE_PATH}";</script>
 </head><body>
@@ -665,7 +666,7 @@ def page(title, body, active_tab="home"):
 <div class="main">{body}</div>
 {BM_MODAL}
 {BM_JS}
-<footer style="text-align:center;padding:18px 0 14px;font-size:12px;color:#475569;border-top:1px solid #1e293b;margin-top:24px"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" style="color:#475569;text-decoration:none">苏ICP备2026009771号</a></footer>
+<footer style="text-align:center;padding:18px 0 14px;font-size:12px;color:#475569;border-top:1px solid #1e293b;margin-top:24px"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" style="color:#475569;text-decoration:none">苏ICP备2026009771号</a><span style="margin:0 10px;opacity:.4">|</span><a href="https://zhaojingqian.top/about" target="_blank" rel="noopener" style="color:#475569;text-decoration:none">关于作者</a></footer>
 </body></html>"""
     # 统一把所有内部绝对路径加上 BASE_PATH 前缀（仅当设置了前缀时）
     if BASE_PATH:
@@ -1119,7 +1120,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
-
+    
     def send_file(self, path):
         ext = os.path.splitext(path)[1].lower()
         ct_map = {".pdf":"application/pdf",".html":"text/html; charset=utf-8",
@@ -1510,7 +1511,7 @@ def build_submit_page():
   {active_section}
   {done_section}
 </div>
-<style>
+    <style>
   .spin{{display:inline-block;animation:spin 1s linear infinite;margin-left:4px}}
   @keyframes spin{{to{{transform:rotate(360deg)}}}}
 </style>
@@ -1595,9 +1596,9 @@ def build_search_page():
                background:#4f46e5;color:#fff;font-size:15px;cursor:pointer;font-weight:600">
         搜索
       </button>
-    </div>
+                    </div>
     <div id="search-info" style="margin-top:10px;font-size:13px;color:#64748b"></div>
-  </div>
+                </div>
   <div id="search-results"></div>
 </div>
 <script>
