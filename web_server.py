@@ -665,6 +665,7 @@ def page(title, body, active_tab="home"):
 <div class="main">{body}</div>
 {BM_MODAL}
 {BM_JS}
+<footer style="text-align:center;padding:18px 0 14px;font-size:12px;color:#475569;border-top:1px solid #1e293b;margin-top:24px"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" style="color:#475569;text-decoration:none">苏ICP备2026009771号</a></footer>
 </body></html>"""
     # 统一把所有内部绝对路径加上 BASE_PATH 前缀（仅当设置了前缀时）
     if BASE_PATH:
