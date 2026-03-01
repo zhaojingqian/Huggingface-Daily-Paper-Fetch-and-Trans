@@ -114,11 +114,13 @@ _SLIM_KEYS = {"arxiv_id", "rank", "upvotes", "pdf_failed"}   # index.json 只保
 def _slim(entry):
     """从完整 entry 提取 slim 字段存入 index.json"""
     s = {k: entry[k] for k in _SLIM_KEYS if k in entry}
-    # pdf_status 合并：pdf_zh 存在 → ok，pdf_zh_failed → failed
+    # pdf_status：pdf_zh 存在→ok / pdf_zh_failed→failed / pdf_status="none"→none / 其余不写
     if entry.get("pdf_zh"):
         s["pdf_status"] = "ok"
     elif entry.get("pdf_zh_failed"):
         s["pdf_status"] = "failed"
+    elif entry.get("pdf_status") == "none":
+        s["pdf_status"] = "none"
     return s
 
 
@@ -317,6 +319,21 @@ def _run_locked(mode, key, limit, do_full_translate):
                 _paper_store_update_pdf_status(aid, "failed")
                 log(f"  ❌ {aid}: {e}", mode, key)
             save_index(base_dir, mode, key, papers_data)
+
+        # 兜底：全文翻译结束后，仍无 pdf_zh 且无失败标志的条目 → 补标 failed
+        for entry in papers_data:
+            aid = entry.get("arxiv_id", "")
+            if aid and not entry.get("pdf_zh") and not entry.get("pdf_zh_failed"):
+                entry["pdf_zh_failed"] = True
+                _paper_store_update_pdf_status(aid, "failed")
+                log(f"  ⚠️ 补标 pdf_status=failed: {aid}", mode, key)
+
+        idx_file = save_index(base_dir, mode, key, papers_data)
+    else:
+        # do_full_translate=False 时，明确标记 pdf_status="none"（未尝试）
+        for entry in papers_data:
+            if not entry.get("pdf_zh") and not entry.get("pdf_zh_failed"):
+                entry["pdf_status"] = "none"
         idx_file = save_index(base_dir, mode, key, papers_data)
 
     log(f"📊 完成: 成功={ok} 失败={fail}  {idx_file}", mode, key)

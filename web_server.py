@@ -699,14 +699,23 @@ def paper_card(p, mode, key, pdir):
     upvotes    = p.get("upvotes",0)
     kws        = p.get("keywords_zh",[]) or []
 
-    # PDF 状态：paper store 为唯一来源，兼容旧版字段
-    pdf_failed = p.get("pdf_zh_failed", False)
+    # PDF 状态：paper store JSON 的 pdf_status 为唯一权威来源
+    # 同时兼容旧版 pdf_zh_failed 字段
+    pdf_status = p.get("pdf_status")       # "ok" / "failed" / None
     has_pdf    = _paper_pdf_exists(aid) or bool(
         p.get("pdf_zh") and pdir and
         os.path.exists(os.path.join(pdir, p["pdf_zh"].replace("papers/","",1))))
+    # 已有 PDF 文件时 pdf_status 以实际文件为准
+    if has_pdf:
+        pdf_status = "ok"
+    # pdf_failed: 显式失败标志 OR pdf_status="failed" OR
+    # 已翻译（有 title_zh）但无 PDF 且非"从未尝试"（pdf_status!="none"）
+    pdf_failed = (
+        p.get("pdf_zh_failed", False)
+        or pdf_status == "failed"
+        or (not has_pdf and title_zh and pdf_status not in ("ok", "none"))
+    )
 
-    # 详情页：paper store 中有元数据则可进入（web_server 动态生成），
-    # 兼容旧版：paper store 无数据时检查旧 HTML 文件
     has_html = bool(title_zh or (
         pdir and os.path.exists(os.path.join(pdir, f"{aid}.html"))))
 
@@ -1001,10 +1010,17 @@ def build_detail_page(mode, key, arxiv_id):
     authors   = entry.get("authors","")
     submitted = entry.get("submitted","")
     kws       = entry.get("keywords_zh",[]) or []
-    pdf_failed = entry.get("pdf_zh_failed", False)
     has_pdf    = _paper_pdf_exists(arxiv_id) or bool(
         entry.get("pdf_zh") and pdir and
         os.path.exists(os.path.join(pdir, entry["pdf_zh"].replace("papers/","",1))))
+    pdf_status = entry.get("pdf_status")
+    if has_pdf:
+        pdf_status = "ok"
+    pdf_failed = (
+        entry.get("pdf_zh_failed", False)
+        or pdf_status == "failed"
+        or (not has_pdf and title_zh and pdf_status not in ("ok", "none"))
+    )
 
     kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws)
     btns = [f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{arxiv_id}" target="_blank">arXiv 原文</a>',
@@ -1115,14 +1131,19 @@ def build_bookmark_list_page(lid):
             has_pdf  = _paper_pdf_exists(aid) or bool(
                 p.get("pdf_zh") and pdir and
                 os.path.exists(os.path.join(pdir, p["pdf_zh"].replace("papers/","",1))))
+            pdf_status_bm = p.get("pdf_status")
+            if has_pdf:
+                pdf_status_bm = "ok"
+            pdf_failed_bm = (
+                p.get("pdf_zh_failed", False)
+                or pdf_status_bm == "failed"
+                or (not has_pdf and title_zh and pdf_status_bm not in ("ok", "none"))
+            )
 
             kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
             if has_pdf:
-                if os.path.exists(os.path.join(PAPER_STORE_DIR, f"{aid}_zh.pdf")):
-                    pdf_btn = f'<a class="btn btn-full-pdf" href="/papers/{aid}_zh.pdf" target="_blank">📄 全文PDF</a>'
-                else:
-                    pdf_btn = f'<a class="btn btn-full-pdf" href="/{mode}/{key}/papers/{aid}_zh.pdf" target="_blank">📄 全文PDF</a>'
-            elif p.get("pdf_zh_failed"):
+                pdf_btn = f'<a class="btn btn-full-pdf" href="/papers/{aid}_zh.pdf" target="_blank">📄 全文PDF</a>'
+            elif pdf_failed_bm:
                 pdf_btn = ('<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
                            'title="全文PDF转换失败">⚠️ PDF失败</span>')
             else:
