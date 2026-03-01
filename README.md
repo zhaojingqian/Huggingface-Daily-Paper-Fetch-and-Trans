@@ -55,7 +55,15 @@ python3 run_monthly.py 2026-02 --no-full  # 仅摘要翻译
 
 ```bash
 python3 translate_full.py 2602.10388 \
-    -o data/weekly/2026-W08/papers
+    -o data/papers    # PDF 直接写入 paper store
+```
+
+### 修复空翻译
+
+```bash
+python3 run_repair.py                        # 扫描全部 mode 近 30 天
+python3 run_repair.py --mode daily --days 2  # 仅修复最近 2 天 daily
+python3 run_repair.py --mode weekly --key 2026-W09  # 指定 key
 ```
 
 ### Web 访问
@@ -75,38 +83,47 @@ paper-trans/
 ├── run_weekly.py            # 每周入口（Top 10）
 ├── run_monthly.py           # 每月入口（Top 10）
 ├── run_papers.py            # 通用处理 runner（三种模式共用）
-├── fetch_hf.py              # 统一 HF 抓取器（daily/weekly/monthly）
-├── translate_arxiv.py       # 摘要翻译 → 双语 HTML
-├── translate_full.py        # 全文翻译（容器外封装）
+├── run_repair.py            # 翻译修复扫描器（cron 自动修复空翻译）
+├── fetch_hf.py              # 统一 HF 抓取器（含指数退避重试）
+├── translate_arxiv.py       # 摘要翻译 → paper store JSON
+├── translate_full.py        # 全文翻译（容器外封装，实时流式日志）
 ├── full_translate_driver.py # 全文翻译（容器内驱动，含重试逻辑）
 ├── web_server.py            # Web 服务器（端口 18080）
 │
 ├── data/                    # 统一数据目录
-│   ├── daily/
+│   ├── papers/              # ★ 唯一数据源（paper store）
+│   │   ├── ARXIV_ID.json        # 完整元数据 + 翻译结果（所有 mode 共用）
+│   │   └── ARXIV_ID_zh.pdf      # 全文中文 PDF（所有 mode 共用）
+│   │
+│   ├── daily/               # 轻量索引（slim index）
 │   │   └── YYYY-MM-DD/
-│   │       ├── index.json
-│   │       └── papers/
-│   │           ├── ARXIV_ID.html       # 双语摘要页
-│   │           └── ARXIV_ID_zh.pdf    # 全文中文 PDF
+│   │       └── index.json       # 仅含 [{arxiv_id, rank, upvotes, pdf_status}]
 │   ├── weekly/
 │   │   └── YYYY-WNN/
-│   │       ├── index.json
-│   │       └── papers/
-│   └── monthly/
-│       └── YYYY-MM/
-│           ├── index.json
-│           └── papers/
+│   │       └── index.json
+│   ├── monthly/
+│   │   └── YYYY-MM/
+│   │       └── index.json
+│   └── manual/              # 手动按需翻译
+│       ├── jobs.json
+│       └── YYYY-MM-DD/
+│           └── index.json
 │
 ├── logs/
 │   ├── cron-daily.log
 │   ├── cron-weekly.log
 │   ├── cron-monthly.log
+│   ├── repair.log
 │   └── {mode}-{key}.log     # 每次运行的详细日志
 │
-├── README.md
-├── plan.md
-└── change.md
+└── README.md
 ```
+
+### 数据架构说明
+
+所有论文的元数据（标题、摘要、中文翻译、关键词）和 PDF 仅存一份，统一在 `data/papers/`。daily / weekly / monthly / manual 的 index.json 只保存论文 ID + 榜单顺序（rank/upvotes），web_server 在渲染时实时从 paper store 查询完整内容。
+
+**优势**：同一篇论文出现在多个榜单时，翻译只做一次、PDF 只存一份，不存在跨 mode 数据冗余。
 
 ---
 
@@ -219,7 +236,7 @@ journalctl -u paper-trans-web -f    # 实时日志
 2. **翻译** LLM 逐段翻译 `.tex` 文件（保留 LaTeX 命令）
 3. **编译** `pdflatex` 重新编译为中文 PDF
 4. **重试** 最多 3 次（每次清空缓存重新翻译）
-5. **输出** 保存到 `data/<mode>/<key>/papers/<arxiv_id>_zh.pdf`
+5. **输出** 保存到 `data/papers/<arxiv_id>_zh.pdf`（paper store，所有 mode 共用）
 
 > ⚠️ 全文翻译每篇约 5～15 分钟，依赖论文 LaTeX 源码可用性。
 > 无 LaTeX 源码或编译失败的论文不生成 PDF（摘要翻译仍可用）。
@@ -242,16 +259,19 @@ tail -f /root/workspace/paper-trans/logs/cron-daily.log
 # 查看当周翻译进度
 tail -f /root/workspace/paper-trans/logs/cron-weekly.log
 
-# 检查 PDF 生成情况
+# 检查 paper store 覆盖率
 python3 - << 'EOF'
 import json, os
 BASE = "/root/workspace/paper-trans/data"
+STORE = os.path.join(BASE, "papers")
 for mode in ["daily", "weekly", "monthly"]:
     d = os.path.join(BASE, mode)
     if not os.path.exists(d): continue
     for key in sorted(os.listdir(d))[-1:]:
         idx = json.load(open(f"{d}/{key}/index.json"))
-        pdfs = sum(1 for p in idx["papers"] if p.get("pdf_zh"))
+        pdfs = sum(1 for p in idx["papers"]
+                   if p.get("pdf_status") == "ok" or
+                   os.path.exists(os.path.join(STORE, p["arxiv_id"] + "_zh.pdf")))
         print(f"[{mode}] {key}: {pdfs}/{len(idx['papers'])} PDFs")
 EOF
 

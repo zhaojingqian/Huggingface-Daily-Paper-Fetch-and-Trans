@@ -7,11 +7,11 @@ from datetime import datetime, date
 import urllib.request
 import xml.etree.ElementTree as ET
 
-PORT       = 18080
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(BASE_DIR, "data")
-WEEKLY_DIR = os.path.join(BASE_DIR, "weekly")   # 兼容旧目录
-BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
+PORT            = 18080
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR        = os.path.join(BASE_DIR, "data")
+PAPER_STORE_DIR = os.path.join(DATA_DIR, "papers")   # 唯一数据源
+BOOKMARKS_FILE  = os.path.join(DATA_DIR, "bookmarks.json")
 _bm_lock   = threading.Lock()
 
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
@@ -206,31 +206,49 @@ def save_bookmarks(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# ── Paper Store 读取（唯一元数据源）────────────────────────────────────────
+def _read_paper_store(arxiv_id):
+    """从 data/papers/{arxiv_id}.json 读取完整元数据；不存在返回 {}"""
+    p = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _paper_pdf_exists(arxiv_id):
+    """检查 paper store 里是否有有效 PDF"""
+    p = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+    return os.path.exists(p) and os.path.getsize(p) > 10240
+
+
 def get_paper_entry(mode, key, arxiv_id):
-    """从 index.json 取论文元数据，找不到返回最小字典"""
+    """从 slim index + paper store 合并论文完整元数据"""
     idx = load_index(mode, key)
+    slim = {}
     if idx:
         for p in idx.get("papers", []):
             if p.get("arxiv_id") == arxiv_id:
-                return p
-    return {"arxiv_id": arxiv_id}
+                slim = p
+                break
+    stored = _read_paper_store(arxiv_id)
+    entry = {**stored, **slim}   # slim 字段（rank/upvotes）优先
+    entry.setdefault("arxiv_id", arxiv_id)
+    # 统一 pdf 状态
+    pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
+    if pdf_status == "ok" or _paper_pdf_exists(arxiv_id):
+        entry["pdf_zh"] = f"papers/{arxiv_id}_zh.pdf"
+        entry.pop("pdf_zh_failed", None)
+    elif pdf_status == "failed":
+        entry["pdf_zh_failed"] = True
+    return entry
 
 
 # ── 数据加载 ──────────────────────────────────────────────────────────────────
-def index_path(mode, key):
+def load_index(mode, key):
     p = os.path.join(DATA_DIR, mode, key, "index.json")
     if os.path.exists(p):
-        return p
-    # 兼容旧 weekly/ 目录
-    if mode == "weekly":
-        p2 = os.path.join(WEEKLY_DIR, key, "index.json")
-        if os.path.exists(p2):
-            return p2
-    return None
-
-def load_index(mode, key):
-    p = index_path(mode, key)
-    if p:
         try:
             return json.load(open(p, encoding="utf-8"))
         except Exception:
@@ -238,38 +256,31 @@ def load_index(mode, key):
     return None
 
 def papers_dir(mode, key):
-    """论文 HTML/PDF 所在目录"""
-    d = os.path.join(DATA_DIR, mode, key, "papers")
-    if os.path.exists(d):
-        return d
-    if mode == "weekly":
-        d2 = os.path.join(WEEKLY_DIR, key, "papers")
-        if os.path.exists(d2):
-            return d2
-    return d
+    """mode/key 下的 papers/ 子目录（可能为空，仅作路径占位）"""
+    return os.path.join(DATA_DIR, mode, key, "papers")
 
 def list_keys(mode):
-    """按时间倒序列出某 mode 下所有已有数据的 key"""
-    keys = []
+    """按时间倒序列出某 mode 下所有已有 index.json 的 key"""
     d = os.path.join(DATA_DIR, mode)
-    if os.path.exists(d):
-        keys = sorted([k for k in os.listdir(d)
-                       if os.path.isdir(os.path.join(d, k))], reverse=True)
-    # 兼容旧 weekly/
-    if mode == "weekly" and os.path.exists(WEEKLY_DIR):
-        old = sorted([k for k in os.listdir(WEEKLY_DIR)
-                      if os.path.isdir(os.path.join(WEEKLY_DIR, k))
-                      and k not in keys], reverse=True)
-        keys = sorted(list(set(keys + old)), reverse=True)
-    return keys
+    if not os.path.exists(d):
+        return []
+    return sorted(
+        [k for k in os.listdir(d) if os.path.isdir(os.path.join(d, k))],
+        reverse=True
+    )
 
 def count_pdfs(mode, key, index):
     if not index:
         return 0
-    pd = papers_dir(mode, key)
-    return sum(1 for p in index.get("papers", [])
-               if p.get("pdf_zh") and
-               os.path.exists(os.path.join(pd, p["pdf_zh"].replace("papers/", ""))))
+    count = 0
+    for p in index.get("papers", []):
+        aid = p.get("arxiv_id", "")
+        if not aid:
+            continue
+        status = p.get("pdf_status")
+        if status == "ok" or _paper_pdf_exists(aid):
+            count += 1
+    return count
 
 
 # ── CSS / 公共样式 ─────────────────────────────────────────────────────────────
@@ -321,6 +332,8 @@ a{text-decoration:none;color:inherit}
            padding:2px 7px;border-radius:8px;margin-left:6px}
 .badge-pdf{background:#dcfce7;color:#166534;font-size:10px;font-weight:700;
            padding:2px 7px;border-radius:8px}
+.badge-pdf-fail{background:#fee2e2;color:#991b1b;font-size:10px;font-weight:700;
+                padding:2px 7px;border-radius:8px;cursor:help}
 .card-title{font-size:14px;font-weight:700;color:#1e293b;line-height:1.4;margin-bottom:4px}
 .card-title-zh{font-size:13px;color:#334155;font-weight:600;margin-bottom:6px}
 .card-body{padding:10px 16px 14px;flex:1;display:flex;flex-direction:column;gap:8px}
@@ -685,16 +698,25 @@ def paper_card(p, mode, key, pdir):
     submitted  = p.get("submitted","")
     upvotes    = p.get("upvotes",0)
     kws        = p.get("keywords_zh",[]) or []
-    html_file  = p.get("html_file","")
-    pdf_zh     = p.get("pdf_zh","")
 
-    has_pdf  = bool(pdf_zh and pdir and
-                    os.path.exists(os.path.join(pdir, pdf_zh.replace("papers/","",1))))
-    has_html = bool(html_file and pdir and
-                    os.path.exists(os.path.join(pdir, html_file.replace("papers/","",1))))
+    # PDF 状态：paper store 为唯一来源，兼容旧版字段
+    pdf_failed = p.get("pdf_zh_failed", False)
+    has_pdf    = _paper_pdf_exists(aid) or bool(
+        p.get("pdf_zh") and pdir and
+        os.path.exists(os.path.join(pdir, p["pdf_zh"].replace("papers/","",1))))
+
+    # 详情页：paper store 中有元数据则可进入（web_server 动态生成），
+    # 兼容旧版：paper store 无数据时检查旧 HTML 文件
+    has_html = bool(title_zh or (
+        pdir and os.path.exists(os.path.join(pdir, f"{aid}.html"))))
 
     rank_badge  = f'<span class="rank">#{rank}</span>' if rank else ""
-    pdf_badge   = '<span class="badge-pdf">✅ PDF</span>' if has_pdf else ""
+    if has_pdf:
+        pdf_badge = '<span class="badge-pdf">✅ PDF</span>'
+    elif pdf_failed:
+        pdf_badge = '<span class="badge-pdf-fail" title="全文PDF转换失败，可在详情页重试">⚠️ PDF失败</span>'
+    else:
+        pdf_badge = ""
     up_badge    = f'<span class="badge-new">▲ {upvotes}</span>' if upvotes else ""
 
     kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
@@ -717,7 +739,11 @@ def paper_card(p, mode, key, pdir):
     if has_html:
         btns.append(f'<a class="btn btn-detail" href="/{mode}/{key}/papers/{aid}">🔍 详情</a>')
     if has_pdf:
-        pdf_url = f"/{mode}/{key}/{pdf_zh}"
+        # 统一 PDF URL：paper store 优先，兼容旧路径
+        if os.path.exists(os.path.join(PAPER_STORE_DIR, f"{aid}_zh.pdf")):
+            pdf_url = f"/papers/{aid}_zh.pdf"
+        else:
+            pdf_url = f"/{mode}/{key}/papers/{aid}_zh.pdf"
         btns.append(f'<a class="btn btn-full-pdf" href="{pdf_url}" target="_blank">📄 全文PDF</a>')
     btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
     btns.append(f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文PDF</a>')
@@ -790,17 +816,35 @@ def build_papers_page(mode, key):
         body = f'<div class="empty"><div class="empty-icon">📭</div><p>暂无数据 {key}</p></div>'
         return page(key, body, active_tab=mode)
 
-    papers  = idx.get("papers",[])
-    n_pdfs  = count_pdfs(mode, key, idx)
+    slim_papers = idx.get("papers",[])
     gen_at  = idx.get("generated_at","")
 
+    # 合并 slim index + paper store，得到完整 entry 列表
+    full_papers = []
+    for slim in slim_papers:
+        aid = slim.get("arxiv_id", "")
+        if not aid:
+            continue
+        stored = _read_paper_store(aid)
+        entry = {**stored, **slim}
+        entry.setdefault("arxiv_id", aid)
+        # 统一 pdf 状态
+        pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
+        if pdf_status == "ok" or _paper_pdf_exists(aid):
+            entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
+            entry.pop("pdf_zh_failed", None)
+        elif pdf_status == "failed":
+            entry["pdf_zh_failed"] = True
+        full_papers.append(entry)
+
+    n_pdfs = sum(1 for p in full_papers if p.get("pdf_zh") and not p.get("pdf_zh_failed"))
     stats = f"""<div class="stats">
-  <div class="stat-card"><div class="stat-val">{len(papers)}</div><div class="stat-lbl">论文总数</div></div>
+  <div class="stat-card"><div class="stat-val">{len(full_papers)}</div><div class="stat-lbl">论文总数</div></div>
   <div class="stat-card green"><div class="stat-val">{n_pdfs}</div><div class="stat-lbl">全文 PDF</div></div>
   <div class="stat-card purple"><div class="stat-val">{gen_at[:10] if gen_at else "—"}</div><div class="stat-lbl">更新日期</div></div>
 </div>"""
 
-    cards = "".join(paper_card(p, mode, key, pdir) for p in papers)
+    cards = "".join(paper_card(p, mode, key, pdir) for p in full_papers)
     back_link = {"daily":"/","weekly":"/weekly","monthly":"/monthly"}.get(mode,"/")
     body = (f'<div style="margin-bottom:12px">'
             f'<a class="btn btn-back" href="{back_link}">← 返回列表</a></div>'
@@ -814,16 +858,13 @@ def _delete_paper(mode, key, arxiv_id):
     """删除一篇论文：本地文件 + index.json 条目 + 收藏记录"""
     import glob as _glob
 
-    # 1. 删本地文件（papers/ 目录下所有以 arxiv_id 开头的文件）
-    papers_dir = os.path.join(DATA_DIR, mode, key, "papers")
-    if not os.path.isdir(papers_dir):
-        papers_dir = os.path.join(BASE_DIR, "weekly", key, "papers")
-    if os.path.isdir(papers_dir):
-        for fpath in _glob.glob(os.path.join(papers_dir, arxiv_id + "*")):
-            try:
-                os.remove(fpath)
-            except Exception:
-                pass
+    # 1. 删 paper store 中的 PDF（JSON 不删，其他 mode 可能还在引用）
+    store_pdf = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+    if os.path.exists(store_pdf):
+        try:
+            os.remove(store_pdf)
+        except Exception:
+            pass
 
     # 2. 从 index.json 移除条目
     idx_file = os.path.join(DATA_DIR, mode, key, "index.json")
@@ -861,6 +902,28 @@ def _delete_paper(mode, key, arxiv_id):
                 _save_jobs(jobs)
 
 
+def _enrich_slim_papers(slim_list, mode, key, limit=None):
+    """将 slim index 条目列表与 paper store 合并，返回完整 entry 列表"""
+    results = []
+    items = slim_list[:limit] if limit else slim_list
+    pd = papers_dir(mode, key)
+    for slim in items:
+        aid = slim.get("arxiv_id", "")
+        if not aid:
+            continue
+        stored = _read_paper_store(aid)
+        entry = {**stored, **slim}
+        entry.setdefault("arxiv_id", aid)
+        pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
+        if pdf_status == "ok" or _paper_pdf_exists(aid):
+            entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
+            entry.pop("pdf_zh_failed", None)
+        elif pdf_status == "failed":
+            entry["pdf_zh_failed"] = True
+        results.append(entry)
+    return results, pd
+
+
 def build_home():
     """首页：汇总最新一期 daily / weekly / monthly"""
     sections = []
@@ -870,10 +933,8 @@ def build_home():
     if daily_keys:
         k   = daily_keys[0]
         idx = load_index("daily", k)
-        pd  = papers_dir("daily", k)
-        n   = len((idx or {}).get("papers",[]))
-        papers_html = "".join(paper_card(p,"daily",k,pd)
-                              for p in (idx or {}).get("papers",[]))
+        full, pd = _enrich_slim_papers((idx or {}).get("papers",[]), "daily", k)
+        papers_html = "".join(paper_card(p,"daily",k,pd) for p in full)
         sections.append(
             f'<div class="section-title">📅 每日精选 <span class="badge">{k} · Top 3</span>'
             f'&nbsp;<a href="/daily/{k}" style="font-size:12px;color:#4f46e5">查看全部 →</a></div>'
@@ -885,9 +946,8 @@ def build_home():
     if weekly_keys:
         k   = weekly_keys[0]
         idx = load_index("weekly", k)
-        pd  = papers_dir("weekly", k)
-        papers_html = "".join(paper_card(p,"weekly",k,pd)
-                              for p in (idx or {}).get("papers",[])[:5])
+        full, pd = _enrich_slim_papers((idx or {}).get("papers",[]), "weekly", k, limit=5)
+        papers_html = "".join(paper_card(p,"weekly",k,pd) for p in full)
         sections.append(
             f'<div class="section-title">📚 本周热榜 <span class="badge">{k} · Top 10</span>'
             f'&nbsp;<a href="/weekly/{k}" style="font-size:12px;color:#4f46e5">查看全部 →</a></div>'
@@ -899,9 +959,8 @@ def build_home():
     if monthly_keys:
         k   = monthly_keys[0]
         idx = load_index("monthly", k)
-        pd  = papers_dir("monthly", k)
-        papers_html = "".join(paper_card(p,"monthly",k,pd)
-                              for p in (idx or {}).get("papers",[])[:3])
+        full, pd = _enrich_slim_papers((idx or {}).get("papers",[]), "monthly", k, limit=3)
+        papers_html = "".join(paper_card(p,"monthly",k,pd) for p in full)
         sections.append(
             f'<div class="section-title">📆 本月热榜 <span class="badge">{k} · Top 10</span>'
             f'&nbsp;<a href="/monthly/{k}" style="font-size:12px;color:#4f46e5">查看全部 →</a></div>'
@@ -927,18 +986,13 @@ def build_home():
 
 
 def build_detail_page(mode, key, arxiv_id):
-    """单篇论文详情页"""
-    idx  = load_index(mode, key)
-    pdir = papers_dir(mode, key)
-    entry = None
-    if idx:
-        for p in idx.get("papers",[]):
-            if p.get("arxiv_id") == arxiv_id:
-                entry = p
-                break
+    """单篇论文详情页：优先从 paper store 读取，slim index 作补充"""
+    pdir  = papers_dir(mode, key)
+    entry = get_paper_entry(mode, key, arxiv_id)
 
-    if not entry:
-        return None  # 尝试从 HTML 文件读
+    # 如果连 title 都没有，说明既无 paper store 也无 index 记录
+    if not entry.get("title") and not entry.get("title_zh"):
+        return None  # 让上层尝试旧 HTML 文件
 
     title     = entry.get("title","") or arxiv_id
     title_zh  = entry.get("title_zh","")
@@ -947,15 +1001,23 @@ def build_detail_page(mode, key, arxiv_id):
     authors   = entry.get("authors","")
     submitted = entry.get("submitted","")
     kws       = entry.get("keywords_zh",[]) or []
-    pdf_zh    = entry.get("pdf_zh","")
-    has_pdf   = bool(pdf_zh and pdir and
-                     os.path.exists(os.path.join(pdir, pdf_zh.replace("papers/","",1))))
+    pdf_failed = entry.get("pdf_zh_failed", False)
+    has_pdf    = _paper_pdf_exists(arxiv_id) or bool(
+        entry.get("pdf_zh") and pdir and
+        os.path.exists(os.path.join(pdir, entry["pdf_zh"].replace("papers/","",1))))
 
     kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws)
     btns = [f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{arxiv_id}" target="_blank">arXiv 原文</a>',
             f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{arxiv_id}" target="_blank">原文 PDF</a>']
     if has_pdf:
-        btns.insert(0, f'<a class="btn btn-full-pdf" href="/{mode}/{key}/{pdf_zh}" target="_blank">📄 全文中文 PDF</a>')
+        if os.path.exists(os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")):
+            pdf_url = f"/papers/{arxiv_id}_zh.pdf"
+        else:
+            pdf_url = f"/{mode}/{key}/papers/{arxiv_id}_zh.pdf"
+        btns.insert(0, f'<a class="btn btn-full-pdf" href="{pdf_url}" target="_blank">📄 全文中文 PDF</a>')
+    elif pdf_failed:
+        btns.insert(0, '<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
+                       'title="LaTeX源码编译失败，该论文可能含不兼容宏包">⚠️ 全文PDF转换失败</span>')
     back = {"daily":f"/daily/{key}","weekly":f"/weekly/{key}","monthly":f"/monthly/{key}"}.get(mode,"/")
 
     body = f"""<div class="detail-wrap">
@@ -1042,22 +1104,29 @@ def build_bookmark_list_page(lid):
             mode  = entry.get("mode", "")
             key   = entry.get("key", "")
             added = entry.get("added", "")[:10]
-            # 从 index.json 拉取完整元数据
+            # 从 paper store 拉取完整元数据（slim index 作补充）
             p    = get_paper_entry(mode, key, aid)
             pdir = papers_dir(mode, key) if mode and key else None
 
-            # 构造卡片 HTML（复用 paper_card 的大部分逻辑）
             title    = p.get("title","") or aid
             title_zh = p.get("title_zh","")
             sum_zh   = p.get("summary_zh","")
             kws      = p.get("keywords_zh",[]) or []
-            has_pdf  = bool(p.get("pdf_zh") and pdir and
-                            os.path.exists(os.path.join(pdir,
-                                p["pdf_zh"].replace("papers/","",1))))
+            has_pdf  = _paper_pdf_exists(aid) or bool(
+                p.get("pdf_zh") and pdir and
+                os.path.exists(os.path.join(pdir, p["pdf_zh"].replace("papers/","",1))))
 
             kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
-            pdf_btn = (f'<a class="btn btn-full-pdf" href="/{mode}/{key}/{p["pdf_zh"]}" target="_blank">📄 全文PDF</a>'
-                       if has_pdf else "")
+            if has_pdf:
+                if os.path.exists(os.path.join(PAPER_STORE_DIR, f"{aid}_zh.pdf")):
+                    pdf_btn = f'<a class="btn btn-full-pdf" href="/papers/{aid}_zh.pdf" target="_blank">📄 全文PDF</a>'
+                else:
+                    pdf_btn = f'<a class="btn btn-full-pdf" href="/{mode}/{key}/papers/{aid}_zh.pdf" target="_blank">📄 全文PDF</a>'
+            elif p.get("pdf_zh_failed"):
+                pdf_btn = ('<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
+                           'title="全文PDF转换失败">⚠️ PDF失败</span>')
+            else:
+                pdf_btn = ""
 
             # 移动到其他列表的 <select>
             mv_opts = "".join(f'<option value="{k}">{v}</option>' for k, v in other_lists.items())
@@ -1318,8 +1387,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query).get("q", [""])[0].strip()
             results = search_papers(q) if q else []
             cards_html = "".join(
-                paper_card(p, p["_mode"], p["_key"],
-                           os.path.join(DATA_DIR, p["_mode"], p["_key"], "papers"))
+                paper_card(p, p["_mode"], p["_key"], papers_dir(p["_mode"], p["_key"]))
                 for p in results
             )
             html_block = (f'<div class="cards">{cards_html}</div>'
@@ -1340,6 +1408,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send_html(html)
                 return self.send_404("收藏列表不存在")
 
+        # ── /papers/<arxiv_id>_zh.pdf  paper store PDF ───────
+        if len(parts) == 2 and parts[0] == "papers" and parts[1].endswith("_zh.pdf"):
+            fp = os.path.join(PAPER_STORE_DIR, parts[1])
+            if os.path.exists(fp):
+                return self.send_file(fp)
+            return self.send_404(parts[1])
+
         # ── /  首页 ──────────────────────────────────────
         if not parts:
             return self.send_html(build_home())
@@ -1353,47 +1428,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             mode, key = parts
             return self.send_html(build_papers_page(mode, key))
 
-        # ── /MODE/KEY/papers/NAME  详情页 或 文件下载 ────────
+        # ── /MODE/KEY/papers/ARXIV_ID  详情页（动态生成）────────
         if len(parts) == 4 and parts[0] in ("daily","weekly","monthly","manual") and parts[2] == "papers":
             mode, key, _, name = parts
-            # arXiv ID 格式：YYMM.NNNNN（纯数字 + 一个点）
-            # PDF/HTML 文件名含 "_zh" 或 ".html" 等后缀，不匹配此模式
             if re.match(r'^\d{4}\.\d+$', name):
                 html = build_detail_page(mode, key, name)
                 if html:
                     return self.send_html(html)
-                # index 中未找到则回退到 HTML 文件
-                name = name + ".html"
-            # 以文件形式伺服（PDF / HTML / 其他）
-            for base in [os.path.join(DATA_DIR, mode, key, "papers"),
-                         os.path.join(WEEKLY_DIR, key, "papers")]:
-                fp = os.path.join(base, name)
-                if os.path.exists(fp):
-                    return self.send_file(fp)
+                return self.send_404(f"{name} 未找到")
             return self.send_404(f"{name} 未找到")
-
-        # ── /MODE/KEY/...  其他文件（兼容 5 段以上路径）────────
-        if len(parts) >= 4 and parts[0] in ("daily","weekly","monthly","manual"):
-            mode = parts[0]; key = parts[1]
-            rel  = "/".join(parts[2:])
-            for base in [os.path.join(DATA_DIR, mode, key),
-                         os.path.join(WEEKLY_DIR, key)]:
-                fp = os.path.join(base, rel)
-                if os.path.exists(fp) and os.path.isfile(fp):
-                    return self.send_file(fp)
-            return self.send_404(rel)
-
-        # ── 兼容旧 /2026-W08/... 路径 ─────────────────────
-        if parts[0].startswith("20") and ("W" in parts[0] or "-" in parts[0]):
-            key = parts[0]
-            if len(parts) == 1:
-                return self.send_html(build_papers_page("weekly", key))
-            # 静态文件
-            for base in [os.path.join(DATA_DIR, "weekly", key),
-                         os.path.join(WEEKLY_DIR, key)]:
-                fp = os.path.join(base, *parts[1:])
-                if os.path.exists(fp) and os.path.isfile(fp):
-                    return self.send_file(fp)
 
         self.send_404(raw)
 
@@ -1464,18 +1507,10 @@ def build_submit_page():
         if not key_val:
             continue
         pdir = os.path.join(MANUAL_DIR, key_val, "papers")
-        # 从 index.json 里取完整 paper entry
-        idx_file = os.path.join(MANUAL_DIR, key_val, "index.json")
-        paper_entry = {"arxiv_id": aid}
-        try:
-            with open(idx_file, encoding="utf-8") as f:
-                idx_data = json.load(f)
-            for p in idx_data.get("papers", []):
-                if p.get("arxiv_id") == aid:
-                    paper_entry = p
-                    break
-        except Exception:
-            pass
+        # 从 paper store 读完整元数据，slim index 作补充
+        paper_entry = get_paper_entry("manual", key_val, aid)
+        if not paper_entry.get("title") and not paper_entry.get("title_zh"):
+            paper_entry = {"arxiv_id": aid}
         done_cards += paper_card(paper_entry, "manual", key_val, pdir)
 
     if done_cards:
@@ -1561,9 +1596,14 @@ def search_papers(query, limit=60):
                     idx = json.load(f)
             except Exception:
                 continue
-            for p in idx.get("papers", []):
+            for slim in idx.get("papers", []):
+                aid = slim.get("arxiv_id", "")
+                if not aid:
+                    continue
+                stored = _read_paper_store(aid)
+                p = {**stored, **slim}
                 fields = " ".join([
-                    p.get("arxiv_id", ""),
+                    aid,
                     p.get("title", ""),
                     p.get("title_zh", ""),
                     p.get("summary_zh", ""),

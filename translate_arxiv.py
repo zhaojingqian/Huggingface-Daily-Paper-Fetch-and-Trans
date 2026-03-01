@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import re
+import time
 import requests
 import argparse
 from datetime import datetime
@@ -17,6 +18,62 @@ from pathlib import Path
 # 读取 gpt-academic 配置
 GPT_ACADEMIC_CONFIG = "/root/workspace/gpt-academic/config_private.py"
 PROXY = "http://127.0.0.1:7890"
+
+# Paper Store — 所有论文元数据/翻译的唯一存储（daily/weekly/monthly 共用）
+_BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+PAPER_STORE_DIR = os.path.join(_BASE_DIR, "data", "papers")
+
+
+def _has_chinese(text):
+    """检查字符串中是否包含中文字符"""
+    return bool(re.search(r'[\u4e00-\u9fff]', text or ""))
+
+
+# ── Paper Store 读写 ──────────────────────────────────────────────────────────
+def paper_store_path(arxiv_id):
+    os.makedirs(PAPER_STORE_DIR, exist_ok=True)
+    return os.path.join(PAPER_STORE_DIR, f"{arxiv_id}.json")
+
+
+def paper_store_read(arxiv_id):
+    """读取 paper store；若不存在或 title_zh 为空则返回 None"""
+    try:
+        with open(paper_store_path(arxiv_id), encoding="utf-8") as f:
+            data = json.load(f)
+        if _has_chinese(data.get("title_zh", "")):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def paper_store_write_raw(payload):
+    """直接写入已构建好的 payload dict"""
+    try:
+        with open(paper_store_path(payload["arxiv_id"]), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  ⚠️ paper store 写入失败: {e}", flush=True)
+
+
+def paper_store_write(arxiv_id, meta, translation):
+    """将元数据 + 翻译结果合并写入 paper store"""
+    payload = {
+        "arxiv_id":   arxiv_id,
+        "stored_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "title":      meta.get("title", ""),
+        "abstract":   meta.get("abstract", ""),
+        "authors":    meta.get("authors", ""),
+        "submitted":  meta.get("submitted", ""),
+        "url":        meta.get("url", ""),
+        "pdf_url":    meta.get("pdf_url", ""),
+        "title_zh":   translation.get("title_zh", ""),
+        "abstract_zh":translation.get("abstract_zh", ""),
+        "keywords_zh":translation.get("keywords_zh", []),
+        "summary_zh": translation.get("summary_zh", ""),
+    }
+    paper_store_write_raw(payload)
+
 
 
 def load_api_config():
@@ -55,8 +112,8 @@ def load_api_config():
     return config
 
 
-def call_llm(messages, config, max_tokens=4000):
-    """调用 LLM API"""
+def call_llm(messages, config, max_tokens=4000, max_retries=3):
+    """调用 LLM API，带指数退避重试（代理失败自动切直连）"""
     url = config["api_base"]
     if not url.endswith("/chat/completions"):
         url = url.rstrip("/") + "/chat/completions"
@@ -74,24 +131,41 @@ def call_llm(messages, config, max_tokens=4000):
     }
 
     proxies = {"http": PROXY, "https": PROXY}
+    last_exc = None
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload,
-                             proxies=proxies, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-    except requests.exceptions.ProxyError:
-        # 无代理重试
+    for attempt in range(max_retries):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            resp = requests.post(url, headers=headers, json=payload,
+                                 proxies=proxies, timeout=120)
             resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            return resp.json()["choices"][0]["message"]["content"]
+        except requests.exceptions.ProxyError:
+            if proxies:
+                print("  ⚠️ LLM 代理失败，切换直连重试...", flush=True)
+                proxies = None
+                last_exc = None
+                continue
+            last_exc = RuntimeError("代理不可用且直连也失败")
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"  ⚠️ LLM 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
+            if proxies:
+                print("  ⚠️ 切换直连重试...", flush=True)
+                proxies = None
+            elif attempt < max_retries - 1:
+                print(f"  ⚠️ 等待 {wait}s 后重试...", flush=True)
+                time.sleep(wait)
         except Exception as e:
-            raise RuntimeError(f"API 调用失败: {e}")
-    except Exception as e:
-        raise RuntimeError(f"API 调用失败: {e}")
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"  ⚠️ LLM 调用失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
+            if attempt < max_retries - 1:
+                time.sleep(wait)
+
+    raise RuntimeError(f"LLM API 调用失败（已重试 {max_retries} 次）: {last_exc}")
 
 
 def fetch_arxiv_metadata(arxiv_id, use_proxy=True):
@@ -156,8 +230,8 @@ def fetch_arxiv_metadata(arxiv_id, use_proxy=True):
         }
 
 
-def translate_paper(meta, config):
-    """使用 LLM 翻译论文标题和摘要"""
+def translate_paper(meta, config, max_retries=3):
+    """使用 LLM 翻译论文标题和摘要，带重试和中文校验"""
     title = meta.get("title", "")
     abstract = meta.get("abstract", "")
 
@@ -185,16 +259,36 @@ def translate_paper(meta, config):
         {"role": "user", "content": prompt}
     ]
 
-    try:
-        result = call_llm(messages, config, max_tokens=2000)
-        # 提取 JSON
-        json_match = re.search(r'\{.*\}', result, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        return {"title_zh": "", "abstract_zh": result, "keywords_zh": [], "summary_zh": ""}
-    except Exception as e:
-        print(f"  ⚠️ 翻译失败: {e}")
-        return {"title_zh": "", "abstract_zh": "", "keywords_zh": [], "summary_zh": ""}
+    empty = {"title_zh": "", "abstract_zh": "", "keywords_zh": [], "summary_zh": ""}
+
+    for attempt in range(max_retries):
+        try:
+            result = call_llm(messages, config, max_tokens=2000)
+            json_match = re.search(r'\{.*\}', result, re.DOTALL)
+            if not json_match:
+                print(f"  ⚠️ 翻译响应不含 JSON (尝试 {attempt+1}/{max_retries})", flush=True)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                continue
+            parsed = json.loads(json_match.group())
+            # 校验：title_zh 必须含中文字符
+            if not _has_chinese(parsed.get("title_zh", "")):
+                print(f"  ⚠️ title_zh 无中文内容，重试 ({attempt+1}/{max_retries})...", flush=True)
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                continue
+            return parsed
+        except json.JSONDecodeError as e:
+            print(f"  ⚠️ JSON 解析失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            print(f"  ⚠️ 翻译失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
+    print(f"  ❌ 翻译最终失败（已重试 {max_retries} 次）", flush=True)
+    return empty
 
 
 def generate_html(meta, translation, rank, week_str, pdf_zh=None):
@@ -446,30 +540,50 @@ def generate_html(meta, translation, rank, week_str, pdf_zh=None):
 
 
 def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None):
-    """翻译一篇论文并保存 HTML"""
+    """翻译一篇论文并保存 HTML（优先命中共享缓存，跨 daily/weekly/monthly 复用）"""
     if config is None:
         config = load_api_config()
 
     print(f"\n📝 [{rank}] 处理论文: {arxiv_id}", flush=True)
 
-    # 获取元数据
-    print(f"  🔍 获取元数据...", flush=True)
-    meta = fetch_arxiv_metadata(arxiv_id)
+    # ── 1. 命中 paper store（跨 mode/key 复用，无需重复翻译）─────────────────
+    cached = paper_store_read(arxiv_id)
+    if cached:
+        print(f"  ⚡ paper store 命中: {cached['title_zh'][:50]}...", flush=True)
+        meta = {
+            "arxiv_id": arxiv_id,
+            "title":    cached.get("title", ""),
+            "abstract": cached.get("abstract", ""),
+            "authors":  cached.get("authors", ""),
+            "submitted":cached.get("submitted", ""),
+            "url":      cached.get("url", f"https://arxiv.org/abs/{arxiv_id}"),
+            "pdf_url":  cached.get("pdf_url", f"https://arxiv.org/pdf/{arxiv_id}"),
+        }
+        translation = {
+            "title_zh":   cached.get("title_zh", ""),
+            "abstract_zh":cached.get("abstract_zh", ""),
+            "keywords_zh":cached.get("keywords_zh", []),
+            "summary_zh": cached.get("summary_zh", ""),
+        }
+    else:
+        # ── 2. 无缓存：抓取元数据 + LLM 翻译 ──────────────────────────────────
+        print(f"  🔍 获取元数据...", flush=True)
+        meta = fetch_arxiv_metadata(arxiv_id)
 
-    if meta.get("title"):
-        print(f"  📌 标题: {meta['title'][:60]}...", flush=True)
+        if meta.get("title"):
+            print(f"  📌 标题: {meta['title'][:60]}...", flush=True)
 
-    # 翻译
-    print(f"  🌐 翻译中...", flush=True)
-    translation = translate_paper(meta, config)
+        print(f"  🌐 翻译中...", flush=True)
+        translation = translate_paper(meta, config)
 
-    if translation.get("title_zh"):
-        print(f"  ✅ 译文: {translation['title_zh'][:50]}...", flush=True)
+        if translation.get("title_zh"):
+            print(f"  ✅ 译文: {translation['title_zh'][:50]}...", flush=True)
+            # 写入 paper store，供后续 mode/key 直接复用
+            paper_store_write(arxiv_id, meta, translation)
 
-    # 生成 HTML
+    # ── 3. 生成 HTML（week_str 决定返回链接，每个 mode/key 单独生成）──────────
     html = generate_html(meta, translation, rank, week_str)
 
-    # 保存
     os.makedirs(output_dir, exist_ok=True)
     html_path = os.path.join(output_dir, f"{arxiv_id}.html")
     with open(html_path, "w", encoding="utf-8") as f:
@@ -478,15 +592,15 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None):
     print(f"  💾 已保存: {html_path}", flush=True)
 
     return {
-        "arxiv_id": arxiv_id,
-        "title": meta.get("title", ""),
-        "title_zh": translation.get("title_zh", ""),
+        "arxiv_id":   arxiv_id,
+        "title":      meta.get("title", ""),
+        "title_zh":   translation.get("title_zh", ""),
         "summary_zh": translation.get("summary_zh", ""),
-        "keywords_zh": translation.get("keywords_zh", []),
-        "authors": meta.get("authors", ""),
-        "submitted": meta.get("submitted", ""),
-        "url": meta.get("url", ""),
-        "html_file": f"{arxiv_id}.html",
+        "keywords_zh":translation.get("keywords_zh", []),
+        "authors":    meta.get("authors", ""),
+        "submitted":  meta.get("submitted", ""),
+        "url":        meta.get("url", ""),
+        "html_file":  f"{arxiv_id}.html",
     }
 
 

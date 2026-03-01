@@ -26,9 +26,9 @@ CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
 def check_container():
     r = subprocess.run(
         ["docker", "ps", "-q", "-f", f"name={CONTAINER_NAME}"],
-        capture_output=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    return r.stdout.strip() != ""
+    return r.stdout.strip() != b""
 
 
 def copy_driver_to_container():
@@ -36,14 +36,15 @@ def copy_driver_to_container():
     r = subprocess.run(
         ["docker", "cp", DRIVER_SCRIPT,
          f"{CONTAINER_NAME}:/tmp/full_translate_driver.py"],
-        capture_output=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     return r.returncode == 0
 
 
 def run_in_container(arxiv_id: str, no_cache: bool, timeout: int):
     """
-    在容器内运行翻译驱动，返回 (returncode, stdout, stderr)
+    在容器内运行翻译驱动，实时流式打印进度，返回 (returncode, stdout_full, "")
+    每 30s 打印一次心跳，避免长时间无输出让人误以为卡死。
     """
     cmd = [
         "docker", "exec", CONTAINER_NAME,
@@ -52,17 +53,60 @@ def run_in_container(arxiv_id: str, no_cache: bool, timeout: int):
     if no_cache:
         cmd.append("--no-cache")
 
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,   # 合并 stderr → stdout
+    )
+
+    collected = []
+    t_start   = time.time()
+    t_beat    = t_start   # 上次心跳时间
+    BEAT_INTERVAL = 30    # 秒
+
     try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-        return (result.returncode,
-                result.stdout.decode("utf-8", errors="replace"),
-                result.stderr.decode("utf-8", errors="replace"))
-    except subprocess.TimeoutExpired:
-        return -1, "", f"超时 ({timeout}s)"
+        while True:
+            # 非阻塞检查进程是否结束
+            retcode = proc.poll()
+
+            # 读取当前所有可用行（非阻塞）
+            while True:
+                line_b = proc.stdout.readline()
+                if not line_b:
+                    break
+                line = line_b.decode("utf-8", errors="replace").rstrip()
+                collected.append(line)
+                # 只打印有意义的行（驱动标记 + 结果）
+                if any(tag in line for tag in ("[driver]", "RESULT:", "✅", "❌", "⚠")):
+                    elapsed = int(time.time() - t_start)
+                    print(f"   [{elapsed:4d}s] {line}", flush=True)
+
+            # 心跳：距上次心跳超过 BEAT_INTERVAL 且进程还在运行
+            now = time.time()
+            if retcode is None and now - t_beat >= BEAT_INTERVAL:
+                elapsed = int(now - t_start)
+                print(f"   ⏳ 翻译进行中... 已用 {elapsed}s / {timeout}s", flush=True)
+                t_beat = now
+
+            if retcode is not None:
+                # 进程已结束，读尽剩余输出
+                for line_b in proc.stdout:
+                    line = line_b.decode("utf-8", errors="replace").rstrip()
+                    collected.append(line)
+                    if any(tag in line for tag in ("[driver]", "RESULT:", "✅", "❌", "⚠")):
+                        elapsed = int(time.time() - t_start)
+                        print(f"   [{elapsed:4d}s] {line}", flush=True)
+                return retcode, "\n".join(collected), ""
+
+            if time.time() - t_start > timeout:
+                proc.kill()
+                return -1, "\n".join(collected), f"超时 ({timeout}s)"
+
+            time.sleep(1)
+
+    except Exception as e:
+        proc.kill()
+        return -1, "\n".join(collected), str(e)
 
 
 def extract_result(stdout: str):
@@ -80,7 +124,7 @@ def copy_from_container(container_path: str, local_path: str):
     r = subprocess.run(
         ["docker", "cp",
          f"{CONTAINER_NAME}:{container_path}", local_path],
-        capture_output=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     return r.returncode == 0
 
@@ -117,11 +161,6 @@ def translate_full(arxiv_id: str, output_dir: str,
     rc, stdout, stderr = run_in_container(arxiv_id, no_cache, timeout)
     elapsed = time.time() - t0
     print(f"⏱️  耗时: {elapsed:.0f}s", flush=True)
-
-    # 打印容器内日志（过滤掉 INFO/DEBUG 级别的噪声）
-    for line in stdout.splitlines():
-        if "[driver]" in line or "RESULT:" in line:
-            print(f"   {line}", flush=True)
 
     if rc == -1:
         result['error'] = f"超时 ({timeout}s)"
