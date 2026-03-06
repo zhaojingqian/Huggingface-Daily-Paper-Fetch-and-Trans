@@ -2,6 +2,16 @@
 
 ---
 
+## v3.7 — 2026-03-06
+
+### Bug 修复
+
+#### 手动提交论文的全文 PDF 404 问题
+- **根因**：`_do_submit_job` 将翻译好的 PDF 只存入 `data/manual/DATE/papers/`，未同步到 `data/papers/`（PAPER_STORE_DIR）。`_paper_pdf_exists()` 检查 paper store 返回 False，导致卡片生成 URL `/manual/KEY/papers/ARXIV_ID_zh.pdf`，该路由不存在故返回 404。
+- **修复**：全文翻译成功后，用 `shutil.copy2` 将 PDF 同步复制到 `PAPER_STORE_DIR`（`data/papers/`），与 daily/weekly/monthly 流程保持一致。此后 `_paper_pdf_exists()` 正确返回 True，PDF 通过统一的 `/papers/ARXIV_ID_zh.pdf` 路由提供服务，不再 404。
+
+---
+
 ## v3.6 — 2026-02-25
 
 ### UI 优化

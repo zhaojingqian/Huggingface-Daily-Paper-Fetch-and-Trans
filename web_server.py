@@ -143,9 +143,15 @@ def _do_submit_job(arxiv_id):
         _update_job(arxiv_id, title_zh=result.get("title_zh", ""),
                     status="full_pdf", msg="正在翻译全文 PDF（耗时较长）...")
         from translate_full import translate_full
+        import shutil as _shutil
         r = translate_full(arxiv_id=arxiv_id, output_dir=papers_dir,
                            no_cache=False, timeout=3600)
         if r.get("pdf_path"):
+            # 将 PDF 统一归档到 paper store，与 daily/weekly/monthly 保持一致
+            src_pdf  = r["pdf_path"]
+            dst_pdf  = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+            os.makedirs(PAPER_STORE_DIR, exist_ok=True)
+            _shutil.copy2(src_pdf, dst_pdf)
             paper_entry["pdf_zh"] = "papers/" + arxiv_id + "_zh.pdf"
             _upsert_manual_index(mode, key, paper_entry)
             _update_job(arxiv_id, status="done", msg="完成",
