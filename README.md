@@ -66,6 +66,20 @@ python3 run_repair.py --mode daily --days 2  # 仅修复最近 2 天 daily
 python3 run_repair.py --mode weekly --key 2026-W09  # 指定 key
 ```
 
+### 补抓 fetch 失败的日期
+
+当网络故障导致 `run_daily.py` 在 23:00 完全无法抓取（未生成 `index.json`）时，用 `--refetch` 模式补救：
+
+```bash
+python3 run_repair.py --refetch                       # 补抓全部 mode 近 30 天缺失 key
+python3 run_repair.py --refetch --mode daily --days 3 # 仅补抓近 3 天 daily
+python3 run_repair.py --refetch --mode weekly --days 14
+python3 run_repair.py --refetch --mode monthly --days 60
+```
+
+> `--refetch` 与普通 `repair` 的区别：repair 修复**已有** index.json 中翻译为空的条目；
+> refetch 补抓**根本没有** index.json 的日期，重新走完整抓取 + 翻译流程。
+
 ### Web 访问
 
 ```
@@ -137,8 +151,11 @@ paper-trans/
 │  02:00 每周日    → run_weekly.py  → HF /week/YYYY-WNN        │
 │  02:00 每月28日  → run_monthly.py → HF /month/YYYY-MM        │
 │                          ↓                                    │
-│                    fetch_hf.py（统一解析 arxiv ID）           │
-│                          ↓                                    │
+│                    fetch_hf.py（指数退避重试，代理→直连）     │
+│                          ↓ 失败（网络瞬断）                   │
+│                    run_repair.py --refetch（次日 02:00）      │
+│                    → 检测无 index.json 的日期 → 重跑全流程    │
+│                          ↓ 成功                               │
 │                    translate_arxiv.py                         │
 │                    arXiv API → 元数据 → LLM 翻译 → HTML      │
 │                          ↓                                    │
@@ -147,6 +164,8 @@ paper-trans/
 │                    → gpt-academic Latex翻译中文并重新编译PDF  │
 │                    → compile_latex（进程组 kill，300s 超时）  │
 │                    → 最多 3 次重试                            │
+│                          ↓                                    │
+│  01:00 每天      → run_repair.py（修复空翻译条目）            │
 │                          ↓                                    │
 │                    web_server.py :18080                       │
 │                    首页 / 每日 / 每周 / 每月 / 详情           │
@@ -179,17 +198,37 @@ paper-trans/
 
 ```cron
 # 每天 23:00 — daily top 3（摘要 + 全文 PDF）
-0 23 * * * /root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/run_daily.py >> /root/workspace/paper-trans/logs/cron-daily.log 2>&1
+0 23 * * * python3 run_daily.py >> logs/cron-daily.log 2>&1
 
 # 每周日 02:00 — weekly top 10（摘要 + 全文 PDF）
-0 2 * * 0 /root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/run_weekly.py >> /root/workspace/paper-trans/logs/cron-weekly.log 2>&1
+0 2 * * 0 python3 run_weekly.py >> logs/cron-weekly.log 2>&1
 
 # 每月 28 日 02:00 — monthly top 10（摘要 + 全文 PDF）
-0 2 28 * * /root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/run_monthly.py >> /root/workspace/paper-trans/logs/cron-monthly.log 2>&1
+0 2 28 * * python3 run_monthly.py >> logs/cron-monthly.log 2>&1
+
+# 每天 01:00 — 修复前夜 daily 空翻译（仅扫近 2 天）
+0 1 * * * python3 run_repair.py --mode daily --days 2 >> logs/repair.log 2>&1
+
+# 每天 02:00 — 补抓前夜 fetch 失败的 daily（仅扫近 2 天）
+0 2 * * * python3 run_repair.py --refetch --mode daily --days 2 >> logs/repair.log 2>&1
+
+# 每周日 04:00 — 修复 weekly 空翻译
+0 4 * * 0 python3 run_repair.py --mode weekly --days 7 >> logs/repair.log 2>&1
+
+# 每周日 05:00 — 补抓 weekly fetch 失败（仅扫近 2 周）
+0 5 * * 0 python3 run_repair.py --refetch --mode weekly --days 14 >> logs/repair.log 2>&1
+
+# 每月 28 日 04:00 — 修复 monthly 空翻译
+0 4 28 * * python3 run_repair.py --mode monthly --days 35 >> logs/repair.log 2>&1
+
+# 每月 28 日 05:00 — 补抓 monthly fetch 失败（仅扫近 2 个月）
+0 5 28 * * python3 run_repair.py --refetch --mode monthly --days 60 >> logs/repair.log 2>&1
 ```
 
 > **日期说明**：各脚本均根据运行时间自动计算目标日期，无需手动指定。
 > ISO 8601 周规则：周日为第 7 天，仍属于本周（`current_week_key()`）。
+>
+> **repair vs refetch**：`repair` 修复已有 index.json 中翻译为空的条目；`refetch` 补抓根本没有 index.json 的日期（通常由网络瞬断导致）。两者串行执行，共用 `repair.log`。
 
 ### systemd 服务
 
