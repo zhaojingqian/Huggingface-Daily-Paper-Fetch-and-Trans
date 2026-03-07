@@ -66,6 +66,10 @@ python3 run_repair.py --mode daily --days 2  # 仅修复最近 2 天 daily
 python3 run_repair.py --mode weekly --key 2026-W09  # 指定 key
 ```
 
+> **注意**：包含 LaTeX 数学公式的论文（如 `$O(\log N)$`、`$P(\text{h}|b)$`）在翻译时会
+> 产生非法 JSON 转义序列（`\l`、`\t` 等），`translate_arxiv.py` 已内置自动修复逻辑，
+> 解析前统一将无效 `\` 替换为 `\\`。
+
 ### 补抓 fetch 失败的日期
 
 当网络故障导致 `run_daily.py` 在 23:00 完全无法抓取（未生成 `index.json`）时，用 `--refetch` 模式补救：

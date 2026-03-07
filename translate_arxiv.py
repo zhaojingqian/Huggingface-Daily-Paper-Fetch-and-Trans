@@ -270,7 +270,11 @@ def translate_paper(meta, config, max_retries=3):
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                 continue
-            parsed = json.loads(json_match.group())
+            json_str = json_match.group()
+            # 修复 LLM 返回的 JSON 中由 LaTeX/数学符号引入的非法转义序列
+            # 合法的 JSON escape: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+            json_str = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
+            parsed = json.loads(json_str)
             # 校验：title_zh 必须含中文字符
             if not _has_chinese(parsed.get("title_zh", "")):
                 print(f"  ⚠️ title_zh 无中文内容，重试 ({attempt+1}/{max_retries})...", flush=True)
