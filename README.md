@@ -262,12 +262,16 @@ journalctl -u paper-trans-web -f    # 实时日志
 | `/daily/YYYY-MM-DD` | 当日 Top 3 论文卡片 |
 | `/weekly/YYYY-WNN` | 当周 Top 10 论文卡片 |
 | `/monthly/YYYY-MM` | 当月 Top 10 论文卡片 |
+| `/view/ARXIV_ID` | PDF 查看器（标签页显示中文标题） |
+| `/papers/ARXIV_ID_zh.pdf` | 原始中文 PDF 文件（流式传输） |
 
 ### 论文卡片
 
 每张卡片展示：中文标题 / AI 摘要 / 关键词 / 提交日期 / 热度（upvotes）
 
 按钮：🔍 详情 | 📄 全文中文PDF（有则显示）| arXiv | 原文PDF
+
+> 📄 全文PDF 按钮指向 `/view/ARXIV_ID`，在独立标签页中全屏展示 PDF，浏览器标签页标题显示中文论文名。
 
 ---
 

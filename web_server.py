@@ -692,6 +692,7 @@ def page(title, body, active_tab="home"):
         html = html.replace('href="/', f'href="{BASE_PATH}/')
         html = html.replace("href='/", f"href='{BASE_PATH}/")
         html = html.replace('action="/', f'action="{BASE_PATH}/')
+        html = html.replace('src="/', f'src="{BASE_PATH}/')
     return html
 
 def paper_card(p, mode, key, pdir):
@@ -754,12 +755,7 @@ def paper_card(p, mode, key, pdir):
     if has_html:
         btns.append(f'<a class="btn btn-detail" href="/{mode}/{key}/papers/{aid}">🔍 详情</a>')
     if has_pdf:
-        # 统一 PDF URL：paper store 优先，兼容旧路径
-        if os.path.exists(os.path.join(PAPER_STORE_DIR, f"{aid}_zh.pdf")):
-            pdf_url = f"/papers/{aid}_zh.pdf"
-        else:
-            pdf_url = f"/{mode}/{key}/papers/{aid}_zh.pdf"
-        btns.append(f'<a class="btn btn-full-pdf" href="{pdf_url}" target="_blank">📄 全文PDF</a>')
+        btns.append(f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>')
     btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
     btns.append(f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文PDF</a>')
 
@@ -1032,11 +1028,7 @@ def build_detail_page(mode, key, arxiv_id):
     btns = [f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{arxiv_id}" target="_blank">arXiv 原文</a>',
             f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{arxiv_id}" target="_blank">原文 PDF</a>']
     if has_pdf:
-        if os.path.exists(os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")):
-            pdf_url = f"/papers/{arxiv_id}_zh.pdf"
-        else:
-            pdf_url = f"/{mode}/{key}/papers/{arxiv_id}_zh.pdf"
-        btns.insert(0, f'<a class="btn btn-full-pdf" href="{pdf_url}" target="_blank">📄 全文中文 PDF</a>')
+        btns.insert(0, f'<a class="btn btn-full-pdf" href="/view/{arxiv_id}" target="_blank">📄 全文中文 PDF</a>')
     elif pdf_failed:
         btns.insert(0, '<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
                        'title="LaTeX源码编译失败，该论文可能含不兼容宏包">⚠️ 全文PDF转换失败</span>')
@@ -1148,7 +1140,7 @@ def build_bookmark_list_page(lid):
 
             kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
             if has_pdf:
-                pdf_btn = f'<a class="btn btn-full-pdf" href="/papers/{aid}_zh.pdf" target="_blank">📄 全文PDF</a>'
+                pdf_btn = f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>'
             elif pdf_failed_bm:
                 pdf_btn = ('<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
                            'title="全文PDF转换失败">⚠️ PDF失败</span>')
@@ -1222,15 +1214,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ct_map = {".pdf":"application/pdf",".html":"text/html; charset=utf-8",
                   ".json":"application/json",".css":"text/css",".js":"application/javascript"}
         ct = ct_map.get(ext, "application/octet-stream")
-        with open(path, "rb") as f:
-            data = f.read()
+        size = os.path.getsize(path)
         self.send_response(200)
         self.send_header("Content-Type", ct)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(size))
         if ext == ".pdf":
             self.send_header("Content-Disposition", "inline")
         self.end_headers()
-        self.wfile.write(data)
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
 
     def send_404(self, msg="页面未找到"):
         html = f"<html><body style='font-family:sans-serif;padding:40px'><h2>404 — {msg}</h2><a href='/'>← 返回首页</a></body></html>"
@@ -1441,6 +1437,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if os.path.exists(fp):
                 return self.send_file(fp)
             return self.send_404(parts[1])
+
+        # ── /view/<arxiv_id>  PDF 查看器（带中文标题标签页）─────
+        if len(parts) == 2 and parts[0] == "view":
+            arxiv_id = parts[1]
+            if re.match(r'^\d{4}\.\d+$', arxiv_id):
+                fp = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+                if os.path.exists(fp):
+                    meta = _read_paper_store(arxiv_id)
+                    title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
+                    pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf"
+                    html = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8">
+<title>{title_zh}</title>
+<style>*{{margin:0;padding:0}}html,body{{height:100%;overflow:hidden}}embed{{width:100%;height:100%;display:block}}</style>
+</head><body>
+<embed src="{pdf_src}" type="application/pdf">
+</body></html>"""
+                    return self.send_html(html)
+                return self.send_404(f"{arxiv_id} PDF 不存在")
 
         # ── /  首页 ──────────────────────────────────────
         if not parts:
