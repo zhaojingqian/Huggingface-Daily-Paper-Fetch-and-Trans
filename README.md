@@ -58,31 +58,29 @@ python3 translate_full.py 2602.10388 \
     -o data/papers    # PDF 直接写入 paper store
 ```
 
-### 修复空翻译
+### 修复与重试（run_repair.py）
 
 ```bash
+# 补翻译：修复 title_zh / summary_zh 为空的条目
 python3 run_repair.py                        # 扫描全部 mode 近 30 天
 python3 run_repair.py --mode daily --days 2  # 仅修复最近 2 天 daily
 python3 run_repair.py --mode weekly --key 2026-W09  # 指定 key
+
+# 补索引：重新执行因网络故障未生成 index.json 的任务
+python3 run_repair.py --refetch                       # 全部 mode 近 30 天
+python3 run_repair.py --refetch --mode daily --days 3
+
+# --post：补翻译 + 补索引一次完成（推荐 cron 使用）
+python3 run_repair.py --post --mode daily --days 2
+
+# --retry-pdf：对 pdf_status=failed 的条目重新翻译全文 PDF
+python3 run_repair.py --retry-pdf --mode weekly --key 2026-W12
+python3 run_repair.py --retry-pdf --mode daily  --days 7
 ```
 
-> **注意**：包含 LaTeX 数学公式的论文（如 `$O(\log N)$`、`$P(\text{h}|b)$`）在翻译时会
-> 产生非法 JSON 转义序列（`\l`、`\t` 等），`translate_arxiv.py` 已内置自动修复逻辑，
-> 解析前统一将无效 `\` 替换为 `\\`。
+> **模式说明**：`repair`（默认）修复已有 index.json 中翻译为空的条目；`--refetch` 补抓根本没有 index.json 的日期；`--post` 两者串行执行；`--retry-pdf` 专门对 PDF 编译失败的论文发起重试。
 
-### 补抓 fetch 失败的日期
-
-当网络故障导致 `run_daily.py` 在 23:00 完全无法抓取（未生成 `index.json`）时，用 `--refetch` 模式补救：
-
-```bash
-python3 run_repair.py --refetch                       # 补抓全部 mode 近 30 天缺失 key
-python3 run_repair.py --refetch --mode daily --days 3 # 仅补抓近 3 天 daily
-python3 run_repair.py --refetch --mode weekly --days 14
-python3 run_repair.py --refetch --mode monthly --days 60
-```
-
-> `--refetch` 与普通 `repair` 的区别：repair 修复**已有** index.json 中翻译为空的条目；
-> refetch 补抓**根本没有** index.json 的日期，重新走完整抓取 + 翻译流程。
+> **注意**：包含 LaTeX 数学公式的论文（如 `$O(\log N)$`、`$P(\text{h}|b)$`）在翻译时会产生非法 JSON 转义序列，`translate_arxiv.py` 已内置自动修复逻辑。
 
 ### Web 访问
 
@@ -100,13 +98,18 @@ paper-trans/
 ├── run_daily.py             # 每日入口（Top 3）
 ├── run_weekly.py            # 每周入口（Top 10）
 ├── run_monthly.py           # 每月入口（Top 10）
-├── run_papers.py            # 通用处理 runner（三种模式共用）
-├── run_repair.py            # 翻译修复扫描器（cron 自动修复空翻译）
+├── run_papers.py            # 通用处理 runner（含 retry_pdf）
+├── run_repair.py            # 翻译修复扫描器（repair/refetch/post/retry-pdf）
 ├── fetch_hf.py              # 统一 HF 抓取器（含指数退避重试）
 ├── translate_arxiv.py       # 摘要翻译 → paper store JSON
 ├── translate_full.py        # 全文翻译（容器外封装，实时流式日志）
 ├── full_translate_driver.py # 全文翻译（容器内驱动，含重试逻辑）
 ├── web_server.py            # Web 服务器（端口 18080）
+│
+├── scripts/
+│   ├── setup_docker_env.sh      # ★ Docker 容器环境修补脚本（容器重建后运行）
+│   ├── patch_axessibility.py    # latex_toolbox 补丁：移除 xelatex 不兼容的 axessibility 包
+│   └── cleanup_docker_cache.sh  # 清理 Docker 翻译缓存
 │
 ├── data/                    # 统一数据目录
 │   ├── papers/              # ★ 唯一数据源（paper store）
@@ -166,10 +169,12 @@ paper-trans/
 │                    translate_full.py                          │
 │                    docker exec full_translate_driver.py       │
 │                    → gpt-academic Latex翻译中文并重新编译PDF  │
+│                    → xelatex + ctex + fontset=fandol          │
 │                    → compile_latex（进程组 kill，300s 超时）  │
-│                    → 最多 3 次重试                            │
+│                    → 最多 3 次重试（含 extract 清理）         │
 │                          ↓                                    │
-│  01:00 每天      → run_repair.py（修复空翻译条目）            │
+│  01:00 每天      → run_repair.py --post（补翻译 + 补索引）    │
+│  06:00 每天      → run_repair.py --retry-pdf（PDF 重试）      │
 │                          ↓                                    │
 │                    web_server.py :18080                       │
 │                    首页 / 每日 / 每周 / 每月 / 详情           │
@@ -201,38 +206,42 @@ paper-trans/
 ### 定时任务（crontab）
 
 ```cron
+PYTHON=/root/.pyenv/versions/3.10.13/bin/python3
+PTDIR=/root/workspace/paper-trans
+RLOG=$PTDIR/logs/repair.log
+
+# ── 主抓取 ────────────────────────────────────────────────────────────────
 # 每天 23:00 — daily top 3（摘要 + 全文 PDF）
-0 23 * * * python3 run_daily.py >> logs/cron-daily.log 2>&1
+0 23 * * *   $PYTHON $PTDIR/run_daily.py   >> $PTDIR/logs/cron-daily.log   2>&1
+# 每周日 02:00 — weekly top 10
+0  2 * * 0   $PYTHON $PTDIR/run_weekly.py  >> $PTDIR/logs/cron-weekly.log  2>&1
+# 每月 28 日 02:00 — monthly top 10
+0  2 28 * *  $PYTHON $PTDIR/run_monthly.py >> $PTDIR/logs/cron-monthly.log 2>&1
 
-# 每周日 02:00 — weekly top 10（摘要 + 全文 PDF）
-0 2 * * 0 python3 run_weekly.py >> logs/cron-weekly.log 2>&1
+# ── 容器维护 ─────────────────────────────────────────────────────────────
+# 每天 05:00 — 重启翻译容器，清除僵尸进程
+0  5 * * *   docker restart gpt-academic-latex >> $PTDIR/logs/docker-restart.log 2>&1
+# 每周日 03:00 — 清理 Docker 翻译缓存
+30 3 * * 0   $PTDIR/scripts/cleanup_docker_cache.sh
 
-# 每月 28 日 02:00 — monthly top 10（摘要 + 全文 PDF）
-0 2 28 * * python3 run_monthly.py >> logs/cron-monthly.log 2>&1
-
-# 每天 01:00 — 修复前夜 daily 空翻译（仅扫近 2 天）
-0 1 * * * python3 run_repair.py --mode daily --days 2 >> logs/repair.log 2>&1
-
-# 每天 02:00 — 补抓前夜 fetch 失败的 daily（仅扫近 2 天）
-0 2 * * * python3 run_repair.py --refetch --mode daily --days 2 >> logs/repair.log 2>&1
-
-# 每周日 04:00 — 修复 weekly 空翻译
-0 4 * * 0 python3 run_repair.py --mode weekly --days 7 >> logs/repair.log 2>&1
-
-# 每周日 05:00 — 补抓 weekly fetch 失败（仅扫近 2 周）
-0 5 * * 0 python3 run_repair.py --refetch --mode weekly --days 14 >> logs/repair.log 2>&1
-
-# 每月 28 日 04:00 — 修复 monthly 空翻译
-0 4 28 * * python3 run_repair.py --mode monthly --days 35 >> logs/repair.log 2>&1
-
-# 每月 28 日 05:00 — 补抓 monthly fetch 失败（仅扫近 2 个月）
-0 5 28 * * python3 run_repair.py --refetch --mode monthly --days 60 >> logs/repair.log 2>&1
+# ── 修复任务 ─────────────────────────────────────────────────────────────
+# 每天 01:00 — daily 补翻译 + 补索引
+0  1 * * *   $PYTHON $PTDIR/run_repair.py --post       --mode daily   --days 2  >> $RLOG 2>&1
+# 每天 06:00 — daily PDF 重试（须在 05:00 docker 重启后）
+0  6 * * *   $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode daily   --days 7  >> $RLOG 2>&1
+# 每周日 04:00 — weekly 补翻译 + 补索引
+0  4 * * 0   $PYTHON $PTDIR/run_repair.py --post       --mode weekly  --days 14 >> $RLOG 2>&1
+# 每周日 07:00 — weekly PDF 重试
+0  7 * * 0   $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode weekly  --days 14 >> $RLOG 2>&1
+# 每月 28 日 04:00 — monthly 补翻译 + 补索引
+0  4 28 * *  $PYTHON $PTDIR/run_repair.py --post       --mode monthly --days 60 >> $RLOG 2>&1
+# 每月 28 日 07:00 — monthly PDF 重试
+0  7 28 * *  $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode monthly --days 60 >> $RLOG 2>&1
 ```
 
-> **日期说明**：各脚本均根据运行时间自动计算目标日期，无需手动指定。
-> ISO 8601 周规则：周日为第 7 天，仍属于本周（`current_week_key()`）。
+> **日期说明**：各脚本均根据运行时间自动计算目标日期，无需手动指定。ISO 8601 周规则：周日为第 7 天，仍属于本周。
 >
-> **repair vs refetch**：`repair` 修复已有 index.json 中翻译为空的条目；`refetch` 补抓根本没有 index.json 的日期（通常由网络瞬断导致）。两者串行执行，共用 `repair.log`。
+> **--post vs --retry-pdf**：`--post` 修复摘要翻译缺失（repair + refetch）；`--retry-pdf` 专门重试 PDF 编译失败的论文，安排在每天 05:00 docker 重启之后执行，避免容器状态问题。
 
 ### systemd 服务
 
@@ -281,19 +290,31 @@ journalctl -u paper-trans-web -f    # 实时日志
 
 1. **下载** arXiv LaTeX 源码包（`.tar.gz`）
 2. **翻译** LLM 逐段翻译 `.tex` 文件（保留 LaTeX 命令）
-3. **编译** `pdflatex` 重新编译为中文 PDF
-4. **重试** 最多 3 次（每次清空缓存重新翻译）
+3. **编译** `xelatex`（含 ctex）重新编译为中文 PDF（使用 Fandol 字体）
+4. **重试** 最多 3 次（每次清空缓存，含 extract 目录，防止权限问题）
 5. **输出** 保存到 `data/papers/<arxiv_id>_zh.pdf`（paper store，所有 mode 共用）
 
-> ⚠️ 全文翻译每篇约 5～15 分钟，依赖论文 LaTeX 源码可用性。
+> ⚠️ 全文翻译每篇约 3～15 分钟，依赖论文 LaTeX 源码可用性。
 > 无 LaTeX 源码或编译失败的论文不生成 PDF（摘要翻译仍可用）。
+> PDF 编译失败会记录为 `pdf_status=failed`，由 `--retry-pdf` cron 任务自动重试。
 
 **关键技术细节**
 
-- `pdflatex` 超时：300s / 次（进程组 kill，防止孤儿进程）
-- 驱动脚本位于容器内 `/tmp/full_translate_driver.py`
+- 编译器：`xelatex`（`ctex` 包注入后自动切换，`fontset=fandol` 替代 Windows CJK 字体）
+- 编译超时：300s / 次（进程组 kill，防止孤儿进程）
+- 驱动脚本 `full_translate_driver.py` 由 `translate_full.py` 复制进容器执行
 - 代理：host 网络模式，`127.0.0.1:7890`
 - 跳过全文翻译：运行时加 `--no-full` 参数
+
+**Docker 容器环境初始化**
+
+容器 `gpt-academic-latex` 创建或重建后，需运行一次修补脚本：
+
+```bash
+bash /root/workspace/paper-trans/scripts/setup_docker_env.sh
+```
+
+该脚本完成 8 项修补（字体安装、fontconfig 映射、bxcoloremoji、fontset=fandol 注入、ctex xelatex 检测、axessibility 移除、merge_tex 路径修复、arxiv_cache 权限修复），确保在 Linux 环境下正确编译各类 LaTeX 论文。
 
 ---
 

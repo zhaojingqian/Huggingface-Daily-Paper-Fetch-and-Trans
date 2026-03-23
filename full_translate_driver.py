@@ -202,7 +202,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
 
 
 def clear_compile_cache(full=False):
-    """清除 workfolder 和 translation（full=True 时也清 extract/e-print）。"""
+    """清除 workfolder 和 translation（full=True 时也清 extract）。"""
     cache_base = os.path.join(ARXIV_CACHE_DIR, arxiv_id)
     targets = ['workfolder', 'translation']
     if full:
@@ -217,9 +217,9 @@ def clear_compile_cache(full=False):
 # ── 主逻辑：首次 + 重试 ────────────────────────────────────────────────────────
 result_pdf = None
 
-# 首次调用且 no_cache=True 时，先清编译缓存（但保留 e-print 避免重复下载）
+# 首次调用且 no_cache=True 时，也清 extract（避免 root 所有权导致 PermissionError）
 if no_cache:
-    clear_compile_cache(full=False)
+    clear_compile_cache(full=True)
 
 for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
     if attempt == 1:

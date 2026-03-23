@@ -1214,19 +1214,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ct_map = {".pdf":"application/pdf",".html":"text/html; charset=utf-8",
                   ".json":"application/json",".css":"text/css",".js":"application/javascript"}
         ct = ct_map.get(ext, "application/octet-stream")
-        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            data = f.read()
         self.send_response(200)
         self.send_header("Content-Type", ct)
-        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Length", str(len(data)))
         if ext == ".pdf":
             self.send_header("Content-Disposition", "inline")
         self.end_headers()
-        with open(path, "rb") as f:
-            while True:
-                chunk = f.read(65536)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+        self.wfile.write(data)
 
     def send_404(self, msg="页面未找到"):
         html = f"<html><body style='font-family:sans-serif;padding:40px'><h2>404 — {msg}</h2><a href='/'>← 返回首页</a></body></html>"
@@ -1431,12 +1427,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send_html(html)
                 return self.send_404("收藏列表不存在")
 
-        # ── /papers/<arxiv_id>_zh.pdf  paper store PDF ───────
-        if len(parts) == 2 and parts[0] == "papers" and parts[1].endswith("_zh.pdf"):
-            fp = os.path.join(PAPER_STORE_DIR, parts[1])
-            if os.path.exists(fp):
-                return self.send_file(fp)
-            return self.send_404(parts[1])
 
         # ── /view/<arxiv_id>  PDF 查看器（带中文标题标签页）─────
         if len(parts) == 2 and parts[0] == "view":
@@ -1478,6 +1468,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 html = build_detail_page(mode, key, name)
                 if html:
                     return self.send_html(html)
+                # Fallback: serve legacy HTML file
+                legacy = os.path.join(DATA_DIR, mode, key, "papers", f"{name}.html")
+                if os.path.exists(legacy):
+                    return self.send_file(legacy)
                 return self.send_404(f"{name} 未找到")
             return self.send_404(f"{name} 未找到")
 
@@ -1878,8 +1872,8 @@ def build_status_page():
         spin   = ' <span class="spin">↻</span>' if status in ("fetching", "abstract", "full_pdf") else ""
         key_v  = j.get("key", "")
         links  = ""
-        if j.get("pdf_zh") and key_v:
-            links += f'<a href="/manual/{key_v}/{j["pdf_zh"]}" style="color:#34d399;font-size:12px;margin-right:6px">PDF</a>'
+        if j.get("pdf_zh") and aid:
+            links += f'<a href="/view/{aid}" style="color:#34d399;font-size:12px;margin-right:6px">PDF</a>'
         if key_v:
             links += f'<a href="/manual/{key_v}/papers/{aid}" style="color:#60a5fa;font-size:12px">详情</a>'
         title_esc = title.replace('"', '&quot;')

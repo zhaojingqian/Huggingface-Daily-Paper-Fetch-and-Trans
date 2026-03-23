@@ -340,6 +340,84 @@ def _run_locked(mode, key, limit, do_full_translate):
     return fail == 0
 
 
+def retry_pdf(mode=None, key=None):
+    """
+    扫描 pdf_status=failed 的条目，重新尝试全文 PDF 翻译，成功后更新 paper store 与 slim index。
+    mode=None 时扫描全部 (daily/weekly/monthly)。
+    key=None  时扫描该 mode 下所有 key。
+    返回成功翻译的篇数。
+    """
+    from translate_full import translate_full
+
+    modes = [mode] if mode else ["daily", "weekly", "monthly"]
+    total_ok = 0
+    total_fail = 0
+
+    for m in modes:
+        mode_dir = os.path.join(DATA_DIR, m)
+        if not os.path.isdir(mode_dir):
+            continue
+        keys = [key] if key else sorted(os.listdir(mode_dir))
+
+        for k in keys:
+            idx_file = os.path.join(mode_dir, k, "index.json")
+            if not os.path.exists(idx_file):
+                continue
+            try:
+                with open(idx_file, encoding="utf-8") as f:
+                    idx = json.load(f)
+            except Exception:
+                continue
+
+            papers = idx.get("papers", [])
+            failed = [p for p in papers if p.get("pdf_status") == "failed"]
+            if not failed:
+                continue
+
+            print(f"[retry-pdf] {m}/{k} — {len(failed)} 篇待重试", flush=True)
+            changed = False
+
+            for slim in failed:
+                aid = slim.get("arxiv_id", "")
+                if not aid:
+                    continue
+
+                # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态
+                if _pdf_store_hit(aid):
+                    print(f"[retry-pdf] ✅ {aid} — paper store 已有 PDF，更新状态", flush=True)
+                    slim["pdf_status"] = "ok"
+                    _paper_store_update_pdf_status(aid, "ok")
+                    changed = True
+                    total_ok += 1
+                    continue
+
+                print(f"[retry-pdf] 🔬 {aid} — 重新翻译全文...", flush=True)
+                try:
+                    r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
+                                       no_cache=True, timeout=3600)
+                    if r.get("pdf_path"):
+                        slim["pdf_status"] = "ok"
+                        _paper_store_update_pdf_status(aid, "ok")
+                        print(f"[retry-pdf] ✅ {aid} — 成功: {r['pdf_path']}", flush=True)
+                        changed = True
+                        total_ok += 1
+                    else:
+                        print(f"[retry-pdf] ❌ {aid} — 仍失败: {r.get('error', '')}", flush=True)
+                        total_fail += 1
+                except Exception as e:
+                    print(f"[retry-pdf] ❌ {aid}: {e}", flush=True)
+                    total_fail += 1
+
+            if changed:
+                idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                idx["papers"] = papers
+                with open(idx_file, "w", encoding="utf-8") as f:
+                    json.dump(idx, f, ensure_ascii=False, indent=2)
+
+    print(f"[retry-pdf] 完成: 成功={total_ok} 仍失败={total_fail}", flush=True)
+    return total_ok
+
+
 def repair(mode=None, key=None):
     """
     扫描已有数据目录，找出 title_zh / summary_zh 为空的条目，重新翻译并更新 index.json。

@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
 Paper Trans — 翻译修复扫描器
-自动找出 title_zh / summary_zh 为空的条目并重新翻译。
-支持 --refetch 模式：补抓因网络故障未生成 index.json 的日期。
 
-用法：
-  python3 run_repair.py                        # 扫描全部 mode 近 30 天数据
-  python3 run_repair.py --days 7               # 仅扫描最近 7 天
-  python3 run_repair.py --mode daily           # 仅扫描 daily
-  python3 run_repair.py --mode daily --key 2026-02-28   # 指定 key
-  python3 run_repair.py --all                  # 强制扫描全部历史
-  python3 run_repair.py --refetch --days 3            # 补抓近 3 天所有 mode 缺失的 key
-  python3 run_repair.py --refetch --mode daily        # 只补抓 daily
-  python3 run_repair.py --refetch --mode weekly --days 14   # 补抓近 2 周的 weekly
+模式说明：
+  (默认)       补翻译：找出 title_zh/summary_zh 为空的条目并重新翻译
+  --refetch    补索引：重新执行缺少 index.json 的任务
+  --post       补翻译 + 补索引（顺序执行，等价于先默认再 --refetch）
+  --retry-pdf  PDF 重试：对 pdf_status=failed 的条目重新翻译全文 PDF
 
-定时建议（crontab）：
-  每天 01:00 — 修复前夜 daily 可能失败的空翻译（仅扫近 2 天）
-  每天 02:00 — 补抓前夜 fetch 失败（无 index.json）的 daily（仅扫近 2 天）
-  每周日 04:00 — 修复 weekly 可能失败的条目
-  每周日 05:00 — 补抓 weekly fetch 失败（仅扫近 2 周）
-  每月 28 日 04:00 — 修复 monthly 可能失败的条目
-  每月 28 日 05:00 — 补抓 monthly fetch 失败（仅扫近 2 月）
+通用参数（所有模式均支持）：
+  --mode  daily|weekly|monthly   仅处理指定 mode（默认全部）
+  --key   2026-W12               仅处理指定 key
+  --days  N                      扫描最近 N 天范围（默认 30）
+  --all                          扫描全部历史（忽略 --days）
+
+crontab 示例（当前配置）：
+  每天 01:00   --post      --mode daily   --days 2   # 补翻译+补索引
+  每天 06:00   --retry-pdf --mode daily   --days 7   # PDF 重试（docker 05:00 重启后）
+  每周日 04:00 --post      --mode weekly  --days 14
+  每周日 07:00 --retry-pdf --mode weekly  --days 14
+  每月28日04:00 --post     --mode monthly --days 60
+  每月28日07:00 --retry-pdf --mode monthly --days 60
 """
 import sys, os, argparse
 from datetime import datetime, timedelta
@@ -117,6 +117,46 @@ def refetch_missing(mode="daily", days=3):
     return refetched
 
 
+def retry_pdf_keys(mode, days, scan_all, key):
+    """
+    根据参数确定要重试 PDF 的 key 列表，调用 run_papers.retry_pdf()。
+    返回成功翻译的篇数。
+    """
+    from run_papers import retry_pdf, DATA_DIR
+
+    if key:
+        _log(f"[retry-pdf:{mode}] 指定 key={key}，开始重试...")
+        n = retry_pdf(mode=mode, key=key)
+        _log(f"[retry-pdf:{mode}] {key} — 成功 {n} 篇")
+        return n
+
+    if scan_all:
+        _log(f"[retry-pdf:{mode}] 全量扫描，开始重试...")
+        n = retry_pdf(mode=mode, key=None)
+        _log(f"[retry-pdf:{mode}] 全量完成 — 成功 {n} 篇")
+        return n
+
+    mode_dir = os.path.join(DATA_DIR, mode)
+    if not os.path.isdir(mode_dir):
+        _log(f"[retry-pdf:{mode}] 目录不存在，跳过")
+        return 0
+
+    recent = _recent_keys(mode, days)
+    existing = set(os.listdir(mode_dir))
+    targets = sorted(set(recent) & existing)
+    if not targets:
+        _log(f"[retry-pdf:{mode}] 近 {days} 天无数据，跳过")
+        return 0
+
+    _log(f"[retry-pdf:{mode}] 扫描 {len(targets)} 个 key: {targets[0]} ~ {targets[-1]}")
+    total = 0
+    for k in targets:
+        n = retry_pdf(mode=mode, key=k)
+        total += n
+    _log(f"[retry-pdf:{mode}] 完成 — 成功 {total} 篇")
+    return total
+
+
 def main():
     parser = argparse.ArgumentParser(description="Paper Trans 翻译修复扫描器")
     parser.add_argument("--mode", choices=["daily", "weekly", "monthly"],
@@ -127,10 +167,59 @@ def main():
     parser.add_argument("--all", dest="scan_all", action="store_true",
                         help="扫描全部历史数据（忽略 --days）")
     parser.add_argument("--refetch", action="store_true",
-                        help="补抓模式：重新执行近期缺少 index.json 的任务（支持 --mode 筛选）")
+                        help="补索引模式：重新执行近期缺少 index.json 的任务")
+    parser.add_argument("--post", action="store_true",
+                        help="组合模式：顺序执行补翻译（默认）+ 补索引（--refetch）")
+    parser.add_argument("--retry-pdf", dest="retry_pdf", action="store_true",
+                        help="PDF 重试模式：对 pdf_status=failed 的条目重新翻译全文 PDF")
     args = parser.parse_args()
 
     _log("=" * 50)
+
+    # ── 组合模式：补翻译 → 补索引 ────────────────────────────────────────────
+    if args.post:
+        modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
+        scope = f"key={args.key}" if args.key else ("all" if args.scan_all else f"days={args.days}")
+        _log(f"开始 post (modes={modes}, {scope})")
+
+        from run_papers import repair, DATA_DIR
+        total_repair = 0
+        for m in modes:
+            if args.key:
+                total_repair += repair(mode=m, key=args.key)
+            elif args.scan_all:
+                total_repair += repair(mode=m, key=None)
+            else:
+                mode_dir = os.path.join(DATA_DIR, m)
+                if not os.path.isdir(mode_dir):
+                    continue
+                targets = sorted(set(_recent_keys(m, args.days)) & set(os.listdir(mode_dir)))
+                if not targets:
+                    _log(f"[post:repair:{m}] 近 {args.days} 天无数据，跳过")
+                    continue
+                _log(f"[post:repair:{m}] 扫描 {len(targets)} 个 key: {targets[0]} ~ {targets[-1]}")
+                for k in targets:
+                    total_repair += repair(mode=m, key=k)
+
+        total_refetch = 0
+        for m in modes:
+            total_refetch += refetch_missing(mode=m, days=args.days if not args.scan_all else 9999)
+
+        _log(f"post 完成 — 修复摘要 {total_repair} 篇，补抓索引 {total_refetch} 个 key")
+        _log("=" * 50)
+        sys.exit(0)
+
+    # ── PDF 重试模式 ─────────────────────────────────────────────────────────
+    if args.retry_pdf:
+        modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
+        _log(f"开始 retry-pdf (modes={modes}, key={args.key or 'auto'}, "
+             f"days={args.days if not args.scan_all else 'all'})")
+        total = 0
+        for m in modes:
+            total += retry_pdf_keys(m, args.days, args.scan_all, args.key)
+        _log(f"retry-pdf 完成，共成功 {total} 篇")
+        _log("=" * 50)
+        sys.exit(0)
 
     # ── 补抓模式：专门处理 fetch 完全失败的 key ───────────────────────────────
     if args.refetch:
