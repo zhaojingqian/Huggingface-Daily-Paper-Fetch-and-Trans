@@ -184,8 +184,17 @@ else
     docker exec -u root "$CONTAINER" python3 /tmp/patch_axessibility.py
 fi
 
-# ── 7. 修补 latex_toolbox.py：merge_tex_files_ 支持 \def\input@path ─────────
-echo "=== [7/8] 修补 latex_toolbox.py（merge_tex_files_ 支持 \\def\\input@path）==="
+# ── 7. 修补 latex_toolbox.py：find_main_tex_file 优先读 00README.json ─────────
+echo "=== [7/9] 修补 latex_toolbox.py（find_main_tex_file：00README.json + 深度惩罚）==="
+if docker exec "$CONTAINER" grep -q "00README.json" /gpt/crazy_functions/latex_fns/latex_toolbox.py; then
+    echo "  已修补，跳过"
+else
+    docker cp /root/workspace/paper-trans/scripts/patch_find_main_tex.py "$CONTAINER:/tmp/patch_find_main_tex.py"
+    docker exec -u root "$CONTAINER" python3 /tmp/patch_find_main_tex.py
+fi
+
+# ── 8. 修补 latex_toolbox.py：merge_tex_files_ 支持 \def\input@path ─────────
+echo "=== [8/9] 修补 latex_toolbox.py（merge_tex_files_ 支持 \\def\\input@path）==="
 TOOLBOX=/gpt/crazy_functions/latex_fns/latex_toolbox.py
 if docker exec "$CONTAINER" grep -q "input_paths" "$TOOLBOX"; then
     echo "  已修补，跳过"
@@ -284,4 +293,5 @@ docker exec "$CONTAINER" kpsewhich bxcoloremoji.sty
 docker exec "$CONTAINER" grep -c "fandol" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py fandol ✅"
 docker exec "$CONTAINER" grep -c "ctex" /gpt/crazy_functions/latex_fns/latex_actions.py && echo "latex_actions.py ctex ✅"
 docker exec "$CONTAINER" grep -c "axessibility" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py axessibility ✅"
+docker exec "$CONTAINER" grep -c "00README.json" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py 00README ✅"
 docker exec "$CONTAINER" grep -c "input_paths" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py input@path ✅"
