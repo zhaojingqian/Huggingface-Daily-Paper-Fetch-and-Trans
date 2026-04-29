@@ -296,6 +296,99 @@ def patch_and_recompile(workfolder, arxiv_id_):
     return None
 
 
+def diagnose_failure(workfolder, arxiv_id_):
+    """
+    分析编译失败原因，输出结构化诊断行供宿主机捕获。
+    格式: PDF_DIAGNOSIS:<json>
+    """
+    import json as _json
+
+    # ── 找最后一个 LaTeX 日志文件 ──────────────────────────────────────────
+    log_candidates = sorted(glob.glob(os.path.join(workfolder, '*.log')))
+    # 优先用 fix 链末尾的 log，其次用 merge_translate_zh.log
+    tex_log = None
+    for cand in reversed(log_candidates):
+        if 'merge_translate_zh' in os.path.basename(cand):
+            tex_log = cand
+            break
+    if not tex_log and log_candidates:
+        tex_log = log_candidates[-1]
+
+    errors_raw = []
+    if tex_log and os.path.exists(tex_log):
+        with open(tex_log, encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith('!') and 'TeX capacity' not in ln or \
+               ('! LaTeX Error' in ln or '! Package' in ln or '! Missing' in ln or
+                '! Extra' in ln or '! Emergency' in ln or '! Undefined' in ln):
+                ctx_start = max(0, i - 1)
+                ctx_end   = min(len(lines), i + 5)
+                errors_raw.append(''.join(lines[ctx_start:ctx_end]).strip())
+                if len(errors_raw) >= 8:
+                    break
+
+    # ── 错误类型判断 ──────────────────────────────────────────────────────
+    all_text = '\n'.join(errors_raw)
+    trans_tex = os.path.join(workfolder, 'merge_translate_zh.tex')
+    orig_tex  = os.path.join(workfolder, 'merge.tex')
+    has_trans = os.path.exists(trans_tex)
+    has_orig  = os.path.exists(orig_tex)
+
+    category = 'unknown'
+    suggestion = '查看下方错误日志，手动 patch merge_translate_zh.tex 后重新编译'
+
+    if 'input stack size' in all_text or ('normalsize' in all_text and '->' in all_text):
+        category   = 'normalsize_recursion'
+        suggestion = ('preamble 中 \\normalsize 自引用递归。\n'
+                      '修复: 在 merge_translate_zh.tex 中把\n'
+                      '  \\expandafter\\def\\expandafter\\normalsize\\expandafter{\\normalsize ...}\n'
+                      '替换为:\n'
+                      '  \\let\\normalsizesaved\\normalsize\n'
+                      '  \\def\\normalsize{\\normalsizesaved ...}')
+    elif 'pgfkeys Error' in all_text or ('tcblisting' in all_text and 'Missing $' in all_text):
+        category   = 'tcblisting_translated'
+        suggestion = ('tcblisting/lstlisting 内代码被 GPT 翻译，导致特殊字符破坏编译。\n'
+                      '修复: 运行 patch_and_recompile 或手动从 merge.tex 还原 verbatim 块')
+    elif 'File' in all_text and 'not found' in all_text:
+        import re as _re
+        m = _re.search(r"File '([^']+)' not found", all_text)
+        pkg = m.group(1) if m else '未知'
+        category   = f'missing_package:{pkg}'
+        suggestion = (f'缺少 LaTeX 包: {pkg}。\n'
+                      f'修复: 在容器内 tlmgr install 或在 texmf 目录创建 stub .sty')
+    elif 'twocolumn' in all_text or ('begin{document} ended by' in all_text):
+        category   = 'missing_bracket'
+        suggestion = ('\\twocolumn[ 缺少闭合 ]，GPT 翻译时被删除。\n'
+                      '修复: 在 merge_translate_zh.tex 中 \\printAffiliationsAndNotice 前补回 ]\n'
+                      '参考 merge.tex 对应位置')
+    elif 'Emergency stop' in all_text or 'Missing }' in all_text:
+        category   = 'group_mismatch'
+        suggestion = '大括号/环境不匹配导致 Emergency stop，通常是 GPT 翻译破坏了嵌套结构'
+    elif 'Undefined control sequence' in all_text:
+        import re as _re
+        m = _re.search(r'\\([A-Za-z@]+)', all_text.split('Undefined control sequence')[1][:80])
+        cmd = ('\\' + m.group(1)) if m else '未知'
+        category   = f'undefined_command:{cmd}'
+        suggestion = f'未定义命令 {cmd}，可能是自定义宏未翻译/丢失'
+
+    # ── 是否有翻译文件（区分翻译失败 vs 编译失败）──────────────────────────
+    phase = 'compile' if has_trans else 'translate'
+
+    diag = {
+        'arxiv_id':   arxiv_id_,
+        'phase':      phase,
+        'category':   category,
+        'suggestion': suggestion,
+        'top_errors': errors_raw[:5],
+        'log_file':   tex_log or '(none)',
+        'has_orig_tex': has_orig,
+        'has_trans_tex': has_trans,
+    }
+    print(f"PDF_DIAGNOSIS:{_json.dumps(diag, ensure_ascii=False)}", flush=True)
+    return diag
+
+
 def clear_compile_cache(full=False):
     """清除 workfolder 和 translation（full=True 时也清 extract）。"""
     cache_base = os.path.join(ARXIV_CACHE_DIR, arxiv_id)
@@ -349,5 +442,7 @@ if not result_pdf:
 if result_pdf:
     print(f"RESULT:SUCCESS:{result_pdf}", flush=True)
 else:
+    workfolder_ = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder')
+    diagnose_failure(workfolder_, arxiv_id)
     print(f"RESULT:ERROR:所有 {max_retries+1} 次尝试均未生成 PDF", flush=True)
     sys.exit(1)

@@ -14,6 +14,7 @@ import os
 import argparse
 import time
 import shutil
+import json
 from pathlib import Path
 
 CONTAINER_NAME  = "gpt-academic-latex"
@@ -132,6 +133,68 @@ def copy_from_container(container_path: str, local_path: str):
     return r.returncode == 0
 
 
+def _write_error_log(arxiv_id: str, stdout: str):
+    """
+    从驱动输出中提取 PDF_DIAGNOSIS 诊断信息，写入宿主机 logs/pdf_errors/<arxiv_id>.log。
+    """
+    diag = None
+    for line in stdout.splitlines():
+        if line.startswith("PDF_DIAGNOSIS:"):
+            try:
+                diag = json.loads(line[len("PDF_DIAGNOSIS:"):])
+            except Exception:
+                pass
+            break
+
+    base_dir  = os.path.dirname(os.path.abspath(__file__))
+    err_dir   = os.path.join(base_dir, "logs", "pdf_errors")
+    os.makedirs(err_dir, exist_ok=True)
+    log_path  = os.path.join(err_dir, f"{arxiv_id}.log")
+
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(f"{'='*60}\n")
+        f.write(f"PDF 翻译失败诊断报告\n")
+        f.write(f"时间: {ts}\n")
+        f.write(f"论文: {arxiv_id}\n")
+        f.write(f"{'='*60}\n\n")
+
+        if diag:
+            f.write(f"【失败阶段】 {diag.get('phase', '?')}  "
+                    f"(translate=GPT翻译失败 / compile=编译失败)\n\n")
+            f.write(f"【错误类型】 {diag.get('category', '?')}\n\n")
+            f.write(f"【修复建议】\n{diag.get('suggestion', '')}\n\n")
+            f.write(f"【LaTeX 错误摘要】\n")
+            for i, err in enumerate(diag.get('top_errors', []), 1):
+                f.write(f"  [{i}] {err}\n\n")
+            f.write(f"【容器内日志文件】 {diag.get('log_file', '(none)')}\n")
+            f.write(f"【原始 tex 存在】  {diag.get('has_orig_tex')}\n")
+            f.write(f"【翻译 tex 存在】  {diag.get('has_trans_tex')}\n")
+        else:
+            f.write("（未能获取结构化诊断，请查看 repair.log 中的原始输出）\n\n")
+            # 把驱动输出里的错误相关行也写进来
+            for line in stdout.splitlines():
+                if any(k in line for k in ("❌", "Error", "Fatal", "Emergency",
+                                            "[driver]", "RESULT:")):
+                    f.write(f"  {line}\n")
+
+        f.write(f"\n{'='*60}\n")
+        f.write("如需手动修复，参考命令:\n")
+        f.write(f"  docker exec gpt-academic-latex bash\n")
+        f.write(f"  # 查看完整编译日志:\n")
+        f.write(f"  cat /gpt/gpt_log/arxiv_cache/{arxiv_id}/workfolder/merge_translate_zh.log\n")
+        f.write(f"  # 编辑翻译文件:\n")
+        f.write(f"  vi /gpt/gpt_log/arxiv_cache/{arxiv_id}/workfolder/merge_translate_zh.tex\n")
+        f.write(f"  # 手动重编译:\n")
+        f.write(f"  cd /gpt/gpt_log/arxiv_cache/{arxiv_id}/workfolder\n")
+        f.write(f"  pdflatex -interaction=nonstopmode merge_translate_zh.tex\n")
+        f.write(f"{'='*60}\n")
+
+    print(f"📋 错误诊断已写入: {log_path}", flush=True)
+
+
 def translate_full(arxiv_id: str, output_dir: str,
                    no_cache: bool = False, timeout: int = 3600,
                    keep_translation: bool = False) -> dict:
@@ -182,6 +245,7 @@ def translate_full(arxiv_id: str, output_dir: str,
     if kind == "error" or kind == "unknown":
         result['error'] = container_path or "翻译失败（驱动所有重试均未生成 PDF）"
         print(f"❌ {result['error']}", flush=True)
+        _write_error_log(arxiv_id, stdout)
         return result
 
     # 5. 复制 PDF 到本地
