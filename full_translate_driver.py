@@ -9,15 +9,16 @@ import sys, os, glob, time, shutil
 sys.path.insert(0, '/gpt')
 os.chdir('/gpt')
 
-arxiv_id   = sys.argv[1] if len(sys.argv) > 1 else None
-no_cache   = "--no-cache" in sys.argv
+arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
+no_cache        = "--no-cache" in sys.argv
+keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
     sys.exit(1)
 
-print(f"[driver] 开始处理: {arxiv_id}  no_cache={no_cache}  max_retries={max_retries}", flush=True)
+print(f"[driver] 开始处理: {arxiv_id}  no_cache={no_cache}  keep_translation={keep_translation}  max_retries={max_retries}", flush=True)
 
 # ── 代理注入（必须在所有 gpt-academic 模块导入之前）──────────────────────────────
 HOST_PROXY   = os.environ.get("HOST_PROXY", "http://127.0.0.1:7890")
@@ -217,14 +218,22 @@ def clear_compile_cache(full=False):
 # ── 主逻辑：首次 + 重试 ────────────────────────────────────────────────────────
 result_pdf = None
 
-# 首次调用且 no_cache=True 时，也清 extract（避免 root 所有权导致 PermissionError）
-if no_cache:
+TRANSLATE_TEX = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder', 'merge_translate_zh.tex')
+
+if keep_translation and os.path.exists(TRANSLATE_TEX):
+    # 保留已有 GPT 翻译，只重跑编译：不清缓存，以 no_cache=False 调用插件
+    print(f"[driver] ♻️  复用已有翻译缓存: {TRANSLATE_TEX}（跳过 GPT 翻译）", flush=True)
+    actual_no_cache = False
+elif no_cache:
+    # 强制全量重新翻译
     clear_compile_cache(full=True)
+    actual_no_cache = True
+else:
+    actual_no_cache = False
 
 for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
     if attempt == 1:
-        # 首次：遵循调用方的 no_cache 参数
-        result_pdf = run_translation(no_cache, attempt)
+        result_pdf = run_translation(actual_no_cache, attempt)
     else:
         # 重试：强制清缓存，重新翻译
         print(f"\n[driver] ══ 第 {attempt} 次重试（清除缓存后重新翻译）══", flush=True)

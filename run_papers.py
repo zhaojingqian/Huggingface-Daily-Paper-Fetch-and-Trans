@@ -3,7 +3,7 @@
 通用论文处理 runner
 被 run_daily.py / run_monthly.py / main.py(weekly) 共用
 """
-import os, sys, json, time, fcntl
+import os, sys, json, time, fcntl, subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -391,10 +391,22 @@ def retry_pdf(mode=None, key=None):
                     total_ok += 1
                     continue
 
-                print(f"[retry-pdf] 🔬 {aid} — 重新翻译全文...", flush=True)
+                # 检测容器内是否已有翻译结果，有则跳过 GPT 翻译只重跑编译
+                container_tex = f"/gpt/gpt_log/arxiv_cache/{aid}/workfolder/merge_translate_zh.tex"
+                has_cache = subprocess.run(
+                    ["docker", "exec", "gpt-academic-latex",
+                     "test", "-s", container_tex],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                ).returncode == 0
+                if has_cache:
+                    print(f"[retry-pdf] 🔬 {aid} — 复用已有翻译，只重跑编译...", flush=True)
+                else:
+                    print(f"[retry-pdf] 🔬 {aid} — 重新翻译全文...", flush=True)
                 try:
                     r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
-                                       no_cache=True, timeout=3600)
+                                       no_cache=not has_cache,
+                                       keep_translation=has_cache,
+                                       timeout=3600)
                     if r.get("pdf_path"):
                         slim["pdf_status"] = "ok"
                         _paper_store_update_pdf_status(aid, "ok")

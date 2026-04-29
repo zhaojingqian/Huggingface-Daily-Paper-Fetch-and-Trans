@@ -41,7 +41,8 @@ def copy_driver_to_container():
     return r.returncode == 0
 
 
-def run_in_container(arxiv_id: str, no_cache: bool, timeout: int):
+def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
+                     keep_translation: bool = False):
     """
     在容器内运行翻译驱动，实时流式打印进度，返回 (returncode, stdout_full, "")
     每 30s 打印一次心跳，避免长时间无输出让人误以为卡死。
@@ -52,6 +53,8 @@ def run_in_container(arxiv_id: str, no_cache: bool, timeout: int):
     ]
     if no_cache:
         cmd.append("--no-cache")
+    if keep_translation:
+        cmd.append("--keep-translation")
 
     proc = subprocess.Popen(
         cmd,
@@ -130,7 +133,8 @@ def copy_from_container(container_path: str, local_path: str):
 
 
 def translate_full(arxiv_id: str, output_dir: str,
-                   no_cache: bool = False, timeout: int = 3600) -> dict:
+                   no_cache: bool = False, timeout: int = 3600,
+                   keep_translation: bool = False) -> dict:
     """
     全文翻译主函数：仅以 PDF 为成功标准，失败则直接报错（由驱动内部重试）。
     Returns: {
@@ -158,7 +162,8 @@ def translate_full(arxiv_id: str, output_dir: str,
     # 3. 在容器内执行翻译
     print(f"🚀 启动容器内翻译 (timeout={timeout}s)...", flush=True)
     t0 = time.time()
-    rc, stdout, stderr = run_in_container(arxiv_id, no_cache, timeout)
+    rc, stdout, stderr = run_in_container(arxiv_id, no_cache, timeout,
+                                          keep_translation=keep_translation)
     elapsed = time.time() - t0
     print(f"⏱️  耗时: {elapsed:.0f}s", flush=True)
 
