@@ -2,6 +2,53 @@
 
 ---
 
+## v3.9 — 2026-04-30
+
+### 新增功能
+
+#### PDF 翻译失败自动诊断报告（`logs/pdf_errors/<arxiv_id>.log`）
+
+- **背景**：PDF 翻译失败时需要手动进容器查日志才能定位原因，效率低。
+- **实现**：
+  - `full_translate_driver.py` 新增 `diagnose_failure()`：翻译失败时自动分析 LaTeX 编译日志，识别错误类型，输出 `PDF_DIAGNOSIS:<json>` 到 stdout。
+  - `translate_full.py` 新增 `_write_error_log()`：捕获诊断 JSON，写入宿主机 `logs/pdf_errors/<arxiv_id>.log`，包含错误类型、修复建议、LaTeX 错误摘要、手动修复命令。
+- **可识别的错误类型**：
+
+| 类型 | 触发条件 | 修复建议 |
+|---|---|---|
+| `normalsize_recursion` | `\normalsize` 自引用递归 | 用 `\let\normalsizesaved` 替换 |
+| `tcblisting_translated` | pgfkeys Error + Missing $ | 还原 verbatim 类环境块 |
+| `missing_package:X` | File 'X.sty' not found | tlmgr install 或创建 stub |
+| `missing_bracket` | twocolumn / begin{document} ended by | 在对应位置补回 `]` |
+| `group_mismatch` | Missing } / Emergency stop | GPT 破坏嵌套结构 |
+| `undefined_command:\X` | Undefined control sequence | 自定义宏丢失 |
+
+#### retry-pdf 优先复用已有 GPT 翻译缓存
+
+- **背景**：PDF 翻译失败多为编译阶段问题，GPT 翻译（20-40 分钟）已经完成，retry 时不应重新翻译。
+- **实现**：
+  - `full_translate_driver.py` 新增 `--keep-translation` 标志：若 `merge_translate_zh.tex` 已存在，跳过 GPT 翻译（不清缓存），直接以 `no_cache=False` 调用插件重跑编译。
+  - `translate_full.py` 透传 `keep_translation` 参数到容器命令。
+  - `run_papers.retry_pdf`：重试前通过 `docker exec test` 检测容器内是否已有翻译文件，有则用 `keep_translation=True`，否则用 `no_cache=True` 全量重译。
+
+#### 编译失败时自动修补 verbatim 类环境后重编译
+
+- **背景**：GPT 会错误翻译 `tcblisting`/`lstlisting`/`verbatim`/`minted` 等代码块内容，导致特殊字符（`{}`、`**`、`<>`、`_`）破坏 LaTeX 编译。
+- **实现**：`full_translate_driver.py` 新增 `patch_verbatim_envs()` 和 `patch_and_recompile()`：
+  - `run_translation` 失败但 `merge_translate_zh.tex` 存在时，自动将 verbatim 类环境块从原始 `merge.tex` 还原。
+  - 还原后直接调用 `pdflatex` 重新编译，成功则将 PDF 复制到 translation 目录输出。
+  - 无需任何人工介入，全自动完成。
+
+### Bug 修复
+
+#### 2604.25914 PDF 翻译失败（tcblisting 内容被翻译）
+
+- **根因**：论文包含 11 个 `tcblisting` 环境（代码块/prompt 模板），GPT 将其中 9 个的内容翻译成中文，导致 `{work_dir}`、`**bold**`、`<value>` 等特殊字符触发 `pgfkeys Error` 和大量 `Missing $ inserted`，编译失败。
+- **修复**：将 9 个被翻译的 `tcblisting` 块还原为原始内容，pdflatex 编译成功，生成 82 页 16 MB PDF。
+- **自动化**：上述 `patch_and_recompile` fallback 机制已内置，同类问题今后自动解决。
+
+---
+
 ## v3.8 — 2026-04-29
 
 ### 系统稳定性
