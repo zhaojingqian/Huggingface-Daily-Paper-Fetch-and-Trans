@@ -24,7 +24,9 @@ HEADERS = {
 
 
 def _get_proxies(use_proxy):
-    return {"http": PROXY, "https": PROXY} if use_proxy else None
+    # Returning empty string values explicitly disables proxy (including env vars).
+    # Returning None would fall through to env-level proxy settings.
+    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
 
 
 def _fetch_with_retry(url, max_retries=4, timeout=30):

@@ -140,9 +140,9 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3):
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except requests.exceptions.ProxyError:
-            if proxies:
+            if proxies.get("https"):
                 print("  ⚠️ LLM 代理失败，切换直连重试...", flush=True)
-                proxies = None
+                proxies = {"http": "", "https": ""}
                 last_exc = None
                 continue
             last_exc = RuntimeError("代理不可用且直连也失败")
@@ -152,9 +152,9 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3):
             last_exc = e
             wait = 2 ** attempt
             print(f"  ⚠️ LLM 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
-            if proxies:
+            if proxies.get("https"):
                 print("  ⚠️ 切换直连重试...", flush=True)
-                proxies = None
+                proxies = {"http": "", "https": ""}
             elif attempt < max_retries - 1:
                 print(f"  ⚠️ 等待 {wait}s 后重试...", flush=True)
                 time.sleep(wait)
@@ -171,7 +171,7 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3):
 def fetch_arxiv_metadata(arxiv_id, use_proxy=True):
     """从 arxiv 获取论文元数据"""
     url = f"https://export.arxiv.org/abs/{arxiv_id}"
-    proxies = {"http": PROXY, "https": PROXY} if use_proxy else None
+    proxies = {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
 
     try:
         resp = requests.get(url, proxies=proxies, timeout=30,

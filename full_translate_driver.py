@@ -11,7 +11,7 @@ os.chdir('/gpt')
 
 arxiv_id   = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache   = "--no-cache" in sys.argv
-max_retries = 2   # 首次 + 最多2次重试
+max_retries = 0   # 只翻译一次，不重试
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
