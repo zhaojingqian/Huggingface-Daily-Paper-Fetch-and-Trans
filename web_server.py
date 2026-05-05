@@ -1428,6 +1428,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send_404("收藏列表不存在")
 
 
+        # ── /papers/<arxiv_id>_zh.pdf  直接提供 PDF 文件 ────────
+        if len(parts) == 2 and parts[0] == "papers" and parts[1].endswith("_zh.pdf"):
+            arxiv_id = parts[1][:-len("_zh.pdf")]
+            if re.match(r'^\d{4}\.\d+$', arxiv_id):
+                fp = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+                if os.path.exists(fp):
+                    return self.send_file(fp)
+            return self.send_404(f"{parts[1]} 未找到")
+
         # ── /view/<arxiv_id>  PDF 查看器（带中文标题标签页）─────
         if len(parts) == 2 and parts[0] == "view":
             arxiv_id = parts[1]
