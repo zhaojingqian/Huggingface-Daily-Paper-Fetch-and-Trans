@@ -2,6 +2,47 @@
 
 ---
 
+## v4.0 — 2026-05-05
+
+### Bug 修复
+
+#### PDF 翻译失败修复：系统级 TeX 文件 `\input{glyphtounicode}` 导致崩溃
+
+- **根因**：部分论文的 `main.tex` 包含 `\input{glyphtounicode}`（TeX Live 系统文件，不在论文源码包中）。gpt-academic 的 `merge_tex_files_` 函数扫描所有 `\input{}` 引用并要求文件存在于项目目录，找不到时直接抛 `RuntimeError`，导致翻译在 7 秒内崩溃、阶段被标为 `translate/unknown`。
+- **修复**：在 `full_translate_driver.py` 给 `merge_tex_files_` 打 patch：遇到不在项目目录中的 `\input{}` 文件，先用 `kpsewhich` 查询是否为系统级 TeX 文件，是则输出警告注释并跳过（`% [system file skipped by driver patch: ...]`），不是才真正报错。
+- **影响论文**：`2604.27221`（以及今后所有引用 `glyphtounicode`、`hyperref` 等系统文件的论文）。
+
+#### retry-pdf 新增宿主机 tex 备份恢复路径
+
+- **背景**：容器重启后容器内的翻译缓存（`merge_translate_zh.tex`）会丢失，retry-pdf 只检查容器内是否有缓存，丢失后会触发完整的 GPT 重翻（20-40 分钟），浪费 API 调用。
+- **修复**：`run_papers.py` 的 `retry_pdf` 新增宿主机备份路径：
+  1. 先检查容器内缓存（同原逻辑）；
+  2. 若容器内无缓存，再检查宿主机 `data/tex_backup/<arxiv_id>_merge_translate_zh.tex`；
+  3. 有备份则通过 `_restore_tex_to_container` 恢复后只重跑编译；
+  4. 两处均无缓存才触发全量重新翻译。
+
+### 功能增强
+
+#### PDF 翻译失败诊断日志大幅升级（`logs/pdf_errors/<arxiv_id>.log`）
+
+旧版日志仅有错误类型和简短建议，新版全面展示失败细节：
+
+**translate 阶段（GPT 翻译崩溃）**
+- 新增 `【插件完整报错 / Traceback】` 节：完整还原 gpt-academic 插件抛出的异常，包含调用栈的每一个 `File`/行号/函数名/报错信息，不再截断至 180 字符。
+- 错误类型识别细化：`missing_input_file:<filename>`（如 `glyphtounicode`）、`runtime_error`、`plugin_exception`，取代旧版统一的 `unknown`。
+- 错误无匹配时给出"无插件报错消息，可能是网络/API 超时"的具体提示。
+
+**compile 阶段（LaTeX 编译失败）**
+- 每处 LaTeX 错误上下文从 **5 行**扩展到 **前 2 行 + 后 12 行**，最多采集 **10 处**错误（原为 8 处 / 5 行）。
+- 新增 `【编译日志尾部（最后 60 行）】` 节：包含 Emergency stop / Fatal 位置，附容器内日志的完整路径。
+
+**通用**
+- 新增 `【驱动运行记录（[driver] 输出）】` 节：列出完整的驱动执行流水（从代理初始化到最终 RESULT），可直接看到翻译在哪一步挂掉。
+- 关键驱动消息（含 `插件调用出错`）打印时去掉 180 字符截断，宿主机日志也完整捕获。
+- 模块级 `_plugin_msgs_full` 列表收集所有 chatbot 消息原文（不截断），供 `diagnose_failure` 分析。
+
+---
+
 ## v3.9 — 2026-04-30
 
 ### 新增功能

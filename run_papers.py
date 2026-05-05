@@ -347,7 +347,7 @@ def retry_pdf(mode=None, key=None):
     key=None  时扫描该 mode 下所有 key。
     返回成功翻译的篇数。
     """
-    from translate_full import translate_full
+    from translate_full import translate_full, TEX_BACKUP_DIR, _restore_tex_to_container
 
     modes = [mode] if mode else ["daily", "weekly", "monthly"]
     total_ok = 0
@@ -391,17 +391,28 @@ def retry_pdf(mode=None, key=None):
                     total_ok += 1
                     continue
 
-                # 检测容器内是否已有翻译结果，有则跳过 GPT 翻译只重跑编译
+                # 检测是否已有翻译 tex，有则只重跑编译（优先查宿主机备份，再查容器内）
                 container_tex = f"/gpt/gpt_log/arxiv_cache/{aid}/workfolder/merge_translate_zh.tex"
-                has_cache = subprocess.run(
+                has_container = subprocess.run(
                     ["docker", "exec", "gpt-academic-latex",
                      "test", "-s", container_tex],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 ).returncode == 0
-                if has_cache:
-                    print(f"[retry-pdf] 🔬 {aid} — 复用已有翻译，只重跑编译...", flush=True)
+
+                host_tex = os.path.join(TEX_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
+                has_host = os.path.exists(host_tex) and os.path.getsize(host_tex) > 0
+
+                if has_container:
+                    has_cache = True
+                    print(f"[retry-pdf] 🔬 {aid} — 容器内有翻译缓存，只重跑编译...", flush=True)
+                elif has_host:
+                    print(f"[retry-pdf] 🔬 {aid} — 发现宿主机 tex 备份，恢复后只重跑编译...", flush=True)
+                    has_cache = _restore_tex_to_container(aid)
+                    if not has_cache:
+                        print(f"[retry-pdf] ⚠️  {aid} — tex 恢复失败，改为重新翻译", flush=True)
                 else:
-                    print(f"[retry-pdf] 🔬 {aid} — 重新翻译全文...", flush=True)
+                    has_cache = False
+                    print(f"[retry-pdf] 🔬 {aid} — 无翻译缓存，重新翻译全文...", flush=True)
                 try:
                     r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
                                        no_cache=not has_cache,

@@ -96,6 +96,115 @@ if _latex_toolbox_spec:
     _lt.compile_latex_with_timeout = _patched_compile_with_timeout
     print(f"[driver] ✅ compile_latex_with_timeout 已 patch（timeout=300s，进程组 kill）", flush=True)
 
+    # ── Patch find_main_tex_file：先去注释再搜索 \documentclass，避免注释行误匹配 ──────
+    # gpt-academic 原实现在原始文本（含注释）中搜索 \documentclass，
+    # 导致注释掉的 \documentclass 也会使非主文件被列为候选，进而得分更高后被误选。
+    _orig_find_main = _lt.find_main_tex_file
+
+    def _patched_find_main_tex_file(file_manifest, mode):
+        import os as _os
+        import re as _re
+        import numpy as _np
+
+        def _rm_comments_simple(text):
+            lines = []
+            for line in text.splitlines():
+                stripped = line.lstrip()
+                if stripped.startswith('%'):
+                    continue
+                idx = line.find('%')
+                if idx >= 0:
+                    line = line[:idx]
+                lines.append(line)
+            return '\n'.join(lines)
+
+        candidates = []
+        for texf in file_manifest:
+            if _os.path.basename(texf).startswith('merge'):
+                continue
+            try:
+                with open(texf, 'r', encoding='utf8', errors='ignore') as _f:
+                    raw = _f.read()
+            except Exception:
+                continue
+            clean = _rm_comments_simple(raw)
+            if r'\documentclass' in clean:
+                candidates.append(texf)
+
+        if len(candidates) == 0:
+            raise RuntimeError('无法找到一个主Tex文件（包含documentclass关键字）')
+        if len(candidates) == 1:
+            print(f"[driver] ✅ 主 Tex 文件: {candidates[0]}", flush=True)
+            return candidates[0]
+
+        # 多个候选时按原始逻辑打分（但在去注释后的内容上）
+        unexpected_words = [r'\LaTeX', 'manuscript', 'Guidelines', 'font',
+                            'citations', 'rejected', 'blind review', 'reviewers']
+        expected_words   = [r'\input', r'\ref', r'\cite']
+        scores = []
+        for texf in candidates:
+            try:
+                with open(texf, 'r', encoding='utf8', errors='ignore') as _f:
+                    content = _lt.rm_comments(_f.read())
+            except Exception:
+                content = ''
+            s = 0
+            for w in unexpected_words:
+                if w in content:
+                    s -= 1
+            for w in expected_words:
+                if w in content:
+                    s += 1
+            scores.append(s)
+        best = candidates[int(_np.argmax(scores))]
+        print(f"[driver] ✅ 主 Tex 文件 (多候选, scores={dict(zip([_os.path.basename(c) for c in candidates], scores))}): {best}", flush=True)
+        return best
+
+    _lt.find_main_tex_file = _patched_find_main_tex_file
+    # 同步更新 latex_actions 模块中已导入的引用
+    _la_spec = importlib.util.find_spec('crazy_functions.latex_fns.latex_actions')
+    if _la_spec:
+        _la = importlib.import_module('crazy_functions.latex_fns.latex_actions')
+        _la.find_main_tex_file = _patched_find_main_tex_file
+    print(f"[driver] ✅ find_main_tex_file 已 patch（注释行不参与 documentclass 检测）", flush=True)
+
+    # ── Patch merge_tex_files_：系统级 TeX 文件（如 glyphtounicode）不在项目目录里，
+    #    原实现直接 raise RuntimeError，改为先用 kpsewhich 确认是否为系统文件，是则跳过。
+    _orig_merge_tex_files_ = _lt.merge_tex_files_
+
+    def _patched_merge_tex_files_(project_folder, main_file, mode):
+        import re as _re, subprocess as _sp
+        main_file = _lt.rm_comments(main_file)
+        for s in reversed([q for q in _re.finditer(r"\\input\{(.*?)\}", main_file, _re.M)]):
+            f = s.group(1)
+            fp = _os.path.join(project_folder, f)
+            fp_ = _lt.find_tex_file_ignore_case(fp)
+            if fp_:
+                try:
+                    with open(fp_, "r", encoding="utf-8", errors="replace") as fx:
+                        c = fx.read()
+                except Exception:
+                    c = "\n\nWarning from GPT-Academic: LaTex source file is missing!\n\n"
+            else:
+                # 检查是否为系统级 TeX 文件（通过 kpsewhich 查找）
+                try:
+                    probe = f if f.endswith('.tex') else f + '.tex'
+                    r = _sp.run(['kpsewhich', probe],
+                                capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0 and r.stdout.strip():
+                        print(f"[driver] ⚠️  跳过系统 TeX 文件（非项目文件）: {f}", flush=True)
+                        c = f"% [system file skipped by driver patch: {f}]\n"
+                    else:
+                        raise RuntimeError(f"找不到{fp}，Tex源文件缺失！")
+                except _sp.TimeoutExpired:
+                    raise RuntimeError(f"找不到{fp}，Tex源文件缺失！")
+            c = _patched_merge_tex_files_(project_folder, c, mode)
+            main_file = main_file[:s.span()[0]] + c + main_file[s.span()[1]:]
+        return main_file
+
+    _lt.merge_tex_files_ = _patched_merge_tex_files_
+    print(f"[driver] ✅ merge_tex_files_ 已 patch（系统 TeX 文件引用自动跳过）", flush=True)
+
 from toolbox import get_conf, ChatBotWithCookies, default_user_name
 
 api_key   = get_conf('API_KEY')
@@ -107,6 +216,9 @@ print(f"[driver] 缓存目录: {ARXIV_CACHE_DIR}", flush=True)
 from crazy_functions.Latex_Function import Latex翻译中文并重新编译PDF
 
 arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+
+# 模块级：收集插件运行中所有完整消息（不截断），供 diagnose_failure 分析
+_plugin_msgs_full: list[str] = []
 
 
 def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
@@ -145,6 +257,8 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
                 last_pair = list(cb)[-1] if cb else None
                 if last_pair and len(last_pair) >= 2 and last_pair[1]:
                     msg   = str(last_pair[1])
+                    # 完整消息存档（供诊断用，不截断）
+                    _plugin_msgs_full.append(msg)
                     clean = msg.replace('`', '').replace('\n', ' ').strip()
                     if clean != last_msg or step_cnt % 20 == 0:
                         is_key = any(k in clean for k in [
@@ -154,9 +268,10 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
                         ])
                         prefix = f"[driver|{elapsed()}]"
                         if is_key:
-                            print(f"{prefix} ✦ {clean[:180]}", flush=True)
+                            # 关键消息：完整打印（不截断），宿主机可捕获完整 traceback
+                            print(f"{prefix} ✦ {clean}", flush=True)
                         elif clean != last_msg:
-                            print(f"{prefix} · {clean[:100]}", flush=True)
+                            print(f"{prefix} · {clean[:120]}", flush=True)
                         last_msg = clean
             except Exception:
                 pass
@@ -301,11 +416,25 @@ def diagnose_failure(workfolder, arxiv_id_):
     分析编译失败原因，输出结构化诊断行供宿主机捕获。
     格式: PDF_DIAGNOSIS:<json>
     """
-    import json as _json
+    import json as _json, re as _re
 
-    # ── 找最后一个 LaTeX 日志文件 ──────────────────────────────────────────
+    trans_tex = os.path.join(workfolder, 'merge_translate_zh.tex')
+    orig_tex  = os.path.join(workfolder, 'merge.tex')
+    has_trans = os.path.exists(trans_tex)
+    has_orig  = os.path.exists(orig_tex)
+    phase     = 'compile' if has_trans else 'translate'
+
+    # ── 1. 插件报错全文（translate 阶段：从收集的 chatbot 消息中提取）──────
+    plugin_error_full = ''
+    for msg in _plugin_msgs_full:
+        if '插件调用出错' in msg or 'Traceback' in msg or 'RuntimeError' in msg \
+                or 'Error:' in msg or '找不到' in msg:
+            # 还原换行（gpt-academic 把换行替换成了空格，用 4 空格对齐重新断行）
+            plugin_error_full = msg.strip()
+            break
+
+    # ── 2. 读取 LaTeX 编译日志 ────────────────────────────────────────────
     log_candidates = sorted(glob.glob(os.path.join(workfolder, '*.log')))
-    # 优先用 fix 链末尾的 log，其次用 merge_translate_zh.log
     tex_log = None
     for cand in reversed(log_candidates):
         if 'merge_translate_zh' in os.path.basename(cand):
@@ -314,76 +443,113 @@ def diagnose_failure(workfolder, arxiv_id_):
     if not tex_log and log_candidates:
         tex_log = log_candidates[-1]
 
-    errors_raw = []
+    all_log_lines: list[str] = []
+    errors_raw:    list[str] = []
+    tex_log_tail   = ''
+
     if tex_log and os.path.exists(tex_log):
         with open(tex_log, encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
-        for i, ln in enumerate(lines):
-            if ln.startswith('!') and 'TeX capacity' not in ln or \
-               ('! LaTeX Error' in ln or '! Package' in ln or '! Missing' in ln or
-                '! Extra' in ln or '! Emergency' in ln or '! Undefined' in ln):
-                ctx_start = max(0, i - 1)
-                ctx_end   = min(len(lines), i + 5)
-                errors_raw.append(''.join(lines[ctx_start:ctx_end]).strip())
-                if len(errors_raw) >= 8:
+            all_log_lines = f.readlines()
+
+        # 找所有错误行，带更多上下文（前2行 + 后10行）
+        for i, ln in enumerate(all_log_lines):
+            is_err = (
+                (ln.startswith('!') and 'TeX capacity exceeded' not in ln)
+                or '! LaTeX Error' in ln
+                or '! Package' in ln
+                or '! Missing' in ln
+                or '! Extra' in ln
+                or '! Emergency' in ln
+                or '! Undefined' in ln
+                or '! Too many' in ln
+            )
+            if is_err:
+                ctx_start = max(0, i - 2)
+                ctx_end   = min(len(all_log_lines), i + 12)
+                errors_raw.append(''.join(all_log_lines[ctx_start:ctx_end]).rstrip())
+                if len(errors_raw) >= 10:
                     break
 
-    # ── 错误类型判断 ──────────────────────────────────────────────────────
+        # 日志尾部（最后 60 行，通常包含 Fatal/Emergency stop 位置）
+        tail_lines = all_log_lines[-60:] if len(all_log_lines) > 60 else all_log_lines
+        tex_log_tail = ''.join(tail_lines).strip()
+
+    # ── 3. 错误类型判断 ───────────────────────────────────────────────────
     all_text = '\n'.join(errors_raw)
-    trans_tex = os.path.join(workfolder, 'merge_translate_zh.tex')
-    orig_tex  = os.path.join(workfolder, 'merge.tex')
-    has_trans = os.path.exists(trans_tex)
-    has_orig  = os.path.exists(orig_tex)
+    category   = 'unknown'
+    suggestion = '查看下方详细错误信息'
 
-    category = 'unknown'
-    suggestion = '查看下方错误日志，手动 patch merge_translate_zh.tex 后重新编译'
-
-    if 'input stack size' in all_text or ('normalsize' in all_text and '->' in all_text):
-        category   = 'normalsize_recursion'
-        suggestion = ('preamble 中 \\normalsize 自引用递归。\n'
-                      '修复: 在 merge_translate_zh.tex 中把\n'
-                      '  \\expandafter\\def\\expandafter\\normalsize\\expandafter{\\normalsize ...}\n'
-                      '替换为:\n'
-                      '  \\let\\normalsizesaved\\normalsize\n'
-                      '  \\def\\normalsize{\\normalsizesaved ...}')
-    elif 'pgfkeys Error' in all_text or ('tcblisting' in all_text and 'Missing $' in all_text):
-        category   = 'tcblisting_translated'
-        suggestion = ('tcblisting/lstlisting 内代码被 GPT 翻译，导致特殊字符破坏编译。\n'
-                      '修复: 运行 patch_and_recompile 或手动从 merge.tex 还原 verbatim 块')
-    elif 'File' in all_text and 'not found' in all_text:
-        import re as _re
-        m = _re.search(r"File '([^']+)' not found", all_text)
-        pkg = m.group(1) if m else '未知'
-        category   = f'missing_package:{pkg}'
-        suggestion = (f'缺少 LaTeX 包: {pkg}。\n'
-                      f'修复: 在容器内 tlmgr install 或在 texmf 目录创建 stub .sty')
-    elif 'twocolumn' in all_text or ('begin{document} ended by' in all_text):
-        category   = 'missing_bracket'
-        suggestion = ('\\twocolumn[ 缺少闭合 ]，GPT 翻译时被删除。\n'
-                      '修复: 在 merge_translate_zh.tex 中 \\printAffiliationsAndNotice 前补回 ]\n'
-                      '参考 merge.tex 对应位置')
-    elif 'Emergency stop' in all_text or 'Missing }' in all_text:
-        category   = 'group_mismatch'
-        suggestion = '大括号/环境不匹配导致 Emergency stop，通常是 GPT 翻译破坏了嵌套结构'
-    elif 'Undefined control sequence' in all_text:
-        import re as _re
-        m = _re.search(r'\\([A-Za-z@]+)', all_text.split('Undefined control sequence')[1][:80])
-        cmd = ('\\' + m.group(1)) if m else '未知'
-        category   = f'undefined_command:{cmd}'
-        suggestion = f'未定义命令 {cmd}，可能是自定义宏未翻译/丢失'
-
-    # ── 是否有翻译文件（区分翻译失败 vs 编译失败）──────────────────────────
-    phase = 'compile' if has_trans else 'translate'
+    if phase == 'translate':
+        # translate 阶段：从插件报错里提取具体原因
+        if '找不到' in plugin_error_full and 'Tex源文件缺失' in plugin_error_full:
+            m = _re.search(r'找不到([^\n，]+)[，,]', plugin_error_full)
+            missing = m.group(1).strip() if m else '未知文件'
+            category   = f'missing_input_file:{_os.path.basename(missing)}'
+            suggestion = (f'\\input 引用的文件不在项目目录中: {missing}\n'
+                          f'如果是系统级 TeX 文件（如 glyphtounicode），已由驱动 patch 自动跳过。\n'
+                          f'如果是项目自定义文件，需手动将其加入 arxiv 源码包后重试。')
+        elif 'RuntimeError' in plugin_error_full:
+            m = _re.search(r'RuntimeError:\s*(.+)', plugin_error_full)
+            msg = m.group(1).strip()[:120] if m else plugin_error_full[:120]
+            category   = f'runtime_error'
+            suggestion = f'插件内部 RuntimeError: {msg}'
+        elif 'Traceback' in plugin_error_full or 'Error:' in plugin_error_full:
+            category   = 'plugin_exception'
+            suggestion = '插件抛出异常，见下方完整 Traceback'
+        elif not plugin_error_full:
+            suggestion = '无插件报错消息，可能是网络/API 超时，或驱动脚本被意外终止'
+    else:
+        # compile 阶段：从 LaTeX log 判断
+        if 'input stack size' in all_text or ('normalsize' in all_text and '->' in all_text):
+            category   = 'normalsize_recursion'
+            suggestion = ('preamble 中 \\normalsize 自引用递归。\n'
+                          '修复: 在 merge_translate_zh.tex 中把\n'
+                          '  \\expandafter\\def\\expandafter\\normalsize\\expandafter{\\normalsize ...}\n'
+                          '替换为:\n'
+                          '  \\let\\normalsizesaved\\normalsize\n'
+                          '  \\def\\normalsize{\\normalsizesaved ...}')
+        elif 'pgfkeys Error' in all_text or ('tcblisting' in all_text and 'Missing $' in all_text):
+            category   = 'tcblisting_translated'
+            suggestion = ('tcblisting/lstlisting 内代码被 GPT 翻译，导致特殊字符破坏编译。\n'
+                          '修复: 运行 patch_and_recompile 或手动从 merge.tex 还原 verbatim 块')
+        elif 'File' in all_text and 'not found' in all_text:
+            m = _re.search(r"File '([^']+)' not found", all_text)
+            pkg = m.group(1) if m else '未知'
+            category   = f'missing_package:{pkg}'
+            suggestion = (f'缺少 LaTeX 包: {pkg}。\n'
+                          f'修复: 在容器内 tlmgr install 或在 texmf 目录创建 stub .sty')
+        elif ('twocolumn' in all_text and 'ended by' in all_text) or \
+             'begin{document} ended by' in all_text:
+            category   = 'missing_bracket'
+            suggestion = ('\\twocolumn[ 缺少闭合 ]，GPT 翻译时被删除。\n'
+                          '修复: 在 merge_translate_zh.tex 中 \\printAffiliationsAndNotice 前补回 ]\n'
+                          '参考 merge.tex 对应位置')
+        elif 'Emergency stop' in all_text or 'Missing }' in all_text:
+            category   = 'group_mismatch'
+            suggestion = '大括号/环境不匹配导致 Emergency stop，通常是 GPT 翻译破坏了嵌套结构'
+        elif 'Undefined control sequence' in all_text:
+            m = _re.search(r'\\([A-Za-z@]+)',
+                           all_text.split('Undefined control sequence')[1][:80])
+            cmd = ('\\' + m.group(1)) if m else '未知'
+            category   = f'undefined_command:{cmd}'
+            suggestion = f'未定义命令 {cmd}，可能是自定义宏未翻译/丢失'
+        elif errors_raw:
+            # 有错误行但未匹配具体类型
+            first_line = errors_raw[0].splitlines()[0][:80]
+            category   = f'latex_error:{first_line}'
+            suggestion = '见下方 LaTeX 错误详情'
 
     diag = {
-        'arxiv_id':   arxiv_id_,
-        'phase':      phase,
-        'category':   category,
-        'suggestion': suggestion,
-        'top_errors': errors_raw[:5],
-        'log_file':   tex_log or '(none)',
-        'has_orig_tex': has_orig,
-        'has_trans_tex': has_trans,
+        'arxiv_id':          arxiv_id_,
+        'phase':             phase,
+        'category':          category,
+        'suggestion':        suggestion,
+        'top_errors':        errors_raw[:8],
+        'tex_log_tail':      tex_log_tail,
+        'plugin_error_full': plugin_error_full,
+        'log_file':          tex_log or '(none)',
+        'has_orig_tex':      has_orig,
+        'has_trans_tex':     has_trans,
     }
     print(f"PDF_DIAGNOSIS:{_json.dumps(diag, ensure_ascii=False)}", flush=True)
     return diag

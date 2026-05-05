@@ -22,6 +22,60 @@ DRIVER_SCRIPT   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "full_translate_driver.py")
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
+# 宿主机侧 tex 备份目录（容器重启后可从这里恢复翻译缓存，避免重复调 GPT）
+TEX_BACKUP_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data", "tex_backup")
+
+
+def _backup_tex_from_container(arxiv_id: str) -> bool:
+    """
+    将容器内已翻译的 merge_translate_zh.tex 备份到宿主机 TEX_BACKUP_DIR。
+    容器重启后可通过 _restore_tex_to_container 恢复，避免重新调用 GPT 翻译。
+    返回是否备份成功。
+    """
+    container_tex = f"{CONTAINER_CACHE}/{arxiv_id}/workfolder/merge_translate_zh.tex"
+    # 先确认文件在容器内存在且非空
+    check = subprocess.run(
+        ["docker", "exec", CONTAINER_NAME, "test", "-s", container_tex],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if check.returncode != 0:
+        return False
+    os.makedirs(TEX_BACKUP_DIR, exist_ok=True)
+    local_tex = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
+    r = subprocess.run(
+        ["docker", "cp", f"{CONTAINER_NAME}:{container_tex}", local_tex],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    ok = r.returncode == 0 and os.path.exists(local_tex) and os.path.getsize(local_tex) > 0
+    if ok:
+        print(f"💾 已备份翻译 tex 到宿主机: {local_tex}", flush=True)
+    return ok
+
+
+def _restore_tex_to_container(arxiv_id: str) -> bool:
+    """
+    将宿主机备份的 merge_translate_zh.tex 恢复到容器内 workfolder。
+    返回是否恢复成功。
+    """
+    local_tex = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
+    if not os.path.exists(local_tex) or os.path.getsize(local_tex) == 0:
+        return False
+    workfolder = f"{CONTAINER_CACHE}/{arxiv_id}/workfolder"
+    # 确保容器内目标目录存在
+    subprocess.run(
+        ["docker", "exec", CONTAINER_NAME, "mkdir", "-p", workfolder],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    container_tex = f"{workfolder}/merge_translate_zh.tex"
+    r = subprocess.run(
+        ["docker", "cp", local_tex, f"{CONTAINER_NAME}:{container_tex}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    ok = r.returncode == 0
+    if ok:
+        print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex}", flush=True)
+    return ok
 
 
 def check_container():
@@ -136,6 +190,8 @@ def copy_from_container(container_path: str, local_path: str):
 def _write_error_log(arxiv_id: str, stdout: str):
     """
     从驱动输出中提取 PDF_DIAGNOSIS 诊断信息，写入宿主机 logs/pdf_errors/<arxiv_id>.log。
+    日志包含：失败阶段、错误类型、修复建议、完整插件 traceback（translate 阶段）、
+    LaTeX 错误上下文（compile 阶段）、编译日志尾部、以及完整驱动运行记录。
     """
     diag = None
     for line in stdout.splitlines():
@@ -154,35 +210,94 @@ def _write_error_log(arxiv_id: str, stdout: str):
     from datetime import datetime
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    SEP  = "=" * 60
+    SEP2 = "-" * 60
+
     with open(log_path, "w", encoding="utf-8") as f:
-        f.write(f"{'='*60}\n")
+        f.write(f"{SEP}\n")
         f.write(f"PDF 翻译失败诊断报告\n")
         f.write(f"时间: {ts}\n")
         f.write(f"论文: {arxiv_id}\n")
-        f.write(f"{'='*60}\n\n")
+        f.write(f"{SEP}\n\n")
 
         if diag:
-            f.write(f"【失败阶段】 {diag.get('phase', '?')}  "
-                    f"(translate=GPT翻译失败 / compile=编译失败)\n\n")
-            f.write(f"【错误类型】 {diag.get('category', '?')}\n\n")
-            f.write(f"【修复建议】\n{diag.get('suggestion', '')}\n\n")
-            f.write(f"【LaTeX 错误摘要】\n")
-            for i, err in enumerate(diag.get('top_errors', []), 1):
-                f.write(f"  [{i}] {err}\n\n")
-            f.write(f"【容器内日志文件】 {diag.get('log_file', '(none)')}\n")
-            f.write(f"【原始 tex 存在】  {diag.get('has_orig_tex')}\n")
-            f.write(f"【翻译 tex 存在】  {diag.get('has_trans_tex')}\n")
+            phase    = diag.get('phase', '?')
+            category = diag.get('category', '?')
+            phase_cn = 'GPT 翻译阶段崩溃' if phase == 'translate' else 'LaTeX 编译阶段失败'
+
+            f.write(f"【失败阶段】  {phase}  —  {phase_cn}\n")
+            f.write(f"【错误类型】  {category}\n")
+            f.write(f"【原始 tex】  {'存在' if diag.get('has_orig_tex') else '不存在（源码未解压成功）'}\n")
+            f.write(f"【翻译 tex】  {'存在' if diag.get('has_trans_tex') else '不存在（GPT 翻译未完成）'}\n\n")
+
+            f.write(f"【修复建议】\n")
+            for line in diag.get('suggestion', '').splitlines():
+                f.write(f"  {line}\n")
+            f.write("\n")
+
+            # ── translate 阶段：完整插件报错 ──────────────────────────────
+            plugin_err = diag.get('plugin_error_full', '').strip()
+            if plugin_err:
+                f.write(f"{SEP2}\n")
+                f.write(f"【插件完整报错 / Traceback】\n")
+                f.write(f"{SEP2}\n")
+                # gpt-academic 把换行存成空格，尝试还原缩进
+                import re as _re
+                # 把连续多个空格前出现的 "File " / "  File " / "> " / "raise" / 错误类名 换回换行
+                restored = _re.sub(
+                    r'  +(File "|raise |RuntimeError|ValueError|KeyError|'
+                    r'TypeError|AttributeError|ImportError|OSError)',
+                    r'\n  \1', plugin_err
+                )
+                f.write(restored)
+                f.write("\n\n")
+
+            # ── compile 阶段：LaTeX 错误上下文 ────────────────────────────
+            top_errors = diag.get('top_errors', [])
+            if top_errors:
+                f.write(f"{SEP2}\n")
+                f.write(f"【LaTeX 编译错误（共 {len(top_errors)} 处，含上下文）】\n")
+                f.write(f"{SEP2}\n")
+                for i, err in enumerate(top_errors, 1):
+                    f.write(f"\n── 错误 #{i} ──\n")
+                    f.write(err)
+                    f.write("\n")
+                f.write("\n")
+
+            # ── LaTeX 日志尾部片段 ────────────────────────────────────────
+            log_tail = diag.get('tex_log_tail', '').strip()
+            if log_tail:
+                f.write(f"{SEP2}\n")
+                f.write(f"【编译日志尾部（最后 60 行）】\n")
+                f.write(f"【容器内日志路径】 {diag.get('log_file', '(none)')}\n")
+                f.write(f"{SEP2}\n")
+                f.write(log_tail)
+                f.write("\n\n")
+
         else:
-            f.write("（未能获取结构化诊断，请查看 repair.log 中的原始输出）\n\n")
-            # 把驱动输出里的错误相关行也写进来
+            f.write("（未能获取结构化诊断，以下为驱动原始输出中的关键行）\n\n")
             for line in stdout.splitlines():
                 if any(k in line for k in ("❌", "Error", "Fatal", "Emergency",
-                                            "[driver]", "RESULT:")):
+                                            "Traceback", "RuntimeError",
+                                            "[driver]", "RESULT:", "找不到")):
                     f.write(f"  {line}\n")
+            f.write("\n")
 
-        f.write(f"\n{'='*60}\n")
-        f.write("如需手动修复，参考命令:\n")
-        f.write(f"  docker exec gpt-academic-latex bash\n")
+        # ── 驱动运行完整记录（所有 [driver] 行）──────────────────────────
+        driver_lines = [ln for ln in stdout.splitlines()
+                        if ln.startswith("[driver") or "✦" in ln or "·" in ln
+                        or ln.startswith("RESULT:") or "异常:" in ln]
+        if driver_lines:
+            f.write(f"{SEP2}\n")
+            f.write(f"【驱动运行记录（[driver] 输出）】\n")
+            f.write(f"{SEP2}\n")
+            for ln in driver_lines:
+                f.write(f"  {ln}\n")
+            f.write("\n")
+
+        f.write(f"{SEP}\n")
+        f.write("如需手动进入容器排查:\n")
+        f.write(f"  docker exec -it gpt-academic-latex bash\n")
         f.write(f"  # 查看完整编译日志:\n")
         f.write(f"  cat /gpt/gpt_log/arxiv_cache/{arxiv_id}/workfolder/merge_translate_zh.log\n")
         f.write(f"  # 编辑翻译文件:\n")
@@ -190,7 +305,7 @@ def _write_error_log(arxiv_id: str, stdout: str):
         f.write(f"  # 手动重编译:\n")
         f.write(f"  cd /gpt/gpt_log/arxiv_cache/{arxiv_id}/workfolder\n")
         f.write(f"  pdflatex -interaction=nonstopmode merge_translate_zh.tex\n")
-        f.write(f"{'='*60}\n")
+        f.write(f"{SEP}\n")
 
     print(f"📋 错误诊断已写入: {log_path}", flush=True)
 
@@ -229,6 +344,9 @@ def translate_full(arxiv_id: str, output_dir: str,
                                           keep_translation=keep_translation)
     elapsed = time.time() - t0
     print(f"⏱️  耗时: {elapsed:.0f}s", flush=True)
+
+    # 无论成功失败，只要容器内有翻译 tex 就备份到宿主机（容器重启后可复用）
+    _backup_tex_from_container(arxiv_id)
 
     if rc == -1:
         result['error'] = f"超时 ({timeout}s)"
