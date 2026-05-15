@@ -335,6 +335,44 @@ def _extract_env_blocks(content, env):
     return blocks
 
 
+def fix_label_ref_emdash(trans_tex_path):
+    """
+    修复 GPT 翻译时将 \\label{}/\\ref{}/\\cite{}/\\eqref{} 等命令参数中的
+    ASCII 连字符 '-' 替换为 Unicode 破折号（em-dash '—' U+2014、en-dash '–' U+2013）
+    导致的 LaTeX 编译报错。
+
+    仅替换这些命令的花括号参数内部，不触碰正文。
+    返回修复的数量。
+    """
+    import re as _re
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    CMD_RE = _re.compile(
+        r'(\\(?:label|ref|eqref|cite|citealt|citep|citet|pageref|nameref|hyperref|autoref)'
+        r'(?:\[[^\]]*\])?'   # 可选 [别名]
+        r'\{)([^}]*?)(\})',  # 捕获花括号内容
+        _re.DOTALL,
+    )
+
+    total = 0
+
+    def _replace(m):
+        nonlocal total
+        inner = m.group(2)
+        fixed = inner.replace('\u2014', '-').replace('\u2013', '-')
+        if fixed != inner:
+            total += len([c for c in inner if c in '\u2014\u2013'])
+        return m.group(1) + fixed + m.group(3)
+
+    new_text = CMD_RE.sub(_replace, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 fix_label_ref_emdash: 修复了 {total} 处破折号", flush=True)
+    return total
+
+
 def patch_verbatim_envs(trans_tex_path, orig_tex_path):
     """
     将翻译后的 tex 文件中所有 verbatim 类环境（tcblisting / lstlisting / verbatim）
@@ -387,6 +425,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
         return None
 
     print(f"[driver] 🔧 检测到编译失败但翻译已完成，尝试 verbatim 修补+重编译...", flush=True)
+    fix_label_ref_emdash(trans_tex)
     n = patch_verbatim_envs(trans_tex, orig_tex)
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
 
