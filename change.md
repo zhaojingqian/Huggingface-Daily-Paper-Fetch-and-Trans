@@ -2,6 +2,31 @@
 
 ---
 
+## v4.1 — 2026-05-26
+
+### Bug 修复
+
+#### W21 PDF 翻译失败修复：磁盘不足与 `bxcoloremoji` 缺包
+
+- **影响论文**：`2026-W21` 中原本标记失败的 `2605.18747`、`2605.20025`、`2605.21467`、`2605.22109`。
+- **根因 1**：首次 W21 任务运行时根分区接近满盘，容器内创建 `/gpt/gpt_log/arxiv_cache/<arxiv_id>` 失败，日志报 `OSError: [Errno 28] No space left on device`，任务尚未进入源码解压和 LaTeX 编译阶段。
+- **处理 1**：清理 npm/pnpm/VS Code 扩展安装包缓存，根分区可用空间从约 1GB 恢复到约 4GB；重新执行 `run_repair.py --retry-pdf --mode weekly --key 2026-W21` 后，`2605.22109`、`2605.21467` 状态同步为已有 PDF，`2605.20025` 重新翻译并生成 PDF。
+- **根因 2**：`2605.18747` 进入真实编译后失败，`merge_translate_zh.log` 显示 `LaTeX Error: File 'bxcoloremoji.sty' not found`，属于容器 TeX 环境缺少 emoji LaTeX 包。
+- **处理 2**：按 `scripts/setup_docker_env.sh` 既有安装逻辑在容器内安装 `bxcoloremoji` 到 `TEXMFLOCAL`，执行 `mktexlsr` 后 `kpsewhich bxcoloremoji.sty` 可解析；随后复用 `merge_translate_zh.tex` 仅重跑编译，成功生成 `2605.18747_zh.pdf`。
+- **结果**：`data/weekly/2026-W21/index.json` 中 10 篇论文均为 `pdf_status=ok`，`/paper/papers/2605.18747_zh.pdf` 与 `/paper/papers/2605.20025_zh.pdf` 线上返回 `HTTP/2 200`。
+
+### 稳定性改进
+
+#### 手动提交元数据链路补强
+
+- **背景**：手动提交页面曾出现空卡片，原因是 `web_server.py` 已抓到 arXiv API 元数据，但 `translate_arxiv.py` 又重复抓取 arXiv 页面；后续空结果可能覆盖已有标题/摘要。
+- **修复**：
+  - 手动提交时将已抓取的 `prefetched_meta` 传入 `translate_and_save()`，避免重复请求 arXiv；
+  - arXiv 元数据请求复用 `fetch_hf.py` 风格的代理优先、失败切直连、指数退避重试；
+  - 合并 paper store 与 slim index 时，空字段不再覆盖已有完整元数据。
+
+---
+
 ## v4.0 — 2026-05-05
 
 ### Bug 修复
@@ -697,4 +722,3 @@ python3 main.py 2026-W08 --full
 - 新增 cron：0 5 * * * docker restart gpt-academic-latex
 - 定期清除累积的僵尸 pdflatex 进程（无害但会占用进程表条目）
 - 重启日志写入 logs/docker-restart.log
-

@@ -18,6 +18,14 @@ from pathlib import Path
 # 读取 gpt-academic 配置
 GPT_ACADEMIC_CONFIG = "/root/workspace/gpt-academic/config_private.py"
 PROXY = "http://127.0.0.1:7890"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 # Paper Store — 所有论文元数据/翻译的唯一存储（daily/weekly/monthly 共用）
 _BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
@@ -27,6 +35,50 @@ PAPER_STORE_DIR = os.path.join(_BASE_DIR, "data", "papers")
 def _has_chinese(text):
     """检查字符串中是否包含中文字符"""
     return bool(re.search(r'[\u4e00-\u9fff]', text or ""))
+
+
+def _get_proxies(use_proxy):
+    # Empty string values explicitly disable proxy, including env-level proxy.
+    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
+
+
+def _fetch_with_retry(url, max_retries=4, timeout=30):
+    """带指数退避的 HTTP 请求：代理失败切直连，HTTP/网络错误重试。"""
+    use_proxy = True
+    last_exc = None
+    for attempt in range(max_retries):
+        proxies = _get_proxies(use_proxy)
+        try:
+            resp = requests.get(url, headers=HEADERS, proxies=proxies, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.ProxyError as e:
+            if use_proxy:
+                print("  ⚠️ arXiv 代理失败，切换直连...", flush=True)
+                use_proxy = False
+                last_exc = e
+                continue
+            last_exc = e
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"  ⚠️ arXiv 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
+            if use_proxy:
+                print("  ⚠️ 切换直连重试...", flush=True)
+                use_proxy = False
+            elif attempt < max_retries - 1:
+                print(f"  ⚠️ 等待 {wait}s 后重试...", flush=True)
+                time.sleep(wait)
+        except Exception as e:
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"  ⚠️ arXiv 请求失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
+            if attempt < max_retries - 1:
+                print(f"  ⚠️ 等待 {wait}s 后重试...", flush=True)
+                time.sleep(wait)
+    raise last_exc or Exception("arXiv 请求失败")
 
 
 # ── Paper Store 读写 ──────────────────────────────────────────────────────────
@@ -171,13 +223,9 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3):
 def fetch_arxiv_metadata(arxiv_id, use_proxy=True):
     """从 arxiv 获取论文元数据"""
     url = f"https://export.arxiv.org/abs/{arxiv_id}"
-    proxies = {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
 
     try:
-        resp = requests.get(url, proxies=proxies, timeout=30,
-                            headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        html = resp.text
+        html = _fetch_with_retry(url, timeout=30)
 
         # 标题
         title = ""
@@ -219,8 +267,6 @@ def fetch_arxiv_metadata(arxiv_id, use_proxy=True):
         }
 
     except Exception as e:
-        if use_proxy:
-            return fetch_arxiv_metadata(arxiv_id, use_proxy=False)
         print(f"  ⚠️ 获取元数据失败: {e}")
         return {
             "arxiv_id": arxiv_id, "title": "", "abstract": "",
@@ -543,7 +589,20 @@ def generate_html(meta, translation, rank, week_str, pdf_zh=None):
     return html
 
 
-def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None):
+def _normalize_meta(arxiv_id, meta):
+    meta = dict(meta or {})
+    meta["arxiv_id"] = arxiv_id
+    meta["abstract"] = meta.get("abstract") or meta.get("summary", "")
+    meta.setdefault("title", "")
+    meta.setdefault("authors", "")
+    meta.setdefault("submitted", "")
+    meta.setdefault("url", f"https://arxiv.org/abs/{arxiv_id}")
+    meta.setdefault("pdf_url", f"https://arxiv.org/pdf/{arxiv_id}")
+    return meta
+
+
+def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None,
+                       prefetched_meta=None):
     """翻译一篇论文并保存 HTML（优先命中共享缓存，跨 daily/weekly/monthly 复用）"""
     if config is None:
         config = load_api_config()
@@ -571,8 +630,14 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None):
         }
     else:
         # ── 2. 无缓存：抓取元数据 + LLM 翻译 ──────────────────────────────────
-        print(f"  🔍 获取元数据...", flush=True)
-        meta = fetch_arxiv_metadata(arxiv_id)
+        if prefetched_meta and (prefetched_meta.get("title") or
+                                prefetched_meta.get("abstract") or
+                                prefetched_meta.get("summary")):
+            meta = _normalize_meta(arxiv_id, prefetched_meta)
+            print(f"  🔍 复用已获取元数据...", flush=True)
+        else:
+            print(f"  🔍 获取元数据...", flush=True)
+            meta = fetch_arxiv_metadata(arxiv_id)
 
         if meta.get("title"):
             print(f"  📌 标题: {meta['title'][:60]}...", flush=True)
@@ -598,7 +663,9 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None):
     return {
         "arxiv_id":   arxiv_id,
         "title":      meta.get("title", ""),
+        "abstract":   meta.get("abstract", ""),
         "title_zh":   translation.get("title_zh", ""),
+        "abstract_zh":translation.get("abstract_zh", ""),
         "summary_zh": translation.get("summary_zh", ""),
         "keywords_zh":translation.get("keywords_zh", []),
         "authors":    meta.get("authors", ""),

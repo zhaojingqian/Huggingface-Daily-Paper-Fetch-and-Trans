@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Paper Hub Web Server — 端口 18080"""
 
-import http.server, os, json, re, threading, subprocess, sys
+import http.server, os, json, re, threading, subprocess, sys, time
 from urllib.parse import unquote
 from datetime import datetime, date
 import urllib.request
 import xml.etree.ElementTree as ET
+import requests
 
 PORT            = 18080
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,16 @@ _bm_lock   = threading.Lock()
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
 # 通过环境变量注入：Environment=BASE_PATH=/paper
 BASE_PATH  = os.environ.get("BASE_PATH", "").rstrip("/")
+
+PROXY = "http://127.0.0.1:7890"
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/atom+xml,application/xml,text/xml,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 
@@ -53,20 +64,55 @@ def _update_job(arxiv_id, **kw):
         _save_jobs(jobs)
 
 
+def _get_proxies(use_proxy):
+    # Empty string values explicitly disable proxy, including env-level proxy.
+    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
+
+
+def _fetch_with_retry(url, max_retries=4, timeout=30):
+    """带指数退避的 HTTP 请求：先走代理，代理失败自动切直连。"""
+    use_proxy = True
+    last_exc = None
+    for attempt in range(max_retries):
+        proxies = _get_proxies(use_proxy)
+        try:
+            resp = requests.get(url, headers=HTTP_HEADERS, proxies=proxies, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.ProxyError as e:
+            if use_proxy:
+                print("[submit] arXiv 代理失败，切换直连...", flush=True)
+                use_proxy = False
+                last_exc = e
+                continue
+            last_exc = e
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"[submit] arXiv 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
+            if use_proxy:
+                print("[submit] 切换直连重试...", flush=True)
+                use_proxy = False
+            elif attempt < max_retries - 1:
+                print(f"[submit] 等待 {wait}s 后重试...", flush=True)
+                time.sleep(wait)
+        except Exception as e:
+            last_exc = e
+            wait = 2 ** attempt
+            print(f"[submit] arXiv 请求失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
+            if attempt < max_retries - 1:
+                print(f"[submit] 等待 {wait}s 后重试...", flush=True)
+                time.sleep(wait)
+    raise last_exc or Exception("arXiv 请求失败")
+
+
 def fetch_arxiv_meta(arxiv_id):
     """从 arXiv API 获取论文元数据"""
     clean_id = arxiv_id.strip().split("v")[0]
-    url = "http://export.arxiv.org/api/query?id_list=" + clean_id
-    xml_data = None
-    try:
-        proxy = urllib.request.ProxyHandler(
-            {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"})
-        opener = urllib.request.build_opener(proxy)
-        with opener.open(url, timeout=30) as resp:
-            xml_data = resp.read()
-    except Exception:
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            xml_data = resp.read()
+    url = "https://export.arxiv.org/api/query?id_list=" + clean_id
+    xml_data = _fetch_with_retry(url, timeout=30)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     root = ET.fromstring(xml_data)
     entry = root.find("atom:entry", ns)
@@ -80,10 +126,12 @@ def fetch_arxiv_meta(arxiv_id):
     return {
         "arxiv_id": clean_id,
         "title": title,
+        "abstract": summary,
         "summary": summary,
         "authors": "Authors:" + ", ".join(authors_list),
         "submitted": published,
         "url": "https://arxiv.org/abs/" + clean_id,
+        "pdf_url": "https://arxiv.org/pdf/" + clean_id,
     }
 
 
@@ -135,8 +183,14 @@ def _do_submit_job(arxiv_id):
             rank=0,
             week_str=mode + "/" + key,
             config=config,
+            prefetched_meta=meta,
         )
-        paper_entry = dict(list(meta.items()) + list(result.items()))
+        paper_entry = dict(meta)
+        for k, v in result.items():
+            if v not in ("", None, []):
+                paper_entry[k] = v
+            else:
+                paper_entry.setdefault(k, v)
         paper_entry["html_file"] = "papers/" + arxiv_id + ".html"
         paper_entry["rank"] = 0
         _upsert_manual_index(mode, key, paper_entry)
@@ -229,6 +283,17 @@ def _paper_pdf_exists(arxiv_id):
     return os.path.exists(p) and os.path.getsize(p) > 10240
 
 
+def _merge_paper_entry(stored, slim):
+    """合并 paper store 与 index：非空 index 字段覆盖，空字段不覆盖完整数据。"""
+    entry = dict(stored or {})
+    for k, v in (slim or {}).items():
+        if v not in ("", None, []):
+            entry[k] = v
+        else:
+            entry.setdefault(k, v)
+    return entry
+
+
 def get_paper_entry(mode, key, arxiv_id):
     """从 slim index + paper store 合并论文完整元数据"""
     idx = load_index(mode, key)
@@ -239,7 +304,7 @@ def get_paper_entry(mode, key, arxiv_id):
                 slim = p
                 break
     stored = _read_paper_store(arxiv_id)
-    entry = {**stored, **slim}   # slim 字段（rank/upvotes）优先
+    entry = _merge_paper_entry(stored, slim)
     entry.setdefault("arxiv_id", arxiv_id)
     # 统一 pdf 状态
     pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
@@ -837,7 +902,7 @@ def build_papers_page(mode, key):
         if not aid:
             continue
         stored = _read_paper_store(aid)
-        entry = {**stored, **slim}
+        entry = _merge_paper_entry(stored, slim)
         entry.setdefault("arxiv_id", aid)
         # 统一 pdf 状态
         pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
@@ -923,7 +988,7 @@ def _enrich_slim_papers(slim_list, mode, key, limit=None):
         if not aid:
             continue
         stored = _read_paper_store(aid)
-        entry = {**stored, **slim}
+        entry = _merge_paper_entry(stored, slim)
         entry.setdefault("arxiv_id", aid)
         pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
         if pdf_status == "ok" or _paper_pdf_exists(aid):
@@ -1638,7 +1703,7 @@ def search_papers(query, limit=60):
                 if not aid:
                     continue
                 stored = _read_paper_store(aid)
-                p = {**stored, **slim}
+                p = _merge_paper_entry(stored, slim)
                 fields = " ".join([
                     aid,
                     p.get("title", ""),
