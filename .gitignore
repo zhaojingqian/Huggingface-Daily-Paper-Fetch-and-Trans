@@ -20,6 +20,11 @@ env/
 .DS_Store
 .idea/
 .vscode/
+.cache/
+.codex/
+.gitconfig
+.zshenv
+.zshrc
 *.swp
 *.swo
 
