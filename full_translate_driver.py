@@ -335,6 +335,30 @@ def _extract_env_blocks(content, env):
     return blocks
 
 
+def _discover_tcb_listing_envs(content):
+    """从 \\newtcblisting{...} 定义中发现自定义 verbatim/listing 环境。"""
+    import re as _re
+    envs = set()
+    for pat in (
+        r'\\newtcblisting\s*\{([A-Za-z][A-Za-z0-9*_-]*)\}',
+        r'\\DeclareTCBListing\s*\{([A-Za-z][A-Za-z0-9*_-]*)\}',
+    ):
+        envs.update(_re.findall(pat, content))
+    return sorted(envs)
+
+
+def _discover_tcolorbox_envs(content):
+    """从 \\newtcolorbox{...} 定义中发现普通 tcolorbox 环境。"""
+    import re as _re
+    envs = set()
+    for pat in (
+        r'\\newtcolorbox\s*\{([A-Za-z][A-Za-z0-9*_-]*)\}',
+        r'\\DeclareTColorBox\s*\{([A-Za-z][A-Za-z0-9*_-]*)\}',
+    ):
+        envs.update(_re.findall(pat, content))
+    return sorted(envs)
+
+
 def fix_label_ref_emdash(trans_tex_path):
     """
     修复 GPT 翻译时将 \\label{}/\\ref{}/\\cite{}/\\eqref{} 等命令参数中的
@@ -373,17 +397,113 @@ def fix_label_ref_emdash(trans_tex_path):
     return total
 
 
+def patch_body_endinput(trans_tex_path):
+    """
+    合并后的论文正文里偶尔会带入子文件的 \\endinput，导致 TeX 提前停止读取，
+    后面的 \\end{document} 被忽略。只注释 \\begin{document} 之后整行的 \\endinput。
+    """
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    doc_pos = text.find(r'\begin{document}')
+    if doc_pos < 0:
+        return 0
+
+    head, body = text[:doc_pos], text[doc_pos:]
+    lines = body.splitlines(keepends=True)
+    total = 0
+    for i, line in enumerate(lines):
+        if line.strip() == r'\endinput':
+            newline = '\n' if line.endswith('\n') else ''
+            lines[i] = '% \\endinput removed by paper-trans repair' + newline
+            total += 1
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(head + ''.join(lines))
+        print(f"[driver] 🔧 patch_body_endinput: 注释了 {total} 处正文 \\endinput", flush=True)
+    return total
+
+
+def patch_tcolorbox_small_groups(trans_tex_path):
+    """
+    GPT 有时把 \\begin{trajcase} 后的 {\\small ... } 保留下来。
+    这种跨 breakable tcolorbox 的显式分组容易触发 tcb@savebox 分组错误。
+    """
+    import re as _re
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    total = 0
+
+    def _replace_begin(m):
+        nonlocal total
+        total += 1
+        return m.group(1) + r'\small' + '\n'
+
+    new_text = _re.sub(
+        r'(\\begin\{trajcase\}(?:\[[^\n]*\])?(?:\{[^\n]*\})?\s*)\{\\small\s*',
+        _replace_begin,
+        text,
+    )
+    if total:
+        new_text = _re.sub(
+            r'(?m)^\s*\}\s*\n(\s*\\end\{trajcase\})',
+            r'\1',
+            new_text,
+        )
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_tcolorbox_small_groups: 修复了 {total} 个 trajcase 字号分组", flush=True)
+    return total
+
+
+def patch_unbalanced_groups_in_tcolorboxes(trans_tex_path):
+    """在自定义 tcolorbox 块内补齐明显漏掉的 \\endgroup。"""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    envs = _discover_tcolorbox_envs(text)
+    result = text
+    total = 0
+    for env in envs:
+        blocks = _extract_env_blocks(result, env)
+        for start, end, block in reversed(blocks):
+            missing = block.count(r'\begingroup') - block.count(r'\endgroup')
+            if missing <= 0:
+                continue
+            end_tag = r'\end{' + env + '}'
+            pos = block.rfind(end_tag)
+            if pos < 0:
+                continue
+            fixed = block[:pos] + ('\\endgroup\n' * missing) + block[pos:]
+            result = result[:start] + fixed + result[end:]
+            total += missing
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(result)
+        print(f"[driver] 🔧 patch_unbalanced_groups_in_tcolorboxes: 补齐了 {total} 个 endgroup", flush=True)
+    return total
+
+
 def patch_verbatim_envs(trans_tex_path, orig_tex_path):
     """
     将翻译后的 tex 文件中所有 verbatim 类环境（tcblisting / lstlisting / verbatim）
     还原为原始文件中的对应块，避免 GPT 翻译破坏代码/prompt 内容导致编译失败。
     返回替换的块数量。
     """
-    VERBATIM_ENVS = ['tcblisting', 'lstlisting', 'verbatim', 'Verbatim', 'minted']
     with open(orig_tex_path, encoding='utf-8') as f:
         orig = f.read()
     with open(trans_tex_path, encoding='utf-8') as f:
         trans = f.read()
+
+    VERBATIM_ENVS = [
+        'tcblisting', 'lstlisting', 'verbatim', 'Verbatim', 'minted',
+        *_discover_tcb_listing_envs(orig),
+        *_discover_tcb_listing_envs(trans),
+    ]
+    VERBATIM_ENVS = sorted(set(VERBATIM_ENVS))
 
     result = trans
     total = 0
@@ -425,9 +545,12 @@ def patch_and_recompile(workfolder, arxiv_id_):
         return None
 
     print(f"[driver] 🔧 检测到编译失败但翻译已完成，尝试 verbatim 修补+重编译...", flush=True)
+    patch_body_endinput(trans_tex)
     fix_label_ref_emdash(trans_tex)
+    patch_tcolorbox_small_groups(trans_tex)
     n = patch_verbatim_envs(trans_tex, orig_tex)
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
+    patch_unbalanced_groups_in_tcolorboxes(trans_tex)
 
     try:
         _sp.run(

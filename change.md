@@ -2,6 +2,34 @@
 
 ---
 
+## v4.2 — 2026-06-05
+
+### Bug 修复
+
+#### 2026-06-04 每日论文 PDF 编译失败修复
+
+- **影响论文**：`2606.02800`、`2606.02060`。
+- **根因 1**：`2606.02800` 的合并 tex 正文中带入了子文件级 `\endinput`，导致 TeX 提前停止读取，文件末尾的 `\end{document}` 未被执行，报 `Emergency stop` / `no legal \end found`。
+- **处理 1**：注释正文中的 `\endinput` 后重编译成功，生成 `data/papers/2606.02800_zh.pdf`。
+- **根因 2**：`2606.02060` 的 `trajcase` / `tcolorbox` 块内存在跨盒子的 `{\small ...}` 分组和漏闭合 `\endgroup`；同时自定义 `newtcblisting` 环境 `promptbox` 内容被翻译成中文，触发 `listings` UTF-8 编译错误。
+- **处理 2**：移除易损字号分组、补齐盒子内 `\endgroup`，并将自定义 listing 环境从原文还原后重编译成功，生成 `data/papers/2606.02060_zh.pdf`。
+- **结果**：`data/daily/2026-06-04/index.json` 中 3 篇论文全文 PDF 均已恢复为 `pdf_status=ok`。
+
+### 稳定性改进
+
+#### 编译失败 fallback 自动修补增强
+
+- `full_translate_driver.py` 新增正文 `\endinput` 自动注释，避免合并子文件时提前终止 TeX 输入。
+- 自动发现并还原 `\newtcblisting` / `\DeclareTCBListing` 定义的自定义代码环境，覆盖 `promptbox` 等非标准 verbatim 场景。
+- 对 `trajcase` 的 `{\small ...}` 跨盒子分组进行保守修复，并自动补齐自定义 `tcolorbox` 块内明显缺失的 `\endgroup`。
+
+### 维护约定
+
+- 以后涉及代码、产物或流程的更新，需要同步更新相关 `.md` 文档。
+- 完成可提交更新后，需要 commit 并 push 到 Git 远端。
+
+---
+
 ## v4.1 — 2026-05-26
 
 ### Bug 修复
