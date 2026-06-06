@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Paper Hub Web Server — 端口 18080"""
 
+import html as html_lib
 import http.server, os, json, re, threading, subprocess, sys, time
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime, date
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -1273,21 +1274,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
+
+    def send_redirect(self, location, code=302):
+        self.send_response(code)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
     
     def send_file(self, path):
         ext = os.path.splitext(path)[1].lower()
         ct_map = {".pdf":"application/pdf",".html":"text/html; charset=utf-8",
                   ".json":"application/json",".css":"text/css",".js":"application/javascript"}
         ct = ct_map.get(ext, "application/octet-stream")
-        with open(path, "rb") as f:
-            data = f.read()
-        self.send_response(200)
+        file_size = os.path.getsize(path)
+        start, end = 0, file_size - 1
+        status = 200
+
+        range_header = self.headers.get("Range") if ext == ".pdf" else None
+        if range_header:
+            m = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
+            if not m:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            raw_start, raw_end = m.groups()
+            if raw_start == "" and raw_end:
+                suffix = int(raw_end)
+                start = max(file_size - suffix, 0)
+            elif raw_start:
+                start = int(raw_start)
+                if raw_end:
+                    end = min(int(raw_end), file_size - 1)
+            if start > end or start >= file_size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+
+        content_len = end - start + 1 if file_size else 0
+        self.send_response(status)
         self.send_header("Content-Type", ct)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(content_len))
         if ext == ".pdf":
             self.send_header("Content-Disposition", "inline")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.end_headers()
-        self.wfile.write(data)
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = content_len
+            while remaining > 0:
+                chunk = f.read(min(1024 * 256, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def send_404(self, msg="页面未找到"):
         html = f"<html><body style='font-family:sans-serif;padding:40px'><h2>404 — {msg}</h2><a href='/'>← 返回首页</a></body></html>"
@@ -1434,6 +1482,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         raw  = unquote(self.path).split("?")[0]
         parts = [p for p in raw.strip("/").split("/") if p]
+        query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
 
         # ── /api/submit/status  任务状态 ───────────────────
         if raw == "/api/submit/status":
@@ -1467,7 +1516,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── /api/search  搜索 JSON 接口 ───────────────────
         if raw.startswith("/api/search"):
-            from urllib.parse import parse_qs, urlparse
             q = parse_qs(urlparse(self.path).query).get("q", [""])[0].strip()
             results = search_papers(q) if q else []
             cards_html = "".join(
@@ -1492,6 +1540,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send_html(html)
                 return self.send_404("收藏列表不存在")
 
+        # ── /papers/<file>  paper store 静态文件回退（nginx 未接管时使用）────
+        if len(parts) == 2 and parts[0] == "papers":
+            name = parts[1]
+            if re.match(r'^[A-Za-z0-9._-]+$', name):
+                fp = os.path.join(PAPER_STORE_DIR, name)
+                if os.path.isfile(fp):
+                    return self.send_file(fp)
+            return self.send_404(f"{name} 不存在")
+
 
         # ── /view/<arxiv_id>  PDF 查看器（带中文标题标签页）─────
         if len(parts) == 2 and parts[0] == "view":
@@ -1502,13 +1559,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     meta = _read_paper_store(arxiv_id)
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
                     pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf"
+                    ua = self.headers.get("User-Agent", "").lower()
+                    is_safari = (
+                        "safari" in ua and
+                        not any(x in ua for x in ("chrome", "chromium", "crios", "edg", "opr", "atlas"))
+                    )
+                    force_embed = query.get("embed", ["0"])[0].lower() in ("1", "true", "yes")
+                    if not force_embed and not is_safari:
+                        return self.send_redirect(f"{pdf_src}#view=FitH")
+                    safe_title = html_lib.escape(title_zh, quote=True)
                     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head>
 <meta charset="UTF-8">
-<title>{title_zh}</title>
-<style>*{{margin:0;padding:0}}html,body{{height:100%;overflow:hidden}}embed{{width:100%;height:100%;display:block}}</style>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{safe_title}</title>
+<style>*{{box-sizing:border-box}}html,body{{height:100%;margin:0;overflow:hidden;background:#111}}iframe{{width:100%;height:100%;border:0;display:block}}</style>
 </head><body>
-<embed src="{pdf_src}" type="application/pdf">
+<iframe src="{pdf_src}#view=FitH" title="{safe_title}"></iframe>
 </body></html>"""
                     return self.send_html(html)
                 return self.send_404(f"{arxiv_id} PDF 不存在")
