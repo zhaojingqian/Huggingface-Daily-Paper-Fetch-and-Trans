@@ -10,12 +10,14 @@
 
 - **背景**：`/paper/view/2605.21573` 在 ChatGPT Atlas 中打开明显慢于 Safari；该论文中文 PDF 约 26.5 MB，Safari 对嵌入式 PDF 处理较快，但 Atlas/Chromium 在 `<embed>` 嵌入插件里加载大 PDF 时容易出现首屏等待。
 - **修复**：
-  - `/view/<arxiv_id>` 默认对 Atlas、Chrome、Edge 等 Chromium 系浏览器返回 `302`，直接跳转到顶层 PDF URL，让浏览器原生 PDF 查看器接管，减少嵌入式插件开销；
+  - `/view/<arxiv_id>` 默认对 Atlas、Chrome、Edge 等 Chromium 系浏览器返回 `302`，直接跳转到带中文文件名的顶层 PDF URL，让浏览器原生 PDF 查看器接管，减少嵌入式插件开销并保留中文标签页；
   - Safari 保留轻量 HTML 查看页，继续内嵌 PDF，维持原本较快体验；
   - 新增 `?embed=1` 参数，可强制使用内嵌查看页，便于排查和回退。
 - **静态文件改进**：
+  - 新增 `/pdf/<arxiv_id>/<中文标题>.pdf` 动态路由，PDF 响应头携带 `filename*` 中文文件名；
   - `web_server.py` 新增 `/papers/<file>` 静态文件回退路由；
   - Python 回退路径支持 PDF `Range` 请求，返回 `206 Partial Content`，并改为分块流式发送，避免一次性把大 PDF 读入内存；
+  - Web 服务切换为线程型 HTTP server，避免大 PDF 传输阻塞其他页面请求；
   - PDF 响应增加 `Accept-Ranges: bytes` 与缓存头，提升非 nginx 直出场景下的大文件加载效率。
 
 ---

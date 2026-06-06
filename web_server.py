@@ -3,7 +3,7 @@
 
 import html as html_lib
 import http.server, os, json, re, threading, subprocess, sys, time
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from datetime import datetime, date
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -282,6 +282,20 @@ def _paper_pdf_exists(arxiv_id):
     """检查 paper store 里是否有有效 PDF"""
     p = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
     return os.path.exists(p) and os.path.getsize(p) > 10240
+
+
+def _pdf_display_filename(arxiv_id, title):
+    """生成用于浏览器标签页和保存文件名的中文 PDF 文件名。"""
+    name = (title or arxiv_id).strip()
+    name = re.sub(r'[\\/\x00-\x1f]+', ' ', name)
+    name = re.sub(r'\s+', ' ', name).strip(" .")
+    if not name:
+        name = arxiv_id
+    if len(name) > 80:
+        name = name[:80].rstrip()
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    return name
 
 
 def _merge_paper_entry(stored, slim):
@@ -1282,7 +1296,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
     
-    def send_file(self, path):
+    def send_file(self, path, download_name=None):
         ext = os.path.splitext(path)[1].lower()
         ct_map = {".pdf":"application/pdf",".html":"text/html; charset=utf-8",
                   ".json":"application/json",".css":"text/css",".js":"application/javascript"}
@@ -1321,7 +1335,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(content_len))
         if ext == ".pdf":
-            self.send_header("Content-Disposition", "inline")
+            if download_name:
+                quoted_name = quote(download_name)
+                self.send_header(
+                    "Content-Disposition",
+                    f"inline; filename=\"paper.pdf\"; filename*=UTF-8''{quoted_name}",
+                )
+            else:
+                self.send_header("Content-Disposition", "inline")
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Cache-Control", "public, max-age=86400")
             if status == 206:
@@ -1540,6 +1561,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send_html(html)
                 return self.send_404("收藏列表不存在")
 
+        # ── /pdf/<arxiv_id>/<title>.pdf  带中文文件名的顶层 PDF ─────────
+        if len(parts) == 3 and parts[0] == "pdf":
+            arxiv_id = parts[1]
+            if re.match(r'^\d{4}\.\d+$', arxiv_id):
+                fp = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+                if os.path.exists(fp):
+                    meta = _read_paper_store(arxiv_id)
+                    title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
+                    return self.send_file(fp, _pdf_display_filename(arxiv_id, title_zh))
+                return self.send_404(f"{arxiv_id} PDF 不存在")
+            return self.send_404(f"{arxiv_id} 未找到")
+
         # ── /papers/<file>  paper store 静态文件回退（nginx 未接管时使用）────
         if len(parts) == 2 and parts[0] == "papers":
             name = parts[1]
@@ -1559,6 +1592,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     meta = _read_paper_store(arxiv_id)
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
                     pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf"
+                    pdf_name = _pdf_display_filename(arxiv_id, title_zh)
+                    top_pdf_src = f"{BASE_PATH}/pdf/{arxiv_id}/{quote(pdf_name)}"
                     ua = self.headers.get("User-Agent", "").lower()
                     is_safari = (
                         "safari" in ua and
@@ -1566,7 +1601,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     )
                     force_embed = query.get("embed", ["0"])[0].lower() in ("1", "true", "yes")
                     if not force_embed and not is_safari:
-                        return self.send_redirect(f"{pdf_src}#view=FitH")
+                        return self.send_redirect(f"{top_pdf_src}#view=FitH")
                     safe_title = html_lib.escape(title_zh, quote=True)
                     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head>
@@ -2092,8 +2127,11 @@ def _recover_stuck_jobs():
 def main():
     import socketserver
     HOST = os.environ.get("BIND_HOST", "127.0.0.1")   # 默认只监听本机
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
+    class ThreadingHTTPServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    with ThreadingHTTPServer((HOST, PORT), Handler) as httpd:
         print(f"Paper Hub Web → http://{HOST}:{PORT}", flush=True)
         _recover_stuck_jobs()
         httpd.serve_forever()
