@@ -2,12 +2,46 @@
 
 ---
 
+## v4.4 — 2026-06-06
+
+### Web 行为回退
+
+#### PDF 查看页恢复 HTML wrapper
+
+- **背景**：v4.3 为提升 ChatGPT Atlas / Chromium 打开大 PDF 的速度，将 `/view/<arxiv_id>` 默认 302 到裸 PDF；但 Chromium PDF viewer 会优先采用 PDF 内部 metadata，部分论文 metadata 中的 `[Your Paper Title]` 会覆盖浏览器标签页标题。
+- **修复**：
+  - `/view/<arxiv_id>` 固定返回 HTML wrapper，不再默认跳转到 `/pdf/<arxiv_id>/<title>.pdf`；
+  - wrapper 的 `<title>` 使用 `title_zh || title || arxiv_id`，内部 iframe 继续加载 `{BASE_PATH}/papers/<arxiv_id>_zh.pdf#view=FitH`；
+  - 保留 `/pdf/<arxiv_id>/<title>.pdf` 直接 PDF 路由、中文 `filename*` 响应头、PDF Range 支持和分块发送。
+- **结果**：ChatGPT Atlas / Chrome / Safari 打开 `/paper/view/2605.21573` 时标签页由 HTML 标题控制，不再显示 PDF metadata 中的占位标题。
+
+### Web 代码整合
+
+#### 无行为变更重构与合约测试
+
+- `web_server.py` 新增纯 helper：
+  - `paper_pdf_state()`：统一 `has_pdf` / `pdf_failed` / `pdf_status` 判断；
+  - `enrich_paper_entry()`：统一 slim index 与 paper store 合并；
+  - `render_paper_actions()`：统一详情、全文 PDF、arXiv、原文 PDF 链接生成；
+  - `h_text()` / `h_attr()` / `js_str()`：按 HTML 文本、HTML 属性、inline JS 字符串上下文转义。
+- 列表页、首页、详情页和收藏页复用上述 helper，保持按钮 href、点击语义、路由响应类型和页面结构不变。
+- `load_index()` 改为 `with open(...)`，消除未关闭文件句柄的 `ResourceWarning`。
+- 新增 `tests/test_web_server_contract.py`，使用 stdlib `unittest` 启动临时 HTTP server，固定核心页面、JSON API、PDF Range、`/view` wrapper、`BASE_PATH=/paper`、详情页关键链接和搜索/提交/status fetch 合约。
+
+### 文档
+
+- 重建 `README.md`，同步当前 paper store 架构、Web 路由契约、PDF wrapper 策略、测试命令、systemd 部署和 cron 运维建议。
+- 更新 `plan.md` 为当前项目路线图，移除早期 `main.py` / `fetch_weekly.py` 时代的过时说明。
+
+---
+
 ## v4.3 — 2026-06-06
 
 ### 性能优化
 
 #### PDF 查看页在 ChatGPT Atlas / Chromium 浏览器中的加载优化
 
+- **状态**：该默认跳转策略已在 v4.4 回退；仍保留 `/pdf/<arxiv_id>/<中文标题>.pdf`、PDF Range 和线程型 HTTP server 等底层优化。
 - **背景**：`/paper/view/2605.21573` 在 ChatGPT Atlas 中打开明显慢于 Safari；该论文中文 PDF 约 26.5 MB，Safari 对嵌入式 PDF 处理较快，但 Atlas/Chromium 在 `<embed>` 嵌入插件里加载大 PDF 时容易出现首屏等待。
 - **修复**：
   - `/view/<arxiv_id>` 默认对 Atlas、Chrome、Edge 等 Chromium 系浏览器返回 `302`，直接跳转到带中文文件名的顶层 PDF URL，让浏览器原生 PDF 查看器接管，减少嵌入式插件开销并保留中文标签页；

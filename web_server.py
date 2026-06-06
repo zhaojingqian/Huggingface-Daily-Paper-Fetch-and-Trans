@@ -309,6 +309,92 @@ def _merge_paper_entry(stored, slim):
     return entry
 
 
+def h_text(value):
+    """Escape text-node content while preserving the displayed text."""
+    return html_lib.escape("" if value is None else str(value), quote=False)
+
+
+def h_attr(value):
+    """Escape HTML attribute content."""
+    return html_lib.escape("" if value is None else str(value), quote=True)
+
+
+def js_str(value):
+    """Return a JavaScript string literal for inline event handlers."""
+    return json.dumps("" if value is None else str(value), ensure_ascii=False)
+
+
+def paper_pdf_state(entry, pdir=None, aid=None):
+    """Return normalized PDF state for a merged paper entry."""
+    aid = aid or entry.get("arxiv_id", "")
+    pdf_status = entry.get("pdf_status")
+    local_pdf = bool(
+        entry.get("pdf_zh") and pdir and
+        os.path.exists(os.path.join(pdir, entry["pdf_zh"].replace("papers/", "", 1)))
+    )
+    has_pdf = bool(aid and _paper_pdf_exists(aid)) or local_pdf
+    if has_pdf:
+        pdf_status = "ok"
+    pdf_failed = (
+        entry.get("pdf_zh_failed", False)
+        or pdf_status == "failed"
+        or (not has_pdf and entry.get("title_zh", "") and pdf_status not in ("ok", "none"))
+    )
+    return {"has_pdf": has_pdf, "pdf_failed": pdf_failed, "pdf_status": pdf_status}
+
+
+def enrich_paper_entry(slim, mode, key):
+    """Merge a slim index row with paper store metadata and normalize PDF fields."""
+    aid = (slim or {}).get("arxiv_id", "")
+    stored = _read_paper_store(aid) if aid else {}
+    entry = _merge_paper_entry(stored, slim or {})
+    entry.setdefault("arxiv_id", aid)
+    state = paper_pdf_state(entry, papers_dir(mode, key), aid)
+    if state["has_pdf"]:
+        entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
+        entry.pop("pdf_zh_failed", None)
+    elif state["pdf_failed"]:
+        entry["pdf_zh_failed"] = True
+    return entry
+
+
+def render_paper_actions(arxiv_id, mode="", key="", has_html=False,
+                         has_pdf=False, pdf_failed=False, context="card"):
+    """Render paper action links without changing hrefs or button text."""
+    aid = h_attr(arxiv_id)
+    btns = []
+    if context == "detail":
+        btns = [
+            f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv 原文</a>',
+            f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文 PDF</a>',
+        ]
+        if has_pdf:
+            btns.insert(0, f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文中文 PDF</a>')
+        elif pdf_failed:
+            btns.insert(0, '<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
+                           'title="LaTeX源码编译失败，该论文可能含不兼容宏包">⚠️ 全文PDF转换失败</span>')
+        return btns
+
+    if context == "bookmark":
+        if mode and key:
+            btns.append(f'<a class="btn btn-detail" href="/{h_attr(mode)}/{h_attr(key)}/papers/{aid}">🔍 详情</a>')
+        if has_pdf:
+            btns.append(f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>')
+        elif pdf_failed:
+            btns.append('<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
+                        'title="全文PDF转换失败">⚠️ PDF失败</span>')
+        btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
+        return btns
+
+    if has_html:
+        btns.append(f'<a class="btn btn-detail" href="/{h_attr(mode)}/{h_attr(key)}/papers/{aid}">🔍 详情</a>')
+    if has_pdf:
+        btns.append(f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>')
+    btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
+    btns.append(f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文PDF</a>')
+    return btns
+
+
 def get_paper_entry(mode, key, arxiv_id):
     """从 slim index + paper store 合并论文完整元数据"""
     idx = load_index(mode, key)
@@ -321,12 +407,11 @@ def get_paper_entry(mode, key, arxiv_id):
     stored = _read_paper_store(arxiv_id)
     entry = _merge_paper_entry(stored, slim)
     entry.setdefault("arxiv_id", arxiv_id)
-    # 统一 pdf 状态
-    pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
-    if pdf_status == "ok" or _paper_pdf_exists(arxiv_id):
+    state = paper_pdf_state(entry, papers_dir(mode, key), arxiv_id)
+    if state["has_pdf"]:
         entry["pdf_zh"] = f"papers/{arxiv_id}_zh.pdf"
         entry.pop("pdf_zh_failed", None)
-    elif pdf_status == "failed":
+    elif state["pdf_failed"]:
         entry["pdf_zh_failed"] = True
     return entry
 
@@ -336,7 +421,8 @@ def load_index(mode, key):
     p = os.path.join(DATA_DIR, mode, key, "index.json")
     if os.path.exists(p):
         try:
-            return json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
             pass
     return None
@@ -786,22 +872,9 @@ def paper_card(p, mode, key, pdir):
     upvotes    = p.get("upvotes",0)
     kws        = p.get("keywords_zh",[]) or []
 
-    # PDF 状态：paper store JSON 的 pdf_status 为唯一权威来源
-    # 同时兼容旧版 pdf_zh_failed 字段
-    pdf_status = p.get("pdf_status")       # "ok" / "failed" / None
-    has_pdf    = _paper_pdf_exists(aid) or bool(
-        p.get("pdf_zh") and pdir and
-        os.path.exists(os.path.join(pdir, p["pdf_zh"].replace("papers/","",1))))
-    # 已有 PDF 文件时 pdf_status 以实际文件为准
-    if has_pdf:
-        pdf_status = "ok"
-    # pdf_failed: 显式失败标志 OR pdf_status="failed" OR
-    # 已翻译（有 title_zh）但无 PDF 且非"从未尝试"（pdf_status!="none"）
-    pdf_failed = (
-        p.get("pdf_zh_failed", False)
-        or pdf_status == "failed"
-        or (not has_pdf and title_zh and pdf_status not in ("ok", "none"))
-    )
+    pdf_state = paper_pdf_state(p, pdir, aid)
+    has_pdf = pdf_state["has_pdf"]
+    pdf_failed = pdf_state["pdf_failed"]
 
     has_html = bool(title_zh or (
         pdir and os.path.exists(os.path.join(pdir, f"{aid}.html"))))
@@ -815,43 +888,38 @@ def paper_card(p, mode, key, pdir):
         pdf_badge = ""
     up_badge    = f'<span class="badge-new">▲ {upvotes}</span>' if upvotes else ""
 
-    kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
+    kw_html = "".join(f'<span class="kw">{h_text(k)}</span>' for k in kws[:4])
 
     meta_parts = []
     if submitted:
-        meta_parts.append(f'<span class="meta-item">📅 {submitted}</span>')
+        meta_parts.append(f'<span class="meta-item">📅 {h_text(submitted)}</span>')
     if authors:
         short_au = authors[:50] + ("…" if len(authors) > 50 else "")
-        meta_parts.append(f'<span class="meta-item">👥 {short_au}</span>')
+        meta_parts.append(f'<span class="meta-item">👥 {h_text(short_au)}</span>')
 
     # 收藏按钮（JS 初始化后自动更新 ☆/★）
-    title_esc = (title_zh or title).replace("'", "\\'")[:60]
-    bm_btn = (f'<button class="btn-bm" data-aid="{aid}" '
-              f'onclick="BM.open(\'{aid}\',\'{mode}\',\'{key}\',\'{title_esc}\')"'
+    title_for_js = (title_zh or title)[:60]
+    bm_onclick = f"BM.open({js_str(aid)},{js_str(mode)},{js_str(key)},{js_str(title_for_js)})"
+    bm_btn = (f'<button class="btn-bm" data-aid="{h_attr(aid)}" '
+              f'onclick="{h_attr(bm_onclick)}"'
               f' title="收藏">☆</button>')
 
-    # buttons
-    btns = []
-    if has_html:
-        btns.append(f'<a class="btn btn-detail" href="/{mode}/{key}/papers/{aid}">🔍 详情</a>')
-    if has_pdf:
-        btns.append(f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>')
-    btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
-    btns.append(f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{aid}" target="_blank">原文PDF</a>')
+    btns = render_paper_actions(aid, mode, key, has_html, has_pdf, pdf_failed, "card")
 
+    del_onclick = f"deletePaper({js_str(mode)},{js_str(key)},{js_str(aid)})"
     del_btn = (f'<button class="btn btn-del" '
-               f'onclick="deletePaper(\'{mode}\',\'{key}\',\'{aid}\')" '
+               f'onclick="{h_attr(del_onclick)}" '
                f'title="删除论文（含本地文件）">🗑️</button>')
 
-    return f"""<div class="card" id="card-{aid}">
+    return f"""<div class="card" id="card-{h_attr(aid)}">
   <div class="card-hdr">
     {bm_btn}
     <div>{rank_badge}{pdf_badge}{up_badge}</div>
-    <div class="card-title">{title[:120]}</div>
-    {"<div class='card-title-zh'>" + title_zh[:100] + "</div>" if title_zh else ""}
+    <div class="card-title">{h_text(title[:120])}</div>
+    {"<div class='card-title-zh'>" + h_text(title_zh[:100]) + "</div>" if title_zh else ""}
   </div>
   <div class="card-body">
-    {"<p class='summary'>" + summary_zh[:300] + "</p>" if summary_zh else ""}
+    {"<p class='summary'>" + h_text(summary_zh[:300]) + "</p>" if summary_zh else ""}
     {"<div>" + kw_html + "</div>" if kw_html else ""}
     <div class="meta-row">{"".join(meta_parts)}</div>
     <div class="btns">{"".join(btns)}{del_btn}</div>
@@ -916,17 +984,7 @@ def build_papers_page(mode, key):
         aid = slim.get("arxiv_id", "")
         if not aid:
             continue
-        stored = _read_paper_store(aid)
-        entry = _merge_paper_entry(stored, slim)
-        entry.setdefault("arxiv_id", aid)
-        # 统一 pdf 状态
-        pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
-        if pdf_status == "ok" or _paper_pdf_exists(aid):
-            entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
-            entry.pop("pdf_zh_failed", None)
-        elif pdf_status == "failed":
-            entry["pdf_zh_failed"] = True
-        full_papers.append(entry)
+        full_papers.append(enrich_paper_entry(slim, mode, key))
 
     n_pdfs = sum(1 for p in full_papers if p.get("pdf_zh") and not p.get("pdf_zh_failed"))
     stats = f"""<div class="stats">
@@ -1002,16 +1060,7 @@ def _enrich_slim_papers(slim_list, mode, key, limit=None):
         aid = slim.get("arxiv_id", "")
         if not aid:
             continue
-        stored = _read_paper_store(aid)
-        entry = _merge_paper_entry(stored, slim)
-        entry.setdefault("arxiv_id", aid)
-        pdf_status = slim.get("pdf_status") or stored.get("pdf_status")
-        if pdf_status == "ok" or _paper_pdf_exists(aid):
-            entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
-            entry.pop("pdf_zh_failed", None)
-        elif pdf_status == "failed":
-            entry["pdf_zh_failed"] = True
-        results.append(entry)
+        results.append(enrich_paper_entry(slim, mode, key))
     return results, pd
 
 
@@ -1092,39 +1141,26 @@ def build_detail_page(mode, key, arxiv_id):
     authors   = entry.get("authors","")
     submitted = entry.get("submitted","")
     kws       = entry.get("keywords_zh",[]) or []
-    has_pdf    = _paper_pdf_exists(arxiv_id) or bool(
-        entry.get("pdf_zh") and pdir and
-        os.path.exists(os.path.join(pdir, entry["pdf_zh"].replace("papers/","",1))))
-    pdf_status = entry.get("pdf_status")
-    if has_pdf:
-        pdf_status = "ok"
-    pdf_failed = (
-        entry.get("pdf_zh_failed", False)
-        or pdf_status == "failed"
-        or (not has_pdf and title_zh and pdf_status not in ("ok", "none"))
-    )
+    pdf_state = paper_pdf_state(entry, pdir, arxiv_id)
+    has_pdf = pdf_state["has_pdf"]
+    pdf_failed = pdf_state["pdf_failed"]
 
-    kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws)
-    btns = [f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{arxiv_id}" target="_blank">arXiv 原文</a>',
-            f'<a class="btn btn-pdf" href="https://arxiv.org/pdf/{arxiv_id}" target="_blank">原文 PDF</a>']
-    if has_pdf:
-        btns.insert(0, f'<a class="btn btn-full-pdf" href="/view/{arxiv_id}" target="_blank">📄 全文中文 PDF</a>')
-    elif pdf_failed:
-        btns.insert(0, '<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
-                       'title="LaTeX源码编译失败，该论文可能含不兼容宏包">⚠️ 全文PDF转换失败</span>')
+    kw_html = "".join(f'<span class="kw">{h_text(k)}</span>' for k in kws)
+    btns = render_paper_actions(arxiv_id, has_pdf=has_pdf,
+                                pdf_failed=pdf_failed, context="detail")
     back = {"daily":f"/daily/{key}","weekly":f"/weekly/{key}","monthly":f"/monthly/{key}"}.get(mode,"/")
 
     body = f"""<div class="detail-wrap">
 <a class="btn btn-back" href="{back}">← 返回</a>
 <div style="height:14px"></div>
 <div class="detail-hdr">
-  <h2>{title}</h2>
-  {"<div class='zh'>" + title_zh + "</div>" if title_zh else ""}
-  <div class="meta">{"👥 " + authors[:80] + " &nbsp;&nbsp;" if authors else ""}{"📅 " + submitted if submitted else ""}</div>
+  <h2>{h_text(title)}</h2>
+  {"<div class='zh'>" + h_text(title_zh) + "</div>" if title_zh else ""}
+  <div class="meta">{"👥 " + h_text(authors[:80]) + " &nbsp;&nbsp;" if authors else ""}{"📅 " + h_text(submitted) if submitted else ""}</div>
 </div>
 {"<div class='detail-sec'><h3>关键词</h3><div>" + kw_html + "</div></div>" if kw_html else ""}
-{"<div class='detail-sec'><h3>中文摘要</h3><p>" + abs_zh + "</p></div>" if abs_zh else ""}
-{"<div class='detail-sec'><h3>English Abstract</h3><p>" + abs_en + "</p></div>" if abs_en else ""}
+{"<div class='detail-sec'><h3>中文摘要</h3><p>" + h_text(abs_zh) + "</p></div>" if abs_zh else ""}
+{"<div class='detail-sec'><h3>English Abstract</h3><p>" + h_text(abs_en) + "</p></div>" if abs_en else ""}
 <div class="detail-sec"><h3>链接</h3><div class="btns">{"".join(btns)}</div></div>
 </div>"""
     return page(title_zh or title, body, active_tab=mode)
@@ -1149,15 +1185,18 @@ def build_bookmarks_overview():
         for lid, lst in lists.items():
             cnt   = len(lst.get("papers", []))
             cdate = lst.get("created", "")[:10]
+            list_name = lst.get("name", lid)
+            rename_onclick = f"BM.renameList({js_str(lid)},{js_str(list_name)})"
+            delete_onclick = f"BM.deleteList({js_str(lid)})"
             cards.append(f"""<div class="bm-list-card">
-  <div class="bm-list-card-name">📚 {lst['name']}</div>
-  <div class="bm-list-card-meta">{cnt} 篇论文{f' · 创建于 {cdate}' if cdate else ''}</div>
+  <div class="bm-list-card-name">📚 {h_text(list_name)}</div>
+  <div class="bm-list-card-meta">{cnt} 篇论文{f' · 创建于 {h_text(cdate)}' if cdate else ''}</div>
   <div class="bm-list-actions">
-    <a class="bm-inline-btn bm-inline-view" href="/bookmarks/{lid}">查看</a>
+    <a class="bm-inline-btn bm-inline-view" href="/bookmarks/{h_attr(lid)}">查看</a>
     <button class="bm-inline-btn bm-inline-rename"
-            onclick="BM.renameList('{lid}','{lst['name'].replace(chr(39),chr(39))}')">重命名</button>
+            onclick="{h_attr(rename_onclick)}">重命名</button>
     <button class="bm-inline-btn bm-inline-del"
-            onclick="BM.deleteList('{lid}')">删除</button>
+            onclick="{h_attr(delete_onclick)}">删除</button>
   </div>
 </div>""")
         cards_html = f'<div class="bm-pg-grid">{"".join(cards)}</div>'
@@ -1206,51 +1245,36 @@ def build_bookmark_list_page(lid):
             title_zh = p.get("title_zh","")
             sum_zh   = p.get("summary_zh","")
             kws      = p.get("keywords_zh",[]) or []
-            has_pdf  = _paper_pdf_exists(aid) or bool(
-                p.get("pdf_zh") and pdir and
-                os.path.exists(os.path.join(pdir, p["pdf_zh"].replace("papers/","",1))))
-            pdf_status_bm = p.get("pdf_status")
-            if has_pdf:
-                pdf_status_bm = "ok"
-            pdf_failed_bm = (
-                p.get("pdf_zh_failed", False)
-                or pdf_status_bm == "failed"
-                or (not has_pdf and title_zh and pdf_status_bm not in ("ok", "none"))
-            )
+            pdf_state = paper_pdf_state(p, pdir, aid)
+            has_pdf = pdf_state["has_pdf"]
+            pdf_failed_bm = pdf_state["pdf_failed"]
 
-            kw_html = "".join(f'<span class="kw">{k}</span>' for k in kws[:4])
-            if has_pdf:
-                pdf_btn = f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>'
-            elif pdf_failed_bm:
-                pdf_btn = ('<span class="btn" style="background:#fee2e2;color:#991b1b;cursor:default" '
-                           'title="全文PDF转换失败">⚠️ PDF失败</span>')
-            else:
-                pdf_btn = ""
+            kw_html = "".join(f'<span class="kw">{h_text(k)}</span>' for k in kws[:4])
+            btns = render_paper_actions(aid, mode, key, bool(mode and key),
+                                        has_pdf, pdf_failed_bm, "bookmark")
 
             # 移动到其他列表的 <select>
-            mv_opts = "".join(f'<option value="{k}">{v}</option>' for k, v in other_lists.items())
-            mv_sel  = (f'<select class="bm-mv-sel" onchange="BM.movePaper(\'{aid}\',\'{lid}\',this.value)">'
+            mv_opts = "".join(f'<option value="{h_attr(k)}">{h_text(v)}</option>' for k, v in other_lists.items())
+            move_onchange = f"BM.movePaper({js_str(aid)},{js_str(lid)},this.value)"
+            mv_sel  = (f'<select class="bm-mv-sel" onchange="{h_attr(move_onchange)}">'
                        f'<option value="">移动到…</option>{mv_opts}</select>'
                        if mv_opts else "")
+            remove_onclick = f"BM.removePaper({js_str(aid)},{js_str(lid)})"
 
-            cards.append(f"""<div class="card" id="bm-paper-{aid}">
+            cards.append(f"""<div class="card" id="bm-paper-{h_attr(aid)}">
   <div class="card-hdr">
-    <div><span class="badge-pdf" style="background:#fef3c7;color:#92400e">⭐ {added}</span>
+    <div><span class="badge-pdf" style="background:#fef3c7;color:#92400e">⭐ {h_text(added)}</span>
          {"<span class='badge-pdf'>✅ PDF</span>" if has_pdf else ""}
     </div>
-    <div class="card-title">{title[:120]}</div>
-    {"<div class='card-title-zh'>" + title_zh[:100] + "</div>" if title_zh else ""}
+    <div class="card-title">{h_text(title[:120])}</div>
+    {"<div class='card-title-zh'>" + h_text(title_zh[:100]) + "</div>" if title_zh else ""}
   </div>
   <div class="card-body">
-    {"<p class='summary'>" + sum_zh[:300] + "</p>" if sum_zh else ""}
+    {"<p class='summary'>" + h_text(sum_zh[:300]) + "</p>" if sum_zh else ""}
     {"<div>" + kw_html + "</div>" if kw_html else ""}
-    <div class="btns">
-      {f'<a class="btn btn-detail" href="/{mode}/{key}/papers/{aid}">🔍 详情</a>' if mode and key else ""}
-      {pdf_btn}
-      <a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>
-    </div>
+    <div class="btns">{"".join(btns)}</div>
     <div class="bm-card-actions">
-      <button class="bm-rm-btn" onclick="BM.removePaper('{aid}','{lid}')">✕ 移出列表</button>
+      <button class="bm-rm-btn" onclick="{h_attr(remove_onclick)}">✕ 移出列表</button>
       {mv_sel}
     </div>
   </div>
@@ -1267,9 +1291,9 @@ def build_bookmark_list_page(lid):
   </div>
   <div style="display:flex;gap:8px">
     <button class="bm-btn bm-btn-ghost"
-            onclick="BM.renameList('{lid}','{lst['name']}')">重命名</button>
+            onclick="{h_attr(f'BM.renameList({js_str(lid)},{js_str(lst["name"])})')}">重命名</button>
     <button class="bm-btn bm-btn-danger"
-            onclick="BM.deleteList('{lid}')">删除列表</button>
+            onclick="{h_attr(f'BM.deleteList({js_str(lid)})')}">删除列表</button>
   </div>
 </div>
 {cards_html}"""
@@ -1503,7 +1527,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         raw  = unquote(self.path).split("?")[0]
         parts = [p for p in raw.strip("/").split("/") if p]
-        query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
 
         # ── /api/submit/status  任务状态 ───────────────────
         if raw == "/api/submit/status":
@@ -1592,16 +1615,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     meta = _read_paper_store(arxiv_id)
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
                     pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf"
-                    pdf_name = _pdf_display_filename(arxiv_id, title_zh)
-                    top_pdf_src = f"{BASE_PATH}/pdf/{arxiv_id}/{quote(pdf_name)}"
-                    ua = self.headers.get("User-Agent", "").lower()
-                    is_safari = (
-                        "safari" in ua and
-                        not any(x in ua for x in ("chrome", "chromium", "crios", "edg", "opr", "atlas"))
-                    )
-                    force_embed = query.get("embed", ["0"])[0].lower() in ("1", "true", "yes")
-                    if not force_embed and not is_safari:
-                        return self.send_redirect(f"{top_pdf_src}#view=FitH")
                     safe_title = html_lib.escape(title_zh, quote=True)
                     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head>

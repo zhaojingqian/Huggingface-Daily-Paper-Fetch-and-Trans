@@ -1,203 +1,169 @@
 # Paper Hub 项目计划
 
-## 项目目标
-自动抓取 Hugging Face 每日/每周/每月热门 AI 论文，LLM 翻译摘要 + 全文中文 PDF，Web 界面对外发布；支持手动按需翻译任意 arXiv 论文。
+## 目标
 
-## 核心功能
+Paper Hub 是一个面向 AI 论文阅读和归档的自动化系统：抓取 Hugging Face 热门论文，翻译摘要，按需生成全文中文 PDF，并通过 Web 站点提供浏览、搜索、收藏、手动提交和系统状态监控。
 
-| # | 功能 | 状态 |
-|---|------|------|
-| 1 | 定时抓取：每周日凌晨 2 点自动执行 | ✅ 已完成 |
-| 2 | 数据源：`https://huggingface.co/papers/week/YYYY-WNN` | ✅ 已完成 |
-| 3 | 摘要翻译：LLM 翻译标题/摘要/关键词/速读 | ✅ 已完成 |
-| 4 | HTML 展示页：双语摘要 Tab 切换，关键词标签 | ✅ 已完成 |
-| 5 | 全文翻译：gpt-academic LaTeX 插件翻译为中文 PDF | ✅ 已完成 |
-| 6 | Web 访问：端口 18080，公网可访问 | ✅ 已完成 |
-| 7 | 增量处理：已翻译内容自动跳过 | ✅ 已完成 |
+当前生产入口：
 
-## 技术架构
+- 线上：https://zzzgry.top/paper/
+- 服务：`paper-trans-web.service`
+- 主数据：`data/papers/`
 
-### 翻译流程
-```
-HF Weekly Page  (fetch_weekly.py)
+---
+
+## 已完成能力
+
+| 模块 | 状态 | 当前入口 |
+|---|---:|---|
+| Daily Top 3 | 完成 | `run_daily.py` |
+| Weekly Top 10 | 完成 | `run_weekly.py` |
+| Monthly Top 10 | 完成 | `run_monthly.py` |
+| 摘要翻译 | 完成 | `translate_arxiv.py` |
+| 全文 PDF 翻译 | 完成 | `translate_full.py` + `full_translate_driver.py` |
+| 统一 paper store | 完成 | `data/papers/<id>.json` / `<id>_zh.pdf` |
+| slim index | 完成 | `data/{daily,weekly,monthly,manual}/<key>/index.json` |
+| Web 页面 | 完成 | `web_server.py` |
+| 手动提交 | 完成 | `/submit` |
+| 收藏夹 | 完成 | `/bookmarks` |
+| 全局搜索 | 完成 | `/search` |
+| 系统状态 | 完成 | `/status` |
+| PDF wrapper | 完成 | `/view/<arxiv_id>` |
+| 行为合约测试 | 完成 | `tests/test_web_server_contract.py` |
+
+---
+
+## 当前架构
+
+```text
+HF papers page
     ↓
-arxiv ID 列表 (Top 10)
-    ↓  (translate_arxiv.py)
-arxiv 元数据 (标题/摘要/作者/类别)
-    ↓  (LLM API 直接调用)
-双语 HTML 页面  ←  存 weekly/YYYY-WNN/papers/arxiv_id.html
-    ↓  (translate_full.py + full_translate_driver.py, --full 模式)
-LaTeX 源码 → LLM 翻译 → pdflatex 编译
-    ↓  (docker cp)
-中文 PDF  →  存 weekly/YYYY-WNN/papers/arxiv_id_zh.pdf
-    ↓  (web_server.py)
-Web 界面  http://51.79.130.17:18080
+fetch_hf.py
+    ↓
+run_daily.py / run_weekly.py / run_monthly.py
+    ↓
+translate_arxiv.py
+    ↓
+data/papers/<arxiv_id>.json
+    ↓
+translate_full.py
+    ↓ docker exec
+full_translate_driver.py
+    ↓
+data/papers/<arxiv_id>_zh.pdf
+    ↓
+web_server.py
+    ↓
+https://zzzgry.top/paper/
 ```
 
-### 核心模块
+### Web 数据流
 
-| 文件 | 功能 |
-|------|------|
-| `fetch_weekly.py` | 抓取 HF Weekly Papers 列表（代理自动降级） |
-| `translate_arxiv.py` | 获取 arxiv 元数据 + LLM 翻译 + 生成 HTML |
-| `main.py` | 主调度脚本，整合全流程；支持 `--full` 标志 |
-| `translate_full.py` | 全文翻译封装（容器外，调用 docker exec + docker cp） |
-| `full_translate_driver.py` | 全文翻译驱动（容器内，调用 gpt-academic 插件） |
-| `web_server.py` | HTTP 服务器，端口 18080；响应式 Web 界面 |
-
-## 项目结构
-```
-/root/workspace/paper-trans/
-├── main.py                   # 主入口
-├── fetch_weekly.py           # 抓取脚本
-├── translate_arxiv.py        # 摘要翻译
-├── translate_full.py         # 全文翻译（容器外）
-├── full_translate_driver.py  # 全文翻译驱动（容器内）
-├── web_server.py             # Web 服务
-├── README.md                 # 项目说明
-├── plan.md                   # 本文件
-├── change.md                 # 变更日志
-├── weekly/
-│   └── 2026-W08/
-│       ├── index.json        # 周索引
-│       └── papers/
-│           ├── 2602.xxxxx.html      # 双语摘要页面
-│           └── 2602.xxxxx_zh.pdf    # 全文中文 PDF
-└── logs/
-    ├── 2026-W08.log          # 周处理日志
-    ├── full_translate_2026-W08.log  # 全文翻译日志
-    ├── cron.log              # cron 执行日志
-    └── web.log               # Web 服务日志
+```text
+slim index
+    + paper store JSON
+    + PDF existence check
+    ↓
+enrich_paper_entry()
+    ↓
+paper_card() / detail page / bookmark page
 ```
 
-## 配置
+`web_server.py` 目前保持单文件部署，但内部已经收敛出以下 helper：
 
-### API 配置（自动读取 gpt-academic）
-- 配置文件: `/root/workspace/gpt-academic/config_private.py`
-- 默认模型: `gpt-4.1-mini`
-- API 代理: `https://api.aaai.vip/v1/chat/completions`
-- 网络代理: `http://127.0.0.1:7890` (Clash)
+- `paper_pdf_state()`：统一 PDF 状态判断。
+- `enrich_paper_entry()`：统一元数据合并。
+- `render_paper_actions()`：统一按钮链接生成。
+- `h_text()` / `h_attr()` / `js_str()`：统一输出转义。
 
-### systemd 服务
-- 文件: `/etc/systemd/system/paper-trans-web.service`
-- 运行时: Python 3.10.13 (`/root/.pyenv/versions/3.10.13/bin/python3`)
-- 端口: 18080
-- 开机自启: 已启用
+---
 
-### cron 定时任务
-```
-0 2 * * 0 /root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/main.py --full >> /root/workspace/paper-trans/logs/cron.log 2>&1
-```
-说明: 每周日凌晨 2:00 执行（摘要 + 全文翻译）
+## Web 行为护栏
 
-## 使用方法
+这些行为必须作为未来重构的验收标准。
 
-### 手动运行
+| 行为 | 要求 |
+|---|---|
+| `/view/<id>` | 返回 HTML wrapper，不能默认 302 到裸 PDF |
+| PDF iframe | 指向 `{BASE_PATH}/papers/<id>_zh.pdf#view=FitH` |
+| 详情按钮 | 继续指向 `/<mode>/<key>/papers/<id>` |
+| 中文 PDF 按钮 | 继续指向 `/view/<id>` |
+| 原文 PDF | 继续指向 `https://arxiv.org/pdf/<id>` |
+| arXiv 原文 | 继续指向 `https://arxiv.org/abs/<id>` |
+| PDF 文件 | `/papers/<id>_zh.pdf` 保留 `Range` / `206` |
+| 直接 PDF | `/pdf/<id>/<title>.pdf` 保留中文 filename 响应头 |
+| 路径前缀 | `BASE_PATH=/paper` 下内部链接必须正确加前缀 |
+
+---
+
+## 验收命令
+
+每次修改 Web 路由、按钮、PDF 查看页或部署行为前后都应运行：
+
 ```bash
-cd /root/workspace/paper-trans
+python3 -m py_compile \
+  web_server.py translate_arxiv.py translate_full.py \
+  full_translate_driver.py run_papers.py run_repair.py \
+  tests/test_web_server_contract.py
 
-# 只做摘要翻译（快速，约 2 分钟/10 篇）
-python3 main.py
-python3 main.py 2026-W08
-
-# 摘要 + 全文 PDF 翻译（每篇约 15-30 分钟）
-python3 main.py 2026-W08 --full
-
-# 单篇全文翻译
-python3 translate_full.py 2602.10388 -o weekly/2026-W08/papers
+python3 -m unittest discover -s tests -v
+/root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v
 ```
 
-### 服务管理
+线上抽查：
+
 ```bash
-systemctl status paper-trans-web
-systemctl restart paper-trans-web
-journalctl -u paper-trans-web -f
+curl -k -I https://zzzgry.top/paper/view/2605.21573
+curl -k -I -r 0-0 https://zzzgry.top/paper/papers/2605.21573_zh.pdf
+curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 ```
 
-### 查看日志
-```bash
-tail -f /root/workspace/paper-trans/logs/cron.log
-tail -f /root/workspace/paper-trans/logs/full_translate_2026-W08.log
-tail -f /root/workspace/paper-trans/logs/web.log
-```
+---
 
-## 实施进度
+## 近期维护路线
 
-### ✅ Phase 1: 环境准备
-- [x] 确认 gpt-academic Docker 容器运行中 (`gpt-academic-latex`)
-- [x] 确认 API Key 已在 gpt-academic config_private.py 中配置
-- [x] 安装 Python 3.10.13 (pyenv) 及依赖 (requests, beautifulsoup4)
+### Phase A — Web 稳定性护栏
 
-### ✅ Phase 2: 摘要翻译（v2.0）
-- [x] `fetch_weekly.py` - 抓取 HF Weekly Top 10，支持代理自动降级
-- [x] `translate_arxiv.py` - 获取 arxiv 元数据 + LLM 翻译 + HTML 生成
-- [x] `main.py` - 主调度，支持增量处理（跳过已翻译）
-- [x] `web_server.py` - 现代化 Web 界面，响应式设计
+- [x] 固定 `/view/<id>` HTML wrapper 行为。
+- [x] 新增 Web 合约测试。
+- [x] 收敛 PDF 状态判断和按钮链接生成。
+- [x] 重建 README / plan / change 文档。
 
-### ✅ Phase 3: 部署配置
-- [x] systemd 服务 (paper-trans-web) 使用 Python 3.10
-- [x] cron 定时任务 (每周日凌晨 2 点，含 --full)
-- [x] 端口 18080 对外开放
+### Phase B — 安全的单文件整理
 
-### ✅ Phase 4: 全文翻译（v2.1）
-- [x] `full_translate_driver.py` - 容器内 gpt-academic 插件驱动
-- [x] `translate_full.py` - 容器外封装（docker exec + docker cp）
-- [x] 代理 monkey-patch（容器内 host 网络模式）
-- [x] `main.py` 集成 `--full` 参数
-- [x] `web_server.py` 展示全文 PDF 下载链接
-- [x] 实测 2602.12783 全文翻译成功（~15min，3.8MB PDF）
+- [ ] 将更多重复页面片段收敛为小 helper，但继续保持单文件部署。
+- [ ] 对 bookmarks 的 HTML/JS 输出补充更多合约测试。
+- [ ] 给 `/api/bookmarks`、`/api/search`、`/api/submit` 增加 POST/GET API 级测试。
+- [ ] 对 `BASE_PATH` 字符串替换策略做快照测试，防止误改外链。
 
-### ✅ Phase 5: 文档与 UI 优化（v2.2）
-- [x] 编写 README.md（完整项目说明）
-- [x] 更新 plan.md / change.md
-- [x] 优化 Web UI（更现代的卡片设计，进度指示器）
-- [x] 批量全文翻译 2026-W08 全部 10 篇
+### Phase C — 翻译链路稳定性
+
+- [ ] 为 `run_papers.py` 的 slim index 写入和 pdf_status 同步增加纯函数测试。
+- [ ] 为 `translate_arxiv.py` 的 JSON 修复逻辑增加样例测试。
+- [ ] 梳理 `full_translate_driver.py` fallback patch 的触发条件，沉淀为小型 fixtures。
+- [ ] 继续补充 PDF 失败诊断日志中的常见 LaTeX 错误分类。
+
+### Phase D — 运维体验
+
+- [ ] 将常用 health check 命令整理成脚本。
+- [ ] 为 cron 运行结果增加轻量摘要日志。
+- [ ] 对磁盘低水位、Docker 容器异常、PDF retry 长期失败增加告警入口。
+
+---
 
 ## 已知限制
-1. **代理依赖**: 访问 arxiv.org 和 HF 需要 Clash 代理 (127.0.0.1:7890)，断开时自动降级
-2. **API 成本**: 摘要翻译每篇约 1000-2000 tokens (gpt-4.1-mini)
-3. **全文翻译耗时**: 每篇约 15-30 分钟，依赖论文 LaTeX 源码可用性
-4. **排名精确性**: HF 页面抓取基于 HTML 结构，仅保证 top 10 不保证确切排名顺序
 
-## 可选优化（未来）
-- [ ] 支持多周数据对比 / 趋势页面
-- [ ] 添加论文分类/标签过滤
-- [ ] RSS 订阅支持
-- [ ] 全文翻译并行执行（多篇同时）
-- [ ] 邮件/钉钉通知翻译完成
+1. 全文 PDF 翻译强依赖 arXiv LaTeX 源码质量和 gpt-academic 插件行为。
+2. 大 PDF 在不同浏览器中的 viewer 行为不一致，因此 `/view/<id>` 必须保留 HTML wrapper。
+3. 当前 Web 是单文件 HTTP 服务，易部署但代码会继续增长；未来拆分前必须先扩大合约测试。
+4. 搜索是线性扫描全部 index 和 paper store，数据量继续增长后可能需要索引缓存。
+5. 手动提交和自动抓取共享 paper store，删除 PDF 时需要谨慎处理跨 mode 引用。
 
-## ✅ Phase 4 — 手动添加 & 品牌升级（v3.2）
+---
 
-| # | 功能 | 状态 |
-|---|------|------|
-| 1 | /submit 页面：手动输入 arXiv ID 按需翻译 | ✅ |
-| 2 | 后台任务队列 + 实时状态追踪 + 自动刷新 | ✅ |
-| 3 | 品牌更名 Paper Trans → Paper Hub | ✅ |
-| 4 | 磁盘清理定时任务（每月 1 日自动清 gpt_log）| ✅ |
-| 5 | nginx 路径前缀部署（zzzgry.top/paper/）| ✅ |
-| 6 | BASE_PATH / BIND_HOST 环境变量控制 | ✅ |
+## 文档维护规则
 
-## ✅ Phase 5 — 社交功能 & 搜索（v3.3 ~ v3.4）
-
-| # | 功能 | 状态 |
-|---|------|------|
-| 1 | 论文删除功能（卡片 🗑️ 按钮，清除文件 + 索引 + 收藏记录）| ✅ |
-| 2 | 全局搜索 /search（中英文模糊，覆盖所有模式）| ✅ |
-| 3 | 收藏夹系统 /bookmarks（多列表、收藏/移出/移动）| ✅ |
-
-## ✅ Phase 6 — 稳定性 & 运维（v3.5）
-
-| # | 功能 | 状态 |
-|---|------|------|
-| 1 | 系统状态监控 /status（磁盘、Docker 进程、任务队列）| ✅ |
-| 2 | server 重启后任务自动恢复（_recover_stuck_jobs）| ✅ |
-| 3 | 每日凌晨 5 点自动重启 Docker 容器（清僵尸进程）| ✅ |
-| 4 | ICP 备案号展示（苏ICP备2026009771号）| ✅ |
-
-## ✅ Phase 7 — UI 细节（v3.6）
-
-| # | 功能 | 状态 |
-|---|------|------|
-| 1 | 页脚增加个人网站链接（zhaojingqian.top/about）| ✅ |
-| 2 | 标签页 📰 favicon（SVG emoji 内嵌，无需图片文件）| ✅ |
-| 3 | 修复 web_server.py 多处缩进 bug（for-else / try-except）| ✅ |
+- 用户可见行为变更：更新 `README.md` 和 `change.md`。
+- 架构、路线或维护约定变更：更新 `plan.md`。
+- 代码提交前：跑语法检查和合约测试。
+- 上线 Web 改动后：重启 `paper-trans-web.service` 并做线上抽查。
