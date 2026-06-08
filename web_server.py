@@ -359,7 +359,8 @@ def enrich_paper_entry(slim, mode, key):
 
 
 def render_paper_actions(arxiv_id, mode="", key="", has_html=False,
-                         has_pdf=False, pdf_failed=False, context="card"):
+                         has_pdf=False, pdf_failed=False, context="card",
+                         detail_href=None):
     """Render paper action links without changing hrefs or button text."""
     aid = h_attr(arxiv_id)
     btns = []
@@ -377,7 +378,8 @@ def render_paper_actions(arxiv_id, mode="", key="", has_html=False,
 
     if context == "bookmark":
         if mode and key:
-            btns.append(f'<a class="btn btn-detail" href="/{h_attr(mode)}/{h_attr(key)}/papers/{aid}">🔍 详情</a>')
+            href = detail_href or f"/{mode}/{key}/papers/{arxiv_id}"
+            btns.append(f'<a class="btn btn-detail" href="{h_attr(href)}">🔍 详情</a>')
         if has_pdf:
             btns.append(f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>')
         elif pdf_failed:
@@ -387,7 +389,8 @@ def render_paper_actions(arxiv_id, mode="", key="", has_html=False,
         return btns
 
     if has_html:
-        btns.append(f'<a class="btn btn-detail" href="/{h_attr(mode)}/{h_attr(key)}/papers/{aid}">🔍 详情</a>')
+        href = detail_href or f"/{mode}/{key}/papers/{arxiv_id}"
+        btns.append(f'<a class="btn btn-detail" href="{h_attr(href)}">🔍 详情</a>')
     if has_pdf:
         btns.append(f'<a class="btn btn-full-pdf" href="/view/{aid}" target="_blank">📄 全文PDF</a>')
     btns.append(f'<a class="btn btn-arxiv" href="https://arxiv.org/abs/{aid}" target="_blank">arXiv</a>')
@@ -853,6 +856,11 @@ def page(title, body, active_tab="home"):
 {BM_JS}
 <footer style="text-align:center;padding:18px 0 14px;font-size:12px;color:#475569;border-top:1px solid #1e293b;margin-top:24px"><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" style="color:#475569;text-decoration:none">苏ICP备2026009771号</a><span style="margin:0 10px;opacity:.4">|</span><a href="https://zhaojingqian.top/about" target="_blank" rel="noopener" style="color:#475569;text-decoration:none">关于作者</a></footer>
 </body></html>"""
+    return apply_base_path(html)
+
+
+def apply_base_path(html):
+    """为动态生成的 HTML 片段补部署前缀。"""
     # 统一把所有内部绝对路径加上 BASE_PATH 前缀（仅当设置了前缀时）
     if BASE_PATH:
         html = html.replace('href="/', f'href="{BASE_PATH}/')
@@ -876,7 +884,7 @@ def paper_card(p, mode, key, pdir):
     has_pdf = pdf_state["has_pdf"]
     pdf_failed = pdf_state["pdf_failed"]
 
-    has_html = bool(title_zh or (
+    has_html = bool(p.get("_detail_href") or title_zh or (
         pdir and os.path.exists(os.path.join(pdir, f"{aid}.html"))))
 
     rank_badge  = f'<span class="rank">#{rank}</span>' if rank else ""
@@ -896,6 +904,8 @@ def paper_card(p, mode, key, pdir):
     if authors:
         short_au = authors[:50] + ("…" if len(authors) > 50 else "")
         meta_parts.append(f'<span class="meta-item">👥 {h_text(short_au)}</span>')
+    if p.get("_source_note"):
+        meta_parts.append(f'<span class="meta-item">🗂️ {h_text(p["_source_note"])}</span>')
 
     # 收藏按钮（JS 初始化后自动更新 ☆/★）
     title_for_js = (title_zh or title)[:60]
@@ -904,12 +914,17 @@ def paper_card(p, mode, key, pdir):
               f'onclick="{h_attr(bm_onclick)}"'
               f' title="收藏">☆</button>')
 
-    btns = render_paper_actions(aid, mode, key, has_html, has_pdf, pdf_failed, "card")
+    btns = render_paper_actions(
+        aid, mode, key, has_html, has_pdf, pdf_failed, "card",
+        detail_href=p.get("_detail_href"),
+    )
 
     del_onclick = f"deletePaper({js_str(mode)},{js_str(key)},{js_str(aid)})"
     del_btn = (f'<button class="btn btn-del" '
                f'onclick="{h_attr(del_onclick)}" '
                f'title="删除论文（含本地文件）">🗑️</button>')
+    if p.get("_hide_delete"):
+        del_btn = ""
 
     return f"""<div class="card" id="card-{h_attr(aid)}">
   <div class="card-hdr">
@@ -1148,7 +1163,12 @@ def build_detail_page(mode, key, arxiv_id):
     kw_html = "".join(f'<span class="kw">{h_text(k)}</span>' for k in kws)
     btns = render_paper_actions(arxiv_id, has_pdf=has_pdf,
                                 pdf_failed=pdf_failed, context="detail")
-    back = {"daily":f"/daily/{key}","weekly":f"/weekly/{key}","monthly":f"/monthly/{key}"}.get(mode,"/")
+    back = {
+        "daily": f"/daily/{key}",
+        "weekly": f"/weekly/{key}",
+        "monthly": f"/monthly/{key}",
+        "paper": "/search",
+    }.get(mode, "/")
 
     body = f"""<div class="detail-wrap">
 <a class="btn btn-back" href="{back}">← 返回</a>
@@ -1163,7 +1183,8 @@ def build_detail_page(mode, key, arxiv_id):
 {"<div class='detail-sec'><h3>English Abstract</h3><p>" + h_text(abs_en) + "</p></div>" if abs_en else ""}
 <div class="detail-sec"><h3>链接</h3><div class="btns">{"".join(btns)}</div></div>
 </div>"""
-    return page(title_zh or title, body, active_tab=mode)
+    active_tab = "search" if mode == "paper" else mode
+    return page(title_zh or title, body, active_tab=active_tab)
 
 
 # ── 收藏页面 ──────────────────────────────────────────────────────────────────
@@ -1568,6 +1589,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
             html_block = (f'<div class="cards">{cards_html}</div>'
                           if cards_html else "")
+            html_block = apply_base_path(html_block)
             return self.send_json({"q": q, "total": len(results), "html": html_block})
 
         # ── /api/bookmarks  JSON 接口 ─────────────────────
@@ -1595,6 +1617,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.send_file(fp, _pdf_display_filename(arxiv_id, title_zh))
                 return self.send_404(f"{arxiv_id} PDF 不存在")
             return self.send_404(f"{arxiv_id} 未找到")
+
+        # ── /detail/<arxiv_id>  全局详情页（不依赖 daily/weekly/monthly 索引）──
+        if len(parts) == 2 and parts[0] == "detail" and re.match(r'^\d{4}\.\d+$', parts[1]):
+            html = build_detail_page("paper", "", parts[1])
+            if html:
+                return self.send_html(html)
+            return self.send_404(f"{parts[1]} 未找到")
+
+        # 本地兼容旧全局详情路由；线上 nginx 会将 /paper/papers/* 作为静态文件处理。
+        if len(parts) == 2 and parts[0] == "papers" and re.match(r'^\d{4}\.\d+$', parts[1]):
+            return self.send_redirect(f"/detail/{parts[1]}")
 
         # ── /papers/<file>  paper store 静态文件回退（nginx 未接管时使用）────
         if len(parts) == 2 and parts[0] == "papers":
@@ -1793,12 +1826,12 @@ async function submitId(aid) {{ document.getElementById('aid-input').value=aid; 
 
 
 def search_papers(query, limit=60):
-    """在所有 index.json 里模糊搜索，返回匹配的 paper dict 列表（含 mode/key）"""
+    """在所有 index.json 里模糊搜索，按 arXiv ID 去重返回 paper dict 列表。"""
     q = query.lower().strip()
     if not q:
         return []
 
-    results = []
+    results_by_aid = {}
     modes = ["daily", "weekly", "monthly", "manual"]
     for mode in modes:
         mode_dir = os.path.join(DATA_DIR, mode)
@@ -1828,13 +1861,28 @@ def search_papers(query, limit=60):
                     " ".join(p.get("keywords_zh", []) or []),
                 ]).lower()
                 if q in fields:
-                    hit = dict(p)
-                    hit["_mode"] = mode
-                    hit["_key"]  = key
-                    results.append(hit)
-                if len(results) >= limit:
-                    return results
-    return results
+                    if aid not in results_by_aid:
+                        hit = dict(p)
+                        hit["_mode"] = mode
+                        hit["_key"]  = key
+                        hit["_detail_href"] = f"/detail/{aid}"
+                        hit["_hide_delete"] = True
+                        hit["_locations"] = []
+                        results_by_aid[aid] = hit
+                    results_by_aid[aid]["_locations"].append((mode, key))
+
+    results = list(results_by_aid.values())
+    for hit in results:
+        locs = hit.get("_locations", [])
+        labels = [f"{mode}/{key}" for mode, key in locs]
+        if len(labels) > 1:
+            shown = "、".join(labels[:3])
+            if len(labels) > 3:
+                shown += f" 等 {len(labels)} 个索引"
+            hit["_source_note"] = shown
+        elif labels:
+            hit["_source_note"] = labels[0]
+    return results[:limit]
 
 
 def build_search_page():

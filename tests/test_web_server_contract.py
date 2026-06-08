@@ -1,4 +1,5 @@
 import http.client
+import json
 import os
 import socketserver
 import sys
@@ -159,6 +160,40 @@ class WebServerContractTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn('"/api/status"', html)
         self.assertIn('"/api/status/kill"', html)
+
+    def test_search_dedupes_duplicate_arxiv_ids(self):
+        results = web_server.search_papers(SAMPLE_VIEW_ID)
+        ids = [p.get("arxiv_id") for p in results]
+        self.assertEqual(ids.count(SAMPLE_VIEW_ID), 1)
+        hit = next(p for p in results if p.get("arxiv_id") == SAMPLE_VIEW_ID)
+        self.assertEqual(hit.get("_detail_href"), f"/detail/{SAMPLE_VIEW_ID}")
+        self.assertIn("weekly/2026-W22", hit.get("_source_note", ""))
+
+    def test_search_api_rewrites_injected_result_links(self):
+        old_base = web_server.BASE_PATH
+        web_server.BASE_PATH = "/paper"
+        try:
+            resp, body = self.request(f"/api/search?q={SAMPLE_VIEW_ID}")
+        finally:
+            web_server.BASE_PATH = old_base
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(payload["total"], 1)
+        self.assertIn(f'href="/paper/detail/{SAMPLE_VIEW_ID}"', payload["html"])
+        self.assertNotIn(f'href="/weekly/{SAMPLE_KEY}/papers/{SAMPLE_VIEW_ID}"', payload["html"])
+
+    def test_global_paper_detail_route(self):
+        resp, body = self.request(f"/detail/{SAMPLE_VIEW_ID}")
+        html = body.decode("utf-8", errors="replace")
+        self.assertEqual(resp.status, 200)
+        self.assert_content_type(resp, "text/html")
+        self.assertIn("Lens：重新思考基础文本到图像模型的训练效率", html)
+        self.assertIn(f'href="/view/{SAMPLE_VIEW_ID}"', html)
+
+    def test_old_global_papers_route_redirects_locally(self):
+        resp, _ = self.request(f"/papers/{SAMPLE_VIEW_ID}")
+        self.assertEqual(resp.status, 302)
+        self.assertEqual(resp.getheader("Location"), f"/detail/{SAMPLE_VIEW_ID}")
 
 
 if __name__ == "__main__":
