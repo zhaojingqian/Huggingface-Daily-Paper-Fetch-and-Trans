@@ -53,15 +53,20 @@ class WebServerContractTest(unittest.TestCase):
     def assert_content_type(self, resp, expected):
         self.assertIn(expected, resp.getheader("Content-Type") or "")
 
+    def assert_umami_script(self, html):
+        self.assertIn('src="https://cloud.umami.is/script.js"', html)
+        self.assertIn('data-website-id="848a0bed-4004-423d-8f2b-52c9cbd39d93"', html)
+
     def sample_pdf_exists(self, arxiv_id=SAMPLE_VIEW_ID):
         return os.path.exists(os.path.join(web_server.PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf"))
 
     def test_core_pages_return_html(self):
         for path in ["/", "/daily", "/weekly", "/monthly", "/bookmarks", "/submit", "/search", "/status"]:
             with self.subTest(path=path):
-                resp, _ = self.request(path)
+                resp, body = self.request(path)
                 self.assertEqual(resp.status, 200)
                 self.assert_content_type(resp, "text/html")
+                self.assert_umami_script(body.decode("utf-8", errors="replace"))
 
     def test_json_endpoints_return_json(self):
         for path in ["/api/bookmarks", "/api/status"]:
@@ -99,6 +104,7 @@ class WebServerContractTest(unittest.TestCase):
         self.assert_content_type(resp, "text/html")
         self.assertIn("<title>Lens：重新思考基础文本到图像模型的训练效率</title>", html)
         self.assertIn(f'<iframe src="/papers/{SAMPLE_VIEW_ID}_zh.pdf#view=FitH"', html)
+        self.assert_umami_script(html)
 
     @unittest.skipUnless(
         os.path.exists(os.path.join(web_server.PAPER_STORE_DIR, f"{SAMPLE_VIEW_ID}_zh.pdf")),

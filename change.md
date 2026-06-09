@@ -2,6 +2,18 @@
 
 ---
 
+## v4.6 — 2026-06-09
+
+### 统计接入
+
+#### zzzgry.top Umami Cloud 访问统计
+
+- `/paper/` 主应用页面新增 Umami Cloud 统计脚本，用于匿名记录页面浏览数据；
+- `/paper/view/<arxiv_id>` PDF HTML wrapper 同步注入同一脚本，避免只统计列表页而漏掉直接打开论文阅读页的访问；
+- 新增合约测试，固定核心 HTML 页面和 `/view` wrapper 都必须包含 Umami 脚本。
+
+---
+
 ## v4.5 — 2026-06-08
 
 ### Bug 修复

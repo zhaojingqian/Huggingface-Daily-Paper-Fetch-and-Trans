@@ -19,6 +19,10 @@ _bm_lock   = threading.Lock()
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
 # 通过环境变量注入：Environment=BASE_PATH=/paper
 BASE_PATH  = os.environ.get("BASE_PATH", "").rstrip("/")
+UMAMI_SCRIPT = (
+    '<script defer src="https://cloud.umami.is/script.js" '
+    'data-website-id="848a0bed-4004-423d-8f2b-52c9cbd39d93"></script>'
+)
 
 PROXY = "http://127.0.0.1:7890"
 HTTP_HEADERS = {
@@ -844,6 +848,7 @@ def page(title, body, active_tab="home"):
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📰</text></svg>">
 <style>{CSS}</style>
 <script>window.BP="{BASE_PATH}";</script>
+{UMAMI_SCRIPT}
 </head><body>
 <div class="topbar">
   <div class="topbar-inner">
@@ -1655,6 +1660,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{safe_title}</title>
 <style>*{{box-sizing:border-box}}html,body{{height:100%;margin:0;overflow:hidden;background:#111}}iframe{{width:100%;height:100%;border:0;display:block}}</style>
+{UMAMI_SCRIPT}
 </head><body>
 <iframe src="{pdf_src}#view=FitH" title="{safe_title}"></iframe>
 </body></html>"""
