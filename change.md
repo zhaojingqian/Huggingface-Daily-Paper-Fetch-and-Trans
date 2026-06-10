@@ -2,6 +2,19 @@
 
 ---
 
+## v4.7 — 2026-06-10
+
+### 全文翻译修复
+
+#### 2026-06-09 论文 `2606.09828` retry-pdf 下载断流修复
+
+- **影响论文**：`2606.09828`（Latent Spatial Memory for Video World Models）。
+- **根因**：失败日志显示插件还未进入 LaTeX 编译阶段，`requests.get(arxiv /src)` 在读取源码包时触发 `ChunkedEncodingError / IncompleteRead`；由于 `retry-pdf` 在无翻译 tex 缓存时传入 `--no-cache`，gpt-academic 会忽略已有 `e-print/<arxiv_id>.tar`，每次重试都重新下载源码，容易反复失败在下载阶段。
+- **修复**：`full_translate_driver.py` 在 `--no-cache` 重译前仍清理 `workfolder`、`translation` 和 `extract`，但若容器内已有有效 arXiv 源码 tar，则复用源码包，只重新执行翻译和编译。
+- **文档**：`README.md` 的 retry-pdf 说明补充源码缓存复用策略。
+
+---
+
 ## v4.6 — 2026-06-09
 
 ### 统计接入

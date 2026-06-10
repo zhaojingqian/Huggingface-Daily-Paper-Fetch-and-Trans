@@ -730,6 +730,18 @@ def clear_compile_cache(full=False):
             print(f"[driver] 已清除缓存: {d}", flush=True)
 
 
+def source_cache_is_valid():
+    """检查已下载的 arXiv 源码包是否可复用，避免 --no-cache 重试反复卡在下载断流。"""
+    src_tar = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print', arxiv_id + '.tar')
+    if not os.path.exists(src_tar) or os.path.getsize(src_tar) < 1024:
+        return False
+    try:
+        import tarfile
+        return tarfile.is_tarfile(src_tar)
+    except Exception:
+        return False
+
+
 # ── 主逻辑：首次 + 重试 ────────────────────────────────────────────────────────
 result_pdf = None
 
@@ -740,9 +752,13 @@ if keep_translation and os.path.exists(TRANSLATE_TEX):
     print(f"[driver] ♻️  复用已有翻译缓存: {TRANSLATE_TEX}（跳过 GPT 翻译）", flush=True)
     actual_no_cache = False
 elif no_cache:
-    # 强制全量重新翻译
+    # 强制重新翻译/编译；若源码包已经有效缓存，则复用源码，避免 arXiv 下载断流导致无法进入编译阶段。
     clear_compile_cache(full=True)
-    actual_no_cache = True
+    if source_cache_is_valid():
+        print(f"[driver] ♻️  复用已下载源码缓存（仍会重新翻译/编译）", flush=True)
+        actual_no_cache = False
+    else:
+        actual_no_cache = True
 else:
     actual_no_cache = False
 

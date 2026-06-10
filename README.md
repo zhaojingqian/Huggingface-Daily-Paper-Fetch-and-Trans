@@ -72,6 +72,8 @@ python3 run_repair.py --retry-pdf --mode weekly --key 2026-W22
 python3 run_repair.py --retry-pdf --mode daily --days 7
 ```
 
+`retry-pdf` 会优先复用已有的翻译 tex 缓存；如果没有翻译 tex 但容器内已有有效 arXiv 源码包，也会复用源码包重新翻译/编译，避免网络断流时反复失败在源码下载阶段。
+
 ### Web 服务
 
 ```bash
