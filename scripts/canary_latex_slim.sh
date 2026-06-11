@@ -9,7 +9,11 @@ MODE="${GPT_ACADEMIC_SLIM_CANARY_MODE:-compile}"
 IDS=("$@")
 
 if [ "${#IDS[@]}" -eq 0 ]; then
-  IDS=(2606.09967 2606.10917 2606.09828 2606.02060)
+  if [ "$MODE" = "full" ]; then
+    IDS=(2606.08432)
+  else
+    IDS=(2606.09967 2606.10917 2606.09828 2606.02060)
+  fi
 fi
 
 mkdir -p "$OUT_DIR"

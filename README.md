@@ -278,6 +278,7 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex
 - slim 镜像 `paper-trans-latex-slim:latest`：约 4.55GB。
 - 原生产容器 `gpt-academic-latex` 未删除，slim 容器 `gpt-academic-latex-slim` 独立运行。
 - compile canary 已通过：`2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
+- full no-cache canary 已通过：`2606.08432`。
 
 ```bash
 # 默认使用低磁盘 flatten 模式：从当前生产镜像创建临时容器，裁剪大依赖后 docker export/import
@@ -291,6 +292,9 @@ GPT_ACADEMIC_SKIP_SETUP=1 ./scripts/run_latex_slim.sh
 
 # 默认 compile 模式：复用 data/tex_backup 中的中文 tex，只验证 LaTeX/runtime 编译链
 ./scripts/canary_latex_slim.sh
+
+# full 模式：默认用 2606.08432 跑 --no-cache，验证 GPT 翻译 + LaTeX 编译完整链路
+GPT_ACADEMIC_SLIM_CANARY_MODE=full ./scripts/canary_latex_slim.sh
 ```
 
 如需在磁盘更宽裕的外部 builder 上走 Dockerfile 构建，可设置：

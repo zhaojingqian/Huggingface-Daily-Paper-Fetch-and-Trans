@@ -14,12 +14,14 @@
   - 保留必要 TeX 能力：`texlive-lang-european`、`texlive-science`、CJK/XeLaTeX、Noto/Arphic 字体，并增加 `fontawesome` v4/v5/v6、`bbding`、`inconsolata` 等轻量 stub，避免拉回 `texlive-fonts-extra`；
   - `scripts/run_latex_slim.sh` 支持 `GPT_ACADEMIC_SKIP_SETUP=1`，镜像已内置补丁时可跳过启动时 setup；
   - `scripts/canary_latex_slim.sh` 默认使用 compile 模式，复用 `data/tex_backup` 中的 `merge_translate_zh.tex`，只验证 slim 容器的 LaTeX/runtime 编译链；`GPT_ACADEMIC_SLIM_CANARY_MODE=full` 才跑完整重译；
+  - full canary 默认 ID 设为 `2606.08432`，用于无缓存测试 GPT 翻译阶段是否正常；
   - `translate_full.py` CLI 增加 `--keep-translation`，并在运行前自动恢复宿主机备份的中文 tex；
   - `full_translate_driver.py` 在 `--keep-translation` 且 workfolder 完整时直接走 XeLaTeX fallback 重编译，避免 gpt-academic 插件重建 workfolder 后删除已恢复的中文 tex。
 - **验证**：
   - 本机生成 `paper-trans-latex-slim:latest`，镜像大小约 4.55GB；
   - fresh slim 容器从新镜像启动成功，跳过 setup 后仍能解析 `ctex`、`bxcoloremoji`、`fontawesome`、`bbding`、`inconsolata`、`nicematrix`、`latin.ldf`，并能读取生产 `config_private.py`；
   - compile canary 通过 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
+  - full no-cache canary 通过 `2606.08432`，`no_cache=True`，完整翻译+编译成功生成中文 PDF。
 - **安全策略**：旧生产容器 `gpt-academic-latex` 和旧镜像仍保留，尚未切换生产 cron/systemd，也未删除原容器/原镜像。
 
 ---
