@@ -270,17 +270,33 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex
 
 ### 可选 slim LaTeX 容器
 
-生产默认仍使用已有的 `gpt-academic-latex` 容器。slim 方案用于先并行验证更小的中文翻译/LaTeX 运行环境，确认 canary 通过前不要删除原容器或原镜像。
+生产默认仍使用已有的 `gpt-academic-latex` 容器。slim 方案用于并行验证更小的中文翻译/LaTeX 运行环境；确认线上稳定前不要删除原容器或原镜像。
+
+当前本机验证结果（2026-06-11）：
+
+- 原镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`：约 15.4GB。
+- slim 镜像 `paper-trans-latex-slim:latest`：约 4.55GB。
+- 原生产容器 `gpt-academic-latex` 未删除，slim 容器 `gpt-academic-latex-slim` 独立运行。
+- compile canary 已通过：`2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
 
 ```bash
-# 从当前生产容器复制 /gpt 代码，构建去掉 torch/nougat/texlive-full 的 slim 镜像
+# 默认使用低磁盘 flatten 模式：从当前生产镜像创建临时容器，裁剪大依赖后 docker export/import
 ./scripts/build_latex_slim.sh
 
 # 启动独立容器 gpt-academic-latex-slim，并复用 config_private.py
 ./scripts/run_latex_slim.sh
 
-# 用近期失败过的论文做 canary：2606.09967、2606.10917、2606.09828、2606.02060
+# 镜像已内置 setup 补丁时可跳过启动时 setup，减少磁盘和 apt cache 抖动
+GPT_ACADEMIC_SKIP_SETUP=1 ./scripts/run_latex_slim.sh
+
+# 默认 compile 模式：复用 data/tex_backup 中的中文 tex，只验证 LaTeX/runtime 编译链
 ./scripts/canary_latex_slim.sh
+```
+
+如需在磁盘更宽裕的外部 builder 上走 Dockerfile 构建，可设置：
+
+```bash
+GPT_ACADEMIC_SLIM_BUILD_MODE=dockerfile ./scripts/build_latex_slim.sh
 ```
 
 单次手动验证时可只给当前命令加环境变量，不影响生产容器：

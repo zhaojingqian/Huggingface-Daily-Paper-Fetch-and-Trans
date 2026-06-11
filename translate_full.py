@@ -5,7 +5,7 @@
 翻译 arxiv 论文全文（LaTeX → 中文 PDF），然后 docker cp 取回 PDF。
 
 用法:
-  python3 translate_full.py <arxiv_id> -o <output_dir> [--no-cache] [--timeout 3600]
+  python3 translate_full.py <arxiv_id> -o <output_dir> [--no-cache] [--keep-translation] [--timeout 3600]
 """
 
 import subprocess
@@ -338,6 +338,11 @@ def translate_full(arxiv_id: str, output_dir: str,
         print(f"❌ {result['error']}", flush=True)
         return result
 
+    if keep_translation and not _restore_tex_to_container(arxiv_id):
+        result['error'] = f"找不到可复用的翻译 tex 备份: {arxiv_id}"
+        print(f"❌ {result['error']}", flush=True)
+        return result
+
     # 3. 在容器内执行翻译
     print(f"🚀 启动容器内翻译 (timeout={timeout}s)...", flush=True)
     t0 = time.time()
@@ -392,12 +397,15 @@ def main():
     parser.add_argument("-o", "--output", default="/root/workspace/paper-trans/weekly",
                         help="输出目录")
     parser.add_argument("--no-cache", action="store_true", help="强制重新翻译")
+    parser.add_argument("--keep-translation", action="store_true",
+                        help="复用宿主机备份的 merge_translate_zh.tex，只重跑编译")
     parser.add_argument("--timeout", type=int, default=3600, help="超时秒数")
     args = parser.parse_args()
 
     print(f"\n🔬 全文翻译: {args.arxiv_id}", flush=True)
     result = translate_full(args.arxiv_id, args.output,
-                            no_cache=args.no_cache, timeout=args.timeout)
+                            no_cache=args.no_cache, timeout=args.timeout,
+                            keep_translation=args.keep_translation)
     print(f"\n📋 结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
     sys.exit(0 if result['success'] else 1)
 

@@ -153,9 +153,10 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 - [x] 将翻译容器名改为 `GPT_ACADEMIC_CONTAINER` 可覆盖，默认保持 `gpt-academic-latex`。
 - [x] 增加 `paper-trans-latex-slim` 构建、启动和 canary 脚本。
-- [ ] 在磁盘空间足够的环境构建 slim 镜像，并记录最终镜像体积。
-- [ ] 使用 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060` 跑完 canary。
-- [ ] canary 成功后再切换生产 cron/systemd；确认线上稳定后再考虑删除原容器和原镜像。
+- [x] 在 40GB 服务器上用低磁盘 flatten 模式构建 slim 镜像，并记录最终镜像体积约 4.55GB。
+- [x] 使用 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060` 跑完 compile canary。
+- [ ] 将生产 cron/systemd 切换到 `gpt-academic-latex-slim` 并观察稳定性。
+- [ ] 生产切换确认成功后，再删除原容器和原镜像释放约 15GB 空间。
 
 ---
 

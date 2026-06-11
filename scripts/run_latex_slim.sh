@@ -36,8 +36,12 @@ else
   fi
 fi
 
-echo "[slim-run] applying paper-trans LaTeX environment patches"
-GPT_ACADEMIC_CONTAINER="$CONTAINER" bash "${ROOT_DIR}/scripts/setup_docker_env.sh"
+if [ "${GPT_ACADEMIC_SKIP_SETUP:-0}" = "1" ]; then
+  echo "[slim-run] skipping setup_docker_env.sh (GPT_ACADEMIC_SKIP_SETUP=1)"
+else
+  echo "[slim-run] applying paper-trans LaTeX environment patches"
+  GPT_ACADEMIC_CONTAINER="$CONTAINER" bash "${ROOT_DIR}/scripts/setup_docker_env.sh"
+fi
 
 echo "[slim-run] ready: ${CONTAINER}"
-docker ps --filter "name=^/${CONTAINER}$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Size}}'
+docker ps --filter "name=^/${CONTAINER}$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'

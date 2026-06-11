@@ -22,10 +22,10 @@ RUN apt-get update \
         python3-pip \
         texlive-base \
         texlive-bibtex-extra \
-        texlive-fonts-extra \
         texlive-fonts-recommended \
         texlive-lang-chinese \
         texlive-lang-cjk \
+        texlive-lang-european \
         texlive-latex-base \
         texlive-latex-extra \
         texlive-latex-recommended \
@@ -36,6 +36,78 @@ RUN apt-get update \
         xz-utils \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    TEXDIR="$(kpsewhich -var-value TEXMFLOCAL)"; \
+    mkdir -p \
+        "${TEXDIR}/tex/latex/bbding" \
+        "${TEXDIR}/tex/latex/fontawesome" \
+        "${TEXDIR}/tex/latex/fontawesome5" \
+        "${TEXDIR}/tex/latex/fontawesome6" \
+        "${TEXDIR}/tex/latex/inconsolata"; \
+    cd /tmp; \
+    curl -fsSL 'https://mirrors.ctan.org/macros/latex/contrib/bxcoloremoji.zip' -o bxcoloremoji.zip; \
+    unzip -q bxcoloremoji.zip; \
+    mkdir -p "${TEXDIR}/tex/latex/bxcoloremoji"; \
+    cp bxcoloremoji/bxcoloremoji.sty bxcoloremoji/bxcoloremoji-names.def "${TEXDIR}/tex/latex/bxcoloremoji/"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{fontawesome5}[2024/01/01 fontawesome5 stub]' \
+        '\providecommand{\faIcon}[1]{}' \
+        '\providecommand{\faicon}[1]{}' \
+        '\providecommand{\faGithub}{}' \
+        '\providecommand{\faTwitter}{}' \
+        '\providecommand{\faEnvelope}{}' \
+        '\providecommand{\faHome}{}' \
+        '\providecommand{\faExternalLinkAlt}{}' \
+        '\providecommand{\faFilePdf}{}' \
+        > "${TEXDIR}/tex/latex/fontawesome5/fontawesome5.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{fontawesome}[2024/01/01 fontawesome v4 stub]' \
+        '\RequirePackage{fontawesome5}' \
+        '\providecommand{\faIcon}[1]{}' \
+        '\providecommand{\faicon}[1]{}' \
+        '\providecommand{\faGithub}{}' \
+        '\providecommand{\faTwitter}{}' \
+        '\providecommand{\faEnvelope}{}' \
+        '\providecommand{\faHome}{}' \
+        '\providecommand{\faExternalLink}{}' \
+        '\providecommand{\faFilePdfO}{}' \
+        > "${TEXDIR}/tex/latex/fontawesome/fontawesome.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{fontawesome6}[2024/01/01 fontawesome6 stub]' \
+        '\RequirePackage{fontawesome5}' \
+        '\providecommand{\faIcon}[1]{}' \
+        '\providecommand{\faicon}[1]{}' \
+        > "${TEXDIR}/tex/latex/fontawesome6/fontawesome6.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{fontawesome6-generic}[2024/01/01 fontawesome6-generic stub]' \
+        '\RequirePackage{fontawesome6}' \
+        > "${TEXDIR}/tex/latex/fontawesome6/fontawesome6-generic.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{bbding}[2024/01/01 bbding stub]' \
+        '\providecommand{\Checkmark}{}' \
+        '\providecommand{\XSolidBrush}{}' \
+        '\providecommand{\HandRight}{}' \
+        '\providecommand{\FiveStar}{}' \
+        '\providecommand{\Envelope}{}' \
+        '\providecommand{\ScissorRight}{}' \
+        '\providecommand{\PencilRight}{}' \
+        > "${TEXDIR}/tex/latex/bbding/bbding.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{inconsolata}[2024/01/01 inconsolata stub]' \
+        '\DeclareOption*{}' \
+        '\ProcessOptions\relax' \
+        '\RequirePackage{lmodern}' \
+        '\renewcommand{\ttdefault}{lmtt}' \
+        > "${TEXDIR}/tex/latex/inconsolata/inconsolata.sty"; \
+    mktexlsr "${TEXDIR}"; \
+    rm -rf /tmp/bxcoloremoji /tmp/bxcoloremoji.zip
 
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
         "https://public.agent-matrix.com/publish/gradio-3.32.15-py3-none-any.whl" \
@@ -52,9 +124,11 @@ RUN python3 -m pip install --break-system-packages --no-cache-dir \
         latex2mathml \
         loguru \
         Markdown \
+        matplotlib \
         mdtex2html \
         numpy \
         openai \
+        pandas \
         prompt_toolkit \
         protobuf==3.20 \
         pydantic==2.9.2 \

@@ -5,7 +5,7 @@
 #   1. Noto Sans SemiBold 缺失（2603.16859 类论文使用 mac_automl 模板）
 #   2. fontset=windows 注入 Windows 专有 CJK 字体（SimSun/SimHei/KaiTi）在 Linux 不存在
 #   3. bxcoloremoji 包缺失（部分论文使用 emoji）
-#   4. fontawesome6 包在旧 TeX Live 中缺失
+#   4. fontawesome/fontawesome5/fontawesome6/bbding/inconsolata 包在精简 TeX 环境中缺失
 #   5. ctex 包不在 xelatex 检测列表导致使用 pdflatex 编译失败
 #   6. \def\input@path 自定义路径无法被 gpt-academic 解析，导致多级目录论文 merge 失败
 #
@@ -34,7 +34,9 @@ docker exec -u root "$CONTAINER" apt-get install -y --no-install-recommends \
     fonts-noto-cjk \
     fonts-noto-extra \
     fonts-arphic-ukai \
-    fonts-arphic-uming
+    fonts-arphic-uming \
+    texlive-lang-european \
+    texlive-science
 
 # ── 2. 写入 fontconfig 映射（Windows CJK 字体名 → Linux 等效字体）────────────
 echo "=== [2/10] 写入 fontconfig 映射规则 ==="
@@ -83,7 +85,7 @@ docker exec -u root "$CONTAINER" fc-cache -fv 2>&1 | tail -3
 
 # ── 3. 安装 bxcoloremoji LaTeX 包 ──────────────────────────────────────────
 echo "=== [3/10] 安装 bxcoloremoji LaTeX 包 ==="
-ALREADY=$(docker exec "$CONTAINER" kpsewhich bxcoloremoji.sty 2>/dev/null)
+ALREADY=$(docker exec "$CONTAINER" kpsewhich bxcoloremoji.sty 2>/dev/null || true)
 if [ -n "$ALREADY" ]; then
     echo "  bxcoloremoji 已安装，跳过"
 else
@@ -99,18 +101,51 @@ else
     "
 fi
 
-# ── 4. 安装 fontawesome6 stub（TeX Live 旧版无 fontawesome6）───────────────
-echo "=== [4/10] 安装 fontawesome6 stub ==="
-if docker exec "$CONTAINER" kpsewhich fontawesome6.sty >/dev/null 2>&1; then
-    echo "  fontawesome6 已安装，跳过"
+# ── 4. 安装轻量 stub（精简 TeX 环境可能无图标/字体包）────────────────────
+echo "=== [4/10] 安装 fontawesome/bbding/inconsolata stubs ==="
+if docker exec "$CONTAINER" kpsewhich fontawesome.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich fontawesome5.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich fontawesome6.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich bbding.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich inconsolata.sty >/dev/null 2>&1; then
+    echo "  fontawesome/fontawesome5/fontawesome6/bbding/inconsolata 已安装，跳过"
 else
     docker exec -u root "$CONTAINER" bash -c "
         TEXDIR=\$(kpsewhich -var-value TEXMFLOCAL)
+        mkdir -p \${TEXDIR}/tex/latex/fontawesome5
+        cat > \${TEXDIR}/tex/latex/fontawesome5/fontawesome5.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{fontawesome5}[2024/01/01 fontawesome5 stub]
+% Icon glyphs are cosmetic for translated paper PDFs; provide no-op fallbacks.
+\providecommand{\faIcon}[1]{}
+\providecommand{\faicon}[1]{}
+\providecommand{\faGithub}{}
+\providecommand{\faTwitter}{}
+\providecommand{\faEnvelope}{}
+\providecommand{\faHome}{}
+\providecommand{\faExternalLinkAlt}{}
+\providecommand{\faFilePdf}{}
+STYEOF
+        mkdir -p \${TEXDIR}/tex/latex/fontawesome
+        cat > \${TEXDIR}/tex/latex/fontawesome/fontawesome.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{fontawesome}[2024/01/01 fontawesome v4 stub]
+% Icon glyphs are cosmetic for translated paper PDFs; provide no-op fallbacks.
+\RequirePackage{fontawesome5}
+\providecommand{\faIcon}[1]{}
+\providecommand{\faicon}[1]{}
+\providecommand{\faGithub}{}
+\providecommand{\faTwitter}{}
+\providecommand{\faEnvelope}{}
+\providecommand{\faHome}{}
+\providecommand{\faExternalLink}{}
+\providecommand{\faFilePdfO}{}
+STYEOF
         mkdir -p \${TEXDIR}/tex/latex/fontawesome6
         cat > \${TEXDIR}/tex/latex/fontawesome6/fontawesome6.sty << 'STYEOF'
 \NeedsTeXFormat{LaTeX2e}
 \ProvidesPackage{fontawesome6}[2024/01/01 fontawesome6-stub via fontawesome5]
-% fontawesome6 is not available in older TeX Live images; fall back to fontawesome5.
+% fontawesome6 is not available in older or slim TeX Live images; fall back to fontawesome5.
 \RequirePackage{fontawesome5}
 \providecommand{\faIcon}[1]{}
 \providecommand{\faicon}[1]{}
@@ -120,53 +155,57 @@ STYEOF
 \ProvidesPackage{fontawesome6-generic}[2024/01/01 fontawesome6-generic stub]
 \RequirePackage{fontawesome6}
 STYEOF
+        mkdir -p \${TEXDIR}/tex/latex/bbding
+        cat > \${TEXDIR}/tex/latex/bbding/bbding.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{bbding}[2024/01/01 bbding stub]
+% bbding icons are cosmetic in translated paper PDFs; provide common no-op fallbacks.
+\providecommand{\Checkmark}{}
+\providecommand{\XSolidBrush}{}
+\providecommand{\HandRight}{}
+\providecommand{\FiveStar}{}
+\providecommand{\Envelope}{}
+\providecommand{\ScissorRight}{}
+\providecommand{\PencilRight}{}
+STYEOF
+        mkdir -p \${TEXDIR}/tex/latex/inconsolata
+        cat > \${TEXDIR}/tex/latex/inconsolata/inconsolata.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{inconsolata}[2024/01/01 inconsolata stub]
+% Keep slim images small by mapping the cosmetic monospace font to Latin Modern Mono.
+\DeclareOption*{}
+\ProcessOptions\relax
+\RequirePackage{lmodern}
+\renewcommand{\ttdefault}{lmtt}
+STYEOF
         mktexlsr \${TEXDIR} 2>&1 | tail -2
-        echo 'fontawesome6 stub installed to' \${TEXDIR}/tex/latex/fontawesome6/
+        echo 'fontawesome/bbding/inconsolata stubs installed to' \${TEXDIR}/tex/latex/
     "
 fi
 
 # ── 5. 修补 gpt-academic latex_toolbox.py（fontset=windows → fandol on Linux）
 echo "=== [5/10] 修补 latex_toolbox.py（fontset=windows → fandol on Linux）==="
-docker exec -u root "$CONTAINER" python3 - << 'PYEOF'
+docker exec -i -u root "$CONTAINER" python3 - << 'PYEOF'
 import sys
 
 path = '/gpt/crazy_functions/latex_fns/latex_toolbox.py'
 with open(path, 'r') as f:
-    lines = f.readlines()
+    src = f.read()
 
 # 检查是否已修补
-if any('fandol' in l for l in lines):
+if '_fontset = "windows" if platform.system() == "Windows" else "fandol"' in src:
     print('  已修补，跳过')
     sys.exit(0)
 
-# 找到 "# fontset=windows" 注释行
-target = '        # fontset=windows\n'
-idx = next((i for i, l in enumerate(lines) if l == target), None)
-if idx is None:
+start_marker = '        # fontset=windows\n'
+end_marker = '        # find paper abstract'
+start = src.find(start_marker)
+end = src.find(end_marker, start)
+if start < 0 or end < 0:
     print('  ERROR: 未找到 fontset=windows 代码块，请手动检查', file=sys.stderr)
     sys.exit(1)
 
-# 验证后续 13 行符合预期（第 idx 到 idx+12 共 13 行）
-expected_slice = [
-    '        # fontset=windows\n',
-    '        import platform\n',
-    '\n',
-    '        main_file = re.sub(\n',
-    '            r"\\\\documentclass\\[(.*?)\\]{(.*?)}",\n',
-    '            r"\\\\documentclass[\\1,fontset=windows,UTF8]{\\2}",\n',
-    '            main_file,\n',
-    '        )\n',
-    '        main_file = re.sub(\n',
-    '            r"\\\\documentclass{(.*?)}",\n',
-    '            r"\\\\documentclass[fontset=windows,UTF8]{\\1}",\n',
-    '            main_file,\n',
-    '        )\n',
-]
-if lines[idx:idx+13] != expected_slice:
-    print('  ERROR: 代码块内容与预期不符，跳过自动修补', file=sys.stderr)
-    sys.exit(1)
-
-new_lines = [
+new_block = ''.join([
     '        # fontset: use fandol on Linux (bundled with TeX Live), windows on Windows\n',
     '        import platform\n',
     '        _fontset = "windows" if platform.system() == "Windows" else "fandol"\n',
@@ -181,12 +220,12 @@ new_lines = [
     '            r"\\\\documentclass[fontset=" + _fontset + r",UTF8]{\\1}",\n',
     '            main_file,\n',
     '        )\n',
-]
+])
 
-lines[idx:idx+13] = new_lines
+src = src[:start] + new_block + src[end:]
 
 with open(path, 'w') as f:
-    f.writelines(lines)
+    f.write(src)
 
 print('  已修补 latex_toolbox.py')
 PYEOF
@@ -226,7 +265,7 @@ TOOLBOX=/gpt/crazy_functions/latex_fns/latex_toolbox.py
 if docker exec "$CONTAINER" grep -q "input_paths" "$TOOLBOX"; then
     echo "  已修补，跳过"
 else
-    docker exec -u root "$CONTAINER" python3 << 'PYPATCH'
+    docker exec -i -u root "$CONTAINER" python3 << 'PYPATCH'
 import sys, re
 
 path = '/gpt/crazy_functions/latex_fns/latex_toolbox.py'
@@ -239,16 +278,8 @@ if idx is None:
     print('ERROR: merge_tex_files_ not found', file=sys.stderr)
     sys.exit(1)
 
-# Find end of function (next blank line after function body)
-end = idx + 1
-while end < len(lines) and (lines[end].strip() or end < idx + 5):
-    if end > idx + 5 and lines[end] == '\n' and end + 1 < len(lines) and lines[end+1] == '\n':
-        break
-    end += 1
-# Make sure we include the return statement
-while end < len(lines) and 'return main_file' not in lines[end]:
-    end += 1
-end += 1  # include return line
+# Find end of this top-level function without swallowing merge_tex_files().
+end = next((i for i in range(idx + 1, len(lines)) if lines[i].startswith('def ')), len(lines))
 
 # Check if already patched
 existing = ''.join(lines[idx:end])
@@ -317,9 +348,15 @@ echo "验证："
 docker exec "$CONTAINER" fc-match "SimSun"
 docker exec "$CONTAINER" fc-match "Noto Sans SemiBold"
 docker exec "$CONTAINER" kpsewhich bxcoloremoji.sty
+docker exec "$CONTAINER" kpsewhich fontawesome.sty
+docker exec "$CONTAINER" kpsewhich fontawesome5.sty
 docker exec "$CONTAINER" kpsewhich fontawesome6.sty
-docker exec "$CONTAINER" grep -c "fandol" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py fandol ✅"
-docker exec "$CONTAINER" grep -c "ctex" /gpt/crazy_functions/latex_fns/latex_actions.py && echo "latex_actions.py ctex ✅"
-docker exec "$CONTAINER" grep -c "axessibility" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py axessibility ✅"
-docker exec "$CONTAINER" grep -c "00README.json" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py 00README ✅"
-docker exec "$CONTAINER" grep -c "input_paths" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py input@path ✅"
+docker exec "$CONTAINER" kpsewhich bbding.sty
+docker exec "$CONTAINER" kpsewhich inconsolata.sty
+docker exec "$CONTAINER" grep -q "fandol" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py fandol ✅"
+docker exec "$CONTAINER" grep -q "ctex" /gpt/crazy_functions/latex_fns/latex_actions.py && echo "latex_actions.py ctex ✅"
+docker exec "$CONTAINER" grep -q "axessibility" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py axessibility ✅"
+docker exec "$CONTAINER" grep -q "00README.json" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py 00README ✅"
+docker exec "$CONTAINER" grep -q "input_paths" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py input@path ✅"
+
+docker exec -u root "$CONTAINER" bash -c "apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/*"

@@ -531,7 +531,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     """
     当 gpt-academic 翻译完成但编译失败时：
     1. 还原 verbatim 类环境为原始内容
-    2. 直接用 pdflatex 重新编译 merge_translate_zh.tex
+    2. 直接用 xelatex 重新编译 merge_translate_zh.tex
     3. 成功则把 PDF 复制到 translation 目录并返回路径
     """
     import subprocess as _sp
@@ -554,12 +554,12 @@ def patch_and_recompile(workfolder, arxiv_id_):
 
     try:
         _sp.run(
-            ['pdflatex', '-interaction=nonstopmode', 'merge_translate_zh.tex'],
+            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
             cwd=workfolder, timeout=300,
             stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
         )
     except Exception as e:
-        print(f"[driver] ⚠️  pdflatex 执行异常: {e}", flush=True)
+        print(f"[driver] ⚠️  xelatex 执行异常: {e}", flush=True)
         return None
 
     if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 50 * 1024:
@@ -745,42 +745,48 @@ def source_cache_is_valid():
 # ── 主逻辑：首次 + 重试 ────────────────────────────────────────────────────────
 result_pdf = None
 
-TRANSLATE_TEX = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder', 'merge_translate_zh.tex')
+WORKFOLDER = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder')
+TRANSLATE_TEX = os.path.join(WORKFOLDER, 'merge_translate_zh.tex')
+ORIG_TEX = os.path.join(WORKFOLDER, 'merge.tex')
 
-if keep_translation and os.path.exists(TRANSLATE_TEX):
-    # 保留已有 GPT 翻译，只重跑编译：不清缓存，以 no_cache=False 调用插件
-    print(f"[driver] ♻️  复用已有翻译缓存: {TRANSLATE_TEX}（跳过 GPT 翻译）", flush=True)
-    actual_no_cache = False
-elif no_cache:
-    # 强制重新翻译/编译；若源码包已经有效缓存，则复用源码，避免 arXiv 下载断流导致无法进入编译阶段。
-    clear_compile_cache(full=True)
-    if source_cache_is_valid():
-        print(f"[driver] ♻️  复用已下载源码缓存（仍会重新翻译/编译）", flush=True)
-        actual_no_cache = False
-    else:
-        actual_no_cache = True
+if keep_translation and os.path.exists(TRANSLATE_TEX) and os.path.exists(ORIG_TEX):
+    # 保留已有 GPT 翻译，只重跑编译。绕开插件生成器，避免它重建 workfolder 后删掉已恢复的中文 tex。
+    print(f"[driver] ♻️  复用已有翻译缓存: {TRANSLATE_TEX}（直接重编译，跳过 GPT 翻译）", flush=True)
+    result_pdf = patch_and_recompile(WORKFOLDER, arxiv_id)
 else:
-    actual_no_cache = False
-
-for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
-    if attempt == 1:
-        result_pdf = run_translation(actual_no_cache, attempt)
+    if keep_translation and os.path.exists(TRANSLATE_TEX):
+        # 只有中文 tex、没有源码 workfolder 时，退回插件路径准备源码。
+        print(f"[driver] ♻️  发现翻译缓存但 workfolder 不完整，退回插件路径准备源码", flush=True)
+        actual_no_cache = False
+    elif no_cache:
+        # 强制重新翻译/编译；若源码包已经有效缓存，则复用源码，避免 arXiv 下载断流导致无法进入编译阶段。
+        clear_compile_cache(full=True)
+        if source_cache_is_valid():
+            print(f"[driver] ♻️  复用已下载源码缓存（仍会重新翻译/编译）", flush=True)
+            actual_no_cache = False
+        else:
+            actual_no_cache = True
     else:
-        # 重试：强制清缓存，重新翻译
-        print(f"\n[driver] ══ 第 {attempt} 次重试（清除缓存后重新翻译）══", flush=True)
-        clear_compile_cache()
-        result_pdf = run_translation(True, attempt)
+        actual_no_cache = False
 
-    if result_pdf:
-        break
-    if attempt <= max_retries:
-        print(f"[driver] 等待 5s 后重试...", flush=True)
-        time.sleep(5)
+    for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
+        if attempt == 1:
+            result_pdf = run_translation(actual_no_cache, attempt)
+        else:
+            # 重试：强制清缓存，重新翻译
+            print(f"\n[driver] ══ 第 {attempt} 次重试（清除缓存后重新翻译）══", flush=True)
+            clear_compile_cache()
+            result_pdf = run_translation(True, attempt)
 
-# ── Fallback：翻译完成但编译失败时，修补 verbatim 环境后重编译 ──────────────
-if not result_pdf:
-    workfolder = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder')
-    result_pdf = patch_and_recompile(workfolder, arxiv_id)
+        if result_pdf:
+            break
+        if attempt <= max_retries:
+            print(f"[driver] 等待 5s 后重试...", flush=True)
+            time.sleep(5)
+
+    # ── Fallback：翻译完成但编译失败时，修补 verbatim 环境后重编译 ──────────────
+    if not result_pdf:
+        result_pdf = patch_and_recompile(WORKFOLDER, arxiv_id)
 
 # ── 输出结果 ────────────────────────────────────────────────────────────────
 if result_pdf:
