@@ -74,6 +74,8 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；如果没有翻译 tex 但容器内已有有效 arXiv 源码包，也会复用源码包重新翻译/编译，避免网络断流时反复失败在源码下载阶段。
 
+如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec gpt-academic-latex df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
+
 ### Web 服务
 
 ```bash

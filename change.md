@@ -2,6 +2,23 @@
 
 ---
 
+## v4.8 — 2026-06-11
+
+### 全文翻译修复
+
+#### 2026-06-10 两篇论文 PDF 失败修复
+
+- **影响论文**：`2606.09967`（ABot-Earth 0.5: A Generative 3D Earth Model）和 `2606.10917`（Role-Agent: Guiding Large Language Model Agents by Dual Role Evolution）。
+- **根因**：两篇均未进入 LaTeX 编译错误阶段，而是在 gpt-academic 容器写入缓存时失败；日志分别显示 `shutil.copytree(...): [Errno 28] No space left on device` 和 `os.makedirs(...): [Errno 28] No space left on device`。宿主机根分区与容器 overlay 当时均为 100%。
+- **处理**：
+  - 清理旧版 VS Code Server / Cursor Server 缓存、旧日志和可再生下载缓存，将根分区可用空间恢复到约 4GB；
+  - 重新执行 `python3 run_repair.py --retry-pdf --mode daily --key 2026-06-10`；
+  - `2606.09967` 复用已下载源码包重新翻译并生成 `data/papers/2606.09967_zh.pdf`；
+  - `2606.10917` 重新下载/翻译/编译成功，生成 `data/papers/2606.10917_zh.pdf`。
+- **结果**：`data/daily/2026-06-10/index.json` 中 3 篇论文全文 PDF 均恢复为 `pdf_status=ok`，两份中文 PDF 线上均返回 `HTTP/2 200`。
+
+---
+
 ## v4.7 — 2026-06-10
 
 ### 全文翻译修复
