@@ -21,7 +21,7 @@
   - 本机生成 `paper-trans-latex-slim:latest`，镜像大小约 4.55GB；
   - fresh slim 容器从新镜像启动成功，跳过 setup 后仍能解析 `ctex`、`bxcoloremoji`、`fontawesome`、`bbding`、`inconsolata`、`nicematrix`、`latin.ldf`，并能读取生产 `config_private.py`；
   - compile canary 通过 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
-  - full no-cache canary 通过 `2606.08432`，`no_cache=True`，完整翻译+编译成功生成中文 PDF。
+  - full no-cache canary 通过 `2606.08432`，`no_cache=True`，完整翻译+编译成功生成中文 PDF；虽然 PDF 仅约 0.95MB，但已用 `pdfinfo`/`pdftotext` 验证为 29 页、约 81k 可提取文本字符，原始 arXiv PDF 也仅约 1.1MB/24 页，属于论文素材体积较小而非空 PDF。
 - **安全策略**：旧生产容器 `gpt-academic-latex` 和旧镜像仍保留，尚未切换生产 cron/systemd，也未删除原容器/原镜像。
 
 ---
