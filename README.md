@@ -74,7 +74,7 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；如果没有翻译 tex 但容器内已有有效 arXiv 源码包，也会复用源码包重新翻译/编译，避免网络断流时反复失败在源码下载阶段。
 
-如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec gpt-academic-latex df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
+如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
 
 ### Web 服务
 
@@ -225,7 +225,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 | Web 端口 | `18080` |
 | 绑定地址 | 默认 `127.0.0.1`，可用 `BIND_HOST` 覆盖 |
 | 路径前缀 | `BASE_PATH=/paper` |
-| Docker 容器 | `gpt-academic-latex` |
+| Docker 容器 | 默认 `gpt-academic-latex`，可用 `GPT_ACADEMIC_CONTAINER` 覆盖 |
 | 网络代理 | `http://127.0.0.1:7890`，失败时部分请求会切直连 |
 | Web 日志 | `logs/web.log` |
 
@@ -235,6 +235,8 @@ systemd unit：
 [Service]
 WorkingDirectory=/root/workspace/paper-trans
 Environment=BASE_PATH=/paper
+# 可选：验证 slim 容器时临时切换；生产默认仍不设置
+# Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 ExecStart=/root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/web_server.py
 Restart=always
 StandardOutput=append:/root/workspace/paper-trans/logs/web.log
@@ -249,12 +251,13 @@ StandardError=append:/root/workspace/paper-trans/logs/web.log
 PYTHON=/root/.pyenv/versions/3.10.13/bin/python3
 PTDIR=/root/workspace/paper-trans
 RLOG=$PTDIR/logs/repair.log
+GPT_ACADEMIC_CONTAINER=gpt-academic-latex
 
 0 23 * * *   $PYTHON $PTDIR/run_daily.py   >> $PTDIR/logs/cron-daily.log   2>&1
 0  2 * * 0   $PYTHON $PTDIR/run_weekly.py  >> $PTDIR/logs/cron-weekly.log  2>&1
 0  2 28 * *  $PYTHON $PTDIR/run_monthly.py >> $PTDIR/logs/cron-monthly.log 2>&1
 
-0  5 * * *   docker restart gpt-academic-latex >> $PTDIR/logs/docker-restart.log 2>&1
+0  5 * * *   docker restart $GPT_ACADEMIC_CONTAINER >> $PTDIR/logs/docker-restart.log 2>&1
 30 3 * * 0   $PTDIR/scripts/cleanup_docker_cache.sh
 
 0  1 * * *   $PYTHON $PTDIR/run_repair.py --post       --mode daily   --days 2  >> $RLOG 2>&1
@@ -263,6 +266,28 @@ RLOG=$PTDIR/logs/repair.log
 0  7 * * 0   $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode weekly  --days 14 >> $RLOG 2>&1
 0  4 28 * *  $PYTHON $PTDIR/run_repair.py --post       --mode monthly --days 60 >> $RLOG 2>&1
 0  7 28 * *  $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode monthly --days 60 >> $RLOG 2>&1
+```
+
+### 可选 slim LaTeX 容器
+
+生产默认仍使用已有的 `gpt-academic-latex` 容器。slim 方案用于先并行验证更小的中文翻译/LaTeX 运行环境，确认 canary 通过前不要删除原容器或原镜像。
+
+```bash
+# 从当前生产容器复制 /gpt 代码，构建去掉 torch/nougat/texlive-full 的 slim 镜像
+./scripts/build_latex_slim.sh
+
+# 启动独立容器 gpt-academic-latex-slim，并复用 config_private.py
+./scripts/run_latex_slim.sh
+
+# 用近期失败过的论文做 canary：2606.09967、2606.10917、2606.09828、2606.02060
+./scripts/canary_latex_slim.sh
+```
+
+单次手动验证时可只给当前命令加环境变量，不影响生产容器：
+
+```bash
+GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim \
+  python3 translate_full.py 2606.09967 -o /tmp/paper-trans-canary --no-cache
 ```
 
 ---

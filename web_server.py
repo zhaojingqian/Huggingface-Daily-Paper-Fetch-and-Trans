@@ -23,6 +23,7 @@ UMAMI_SCRIPT = (
     '<script defer src="https://cloud.umami.is/script.js" '
     'data-website-id="848a0bed-4004-423d-8f2b-52c9cbd39d93"></script>'
 )
+GPT_ACADEMIC_CONTAINER = os.environ.get("GPT_ACADEMIC_CONTAINER", "gpt-academic-latex")
 
 PROXY = "http://127.0.0.1:7890"
 HTTP_HEADERS = {
@@ -1962,7 +1963,7 @@ def get_system_status():
     zombie_count = 0
     try:
         out = subprocess.check_output(
-            ["docker", "exec", "gpt-academic-latex", "ps", "aux"],
+            ["docker", "exec", GPT_ACADEMIC_CONTAINER, "ps", "aux"],
             timeout=5, stderr=subprocess.DEVNULL
         ).decode(errors="replace")
         for line in out.splitlines()[1:]:
@@ -1997,7 +1998,7 @@ def kill_current_translation():
     """终止容器内当前正在运行的翻译进程"""
     try:
         out = subprocess.check_output(
-            ["docker", "exec", "gpt-academic-latex",
+            ["docker", "exec", GPT_ACADEMIC_CONTAINER,
              "sh", "-c", "pgrep -f full_translate_driver || echo ''"],
             timeout=5, stderr=subprocess.DEVNULL
         ).decode().strip()
@@ -2006,7 +2007,7 @@ def kill_current_translation():
         pids = out.split()
         for pid in pids:
             subprocess.call(
-                ["docker", "exec", "gpt-academic-latex", "kill", "-9", pid],
+                ["docker", "exec", GPT_ACADEMIC_CONTAINER, "kill", "-9", pid],
                 timeout=5, stderr=subprocess.DEVNULL
             )
         with _submit_lock:

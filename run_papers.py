@@ -347,7 +347,12 @@ def retry_pdf(mode=None, key=None):
     key=None  时扫描该 mode 下所有 key。
     返回成功翻译的篇数。
     """
-    from translate_full import translate_full, TEX_BACKUP_DIR, _restore_tex_to_container
+    from translate_full import (
+        CONTAINER_NAME,
+        TEX_BACKUP_DIR,
+        _restore_tex_to_container,
+        translate_full,
+    )
 
     modes = [mode] if mode else ["daily", "weekly", "monthly"]
     total_ok = 0
@@ -394,7 +399,7 @@ def retry_pdf(mode=None, key=None):
                 # 检测是否已有翻译 tex，有则只重跑编译（优先查宿主机备份，再查容器内）
                 container_tex = f"/gpt/gpt_log/arxiv_cache/{aid}/workfolder/merge_translate_zh.tex"
                 has_container = subprocess.run(
-                    ["docker", "exec", "gpt-academic-latex",
+                    ["docker", "exec", CONTAINER_NAME,
                      "test", "-s", container_tex],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 ).returncode == 0

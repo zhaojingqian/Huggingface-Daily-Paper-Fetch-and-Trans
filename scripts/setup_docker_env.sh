@@ -5,8 +5,9 @@
 #   1. Noto Sans SemiBold 缺失（2603.16859 类论文使用 mac_automl 模板）
 #   2. fontset=windows 注入 Windows 专有 CJK 字体（SimSun/SimHei/KaiTi）在 Linux 不存在
 #   3. bxcoloremoji 包缺失（部分论文使用 emoji）
-#   4. ctex 包不在 xelatex 检测列表导致使用 pdflatex 编译失败
-#   5. \def\input@path 自定义路径无法被 gpt-academic 解析，导致多级目录论文 merge 失败
+#   4. fontawesome6 包在旧 TeX Live 中缺失
+#   5. ctex 包不在 xelatex 检测列表导致使用 pdflatex 编译失败
+#   6. \def\input@path 自定义路径无法被 gpt-academic 解析，导致多级目录论文 merge 失败
 #
 # 使用场景：
 #   - 容器首次创建后
@@ -18,7 +19,7 @@
 #
 set -e
 
-CONTAINER="gpt-academic-latex"
+CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex}"
 
 echo "=== [setup_docker_env] 检查容器 $CONTAINER 是否运行 ==="
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -27,7 +28,7 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
 fi
 
 # ── 1. 安装字体包 ────────────────────────────────────────────────────────────
-echo "=== [1/8] 安装 Noto CJK + Arphic + Noto Extra 字体 ==="
+echo "=== [1/10] 安装 Noto CJK + Arphic + Noto Extra 字体 ==="
 docker exec -u root "$CONTAINER" apt-get update -qq
 docker exec -u root "$CONTAINER" apt-get install -y --no-install-recommends \
     fonts-noto-cjk \
@@ -36,7 +37,7 @@ docker exec -u root "$CONTAINER" apt-get install -y --no-install-recommends \
     fonts-arphic-uming
 
 # ── 2. 写入 fontconfig 映射（Windows CJK 字体名 → Linux 等效字体）────────────
-echo "=== [2/8] 写入 fontconfig 映射规则 ==="
+echo "=== [2/10] 写入 fontconfig 映射规则 ==="
 docker exec -u root "$CONTAINER" bash -c "cat > /etc/fonts/conf.d/99-latex-win-cjk-alias.conf << 'XMLEOF'
 <?xml version=\"1.0\"?>
 <!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">
@@ -81,7 +82,7 @@ XMLEOF"
 docker exec -u root "$CONTAINER" fc-cache -fv 2>&1 | tail -3
 
 # ── 3. 安装 bxcoloremoji LaTeX 包 ──────────────────────────────────────────
-echo "=== [3/8] 安装 bxcoloremoji LaTeX 包 ==="
+echo "=== [3/10] 安装 bxcoloremoji LaTeX 包 ==="
 ALREADY=$(docker exec "$CONTAINER" kpsewhich bxcoloremoji.sty 2>/dev/null)
 if [ -n "$ALREADY" ]; then
     echo "  bxcoloremoji 已安装，跳过"
@@ -98,8 +99,34 @@ else
     "
 fi
 
-# ── 4. 修补 gpt-academic latex_toolbox.py（fontset=windows → fandol on Linux）
-echo "=== [4/8] 修补 latex_toolbox.py（fontset=windows → fandol on Linux）==="
+# ── 4. 安装 fontawesome6 stub（TeX Live 旧版无 fontawesome6）───────────────
+echo "=== [4/10] 安装 fontawesome6 stub ==="
+if docker exec "$CONTAINER" kpsewhich fontawesome6.sty >/dev/null 2>&1; then
+    echo "  fontawesome6 已安装，跳过"
+else
+    docker exec -u root "$CONTAINER" bash -c "
+        TEXDIR=\$(kpsewhich -var-value TEXMFLOCAL)
+        mkdir -p \${TEXDIR}/tex/latex/fontawesome6
+        cat > \${TEXDIR}/tex/latex/fontawesome6/fontawesome6.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{fontawesome6}[2024/01/01 fontawesome6-stub via fontawesome5]
+% fontawesome6 is not available in older TeX Live images; fall back to fontawesome5.
+\RequirePackage{fontawesome5}
+\providecommand{\faIcon}[1]{}
+\providecommand{\faicon}[1]{}
+STYEOF
+        cat > \${TEXDIR}/tex/latex/fontawesome6/fontawesome6-generic.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{fontawesome6-generic}[2024/01/01 fontawesome6-generic stub]
+\RequirePackage{fontawesome6}
+STYEOF
+        mktexlsr \${TEXDIR} 2>&1 | tail -2
+        echo 'fontawesome6 stub installed to' \${TEXDIR}/tex/latex/fontawesome6/
+    "
+fi
+
+# ── 5. 修补 gpt-academic latex_toolbox.py（fontset=windows → fandol on Linux）
+echo "=== [5/10] 修补 latex_toolbox.py（fontset=windows → fandol on Linux）==="
 docker exec -u root "$CONTAINER" python3 - << 'PYEOF'
 import sys
 
@@ -164,8 +191,8 @@ with open(path, 'w') as f:
 print('  已修补 latex_toolbox.py')
 PYEOF
 
-# ── 5. 修补 latex_actions.py（xelatex 检测列表加入 ctex）───────────────────
-echo "=== [5/8] 修补 latex_actions.py（xelatex 检测加入 ctex）==="
+# ── 6. 修补 latex_actions.py（xelatex 检测列表加入 ctex）───────────────────
+echo "=== [6/10] 修补 latex_actions.py（xelatex 检测加入 ctex）==="
 ACTIONS=/gpt/crazy_functions/latex_fns/latex_actions.py
 if docker exec "$CONTAINER" grep -q "'ctex'" "$ACTIONS"; then
     echo "  已修补，跳过"
@@ -174,8 +201,8 @@ else
     echo "  已修补 latex_actions.py"
 fi
 
-# ── 6. 修补 latex_toolbox.py：移除 xelatex 不兼容的 axessibility 包 ─────────
-echo "=== [6/8] 修补 latex_toolbox.py（移除 axessibility pdflatex-only 包）==="
+# ── 7. 修补 latex_toolbox.py：移除 xelatex 不兼容的 axessibility 包 ─────────
+echo "=== [7/10] 修补 latex_toolbox.py（移除 axessibility pdflatex-only 包）==="
 TOOLBOX=/gpt/crazy_functions/latex_fns/latex_toolbox.py
 if docker exec "$CONTAINER" grep -q "axessibility" "$TOOLBOX"; then
     echo "  已修补，跳过"
@@ -184,8 +211,8 @@ else
     docker exec -u root "$CONTAINER" python3 /tmp/patch_axessibility.py
 fi
 
-# ── 7. 修补 latex_toolbox.py：find_main_tex_file 优先读 00README.json ─────────
-echo "=== [7/9] 修补 latex_toolbox.py（find_main_tex_file：00README.json + 深度惩罚）==="
+# ── 8. 修补 latex_toolbox.py：find_main_tex_file 优先读 00README.json ─────────
+echo "=== [8/10] 修补 latex_toolbox.py（find_main_tex_file：00README.json + 深度惩罚）==="
 if docker exec "$CONTAINER" grep -q "00README.json" /gpt/crazy_functions/latex_fns/latex_toolbox.py; then
     echo "  已修补，跳过"
 else
@@ -193,8 +220,8 @@ else
     docker exec -u root "$CONTAINER" python3 /tmp/patch_find_main_tex.py
 fi
 
-# ── 8. 修补 latex_toolbox.py：merge_tex_files_ 支持 \def\input@path ─────────
-echo "=== [8/9] 修补 latex_toolbox.py（merge_tex_files_ 支持 \\def\\input@path）==="
+# ── 9. 修补 latex_toolbox.py：merge_tex_files_ 支持 \def\input@path ─────────
+echo "=== [9/10] 修补 latex_toolbox.py（merge_tex_files_ 支持 \\def\\input@path）==="
 TOOLBOX=/gpt/crazy_functions/latex_fns/latex_toolbox.py
 if docker exec "$CONTAINER" grep -q "input_paths" "$TOOLBOX"; then
     echo "  已修补，跳过"
@@ -272,8 +299,8 @@ print('Patched merge_tex_files_ with input@path support')
 PYPATCH
 fi
 
-# ── 7. 修复 arxiv_cache 目录权限（防止 root 写入的文件导致 gptuser PermissionError）
-echo "=== [8/8] 修复 arxiv_cache 目录权限 ==="
+# ── 10. 修复 arxiv_cache 目录权限（防止 root 写入的文件导致 gptuser PermissionError）
+echo "=== [10/10] 修复 arxiv_cache 目录权限 ==="
 CACHE_DIR=$(docker exec "$CONTAINER" python3 -c "import sys; sys.path.insert(0,'/gpt'); import os; os.chdir('/gpt'); from toolbox import get_conf; print(get_conf('ARXIV_CACHE_DIR'))" 2>/dev/null || echo "gpt_log/arxiv_cache")
 docker exec -u root "$CONTAINER" bash -c "
     if [ -d /gpt/${CACHE_DIR} ]; then
@@ -290,6 +317,7 @@ echo "验证："
 docker exec "$CONTAINER" fc-match "SimSun"
 docker exec "$CONTAINER" fc-match "Noto Sans SemiBold"
 docker exec "$CONTAINER" kpsewhich bxcoloremoji.sty
+docker exec "$CONTAINER" kpsewhich fontawesome6.sty
 docker exec "$CONTAINER" grep -c "fandol" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py fandol ✅"
 docker exec "$CONTAINER" grep -c "ctex" /gpt/crazy_functions/latex_fns/latex_actions.py && echo "latex_actions.py ctex ✅"
 docker exec "$CONTAINER" grep -c "axessibility" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py axessibility ✅"

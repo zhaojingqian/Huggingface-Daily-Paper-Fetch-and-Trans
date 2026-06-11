@@ -4,7 +4,7 @@
 # 建议每月1日 03:00 执行（见 crontab）
 
 LOG=/root/workspace/paper-trans/logs/cleanup.log
-CONTAINER=gpt-academic-latex
+CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex}"
 
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') 开始清理 ===" >> "$LOG"
 

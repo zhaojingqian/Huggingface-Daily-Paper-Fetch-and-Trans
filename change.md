@@ -2,6 +2,21 @@
 
 ---
 
+## v4.9 — 2026-06-11
+
+### Docker 镜像瘦身准备
+
+#### 可选 slim LaTeX 翻译容器
+
+- **背景**：当前 `ghcr.io/binary-husky/gpt_academic_with_latex:master` 镜像约 15GB，40GB 服务器磁盘压力较大；中文论文翻译实际只需要 gpt-academic 代码、API 配置和 LaTeX/CJK 编译链路，不需要 torch/nvidia/nougat 等大体积依赖。
+- **修复**：
+  - `translate_full.py`、`run_papers.py`、`web_server.py` 和相关运维脚本支持 `GPT_ACADEMIC_CONTAINER` 覆盖容器名，默认仍为 `gpt-academic-latex`；
+  - 新增 `docker/latex-slim/Dockerfile`，用 Ubuntu + Python + TeX Live/CJK 子集构建 `paper-trans-latex-slim:latest`，避免安装 `texlive-full` 和深度学习栈；
+  - 新增 `scripts/build_latex_slim.sh`、`scripts/run_latex_slim.sh`、`scripts/canary_latex_slim.sh`，从当前生产容器复制 `/gpt` 代码，启动独立 `gpt-academic-latex-slim` 容器，并用近期失败论文做 canary。
+- **安全策略**：生产默认路径不变；确认 slim canary 成功前，不删除原容器或原镜像。
+
+---
+
 ## v4.8 — 2026-06-11
 
 ### 全文翻译修复

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 全文翻译入口脚本 (容器外调用)
-使用 docker exec 在 gpt-academic-latex 容器内运行驱动脚本，
+使用 docker exec 在 GPT_ACADEMIC_CONTAINER 指定的容器内运行驱动脚本，
 翻译 arxiv 论文全文（LaTeX → 中文 PDF），然后 docker cp 取回 PDF。
 
 用法:
@@ -17,7 +17,8 @@ import shutil
 import json
 from pathlib import Path
 
-CONTAINER_NAME  = "gpt-academic-latex"
+DEFAULT_CONTAINER_NAME = "gpt-academic-latex"
+CONTAINER_NAME  = os.environ.get("GPT_ACADEMIC_CONTAINER", DEFAULT_CONTAINER_NAME)
 DRIVER_SCRIPT   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "full_translate_driver.py")
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
@@ -297,7 +298,7 @@ def _write_error_log(arxiv_id: str, stdout: str):
 
         f.write(f"{SEP}\n")
         f.write("如需手动进入容器排查:\n")
-        f.write(f"  docker exec -it gpt-academic-latex bash\n")
+        f.write(f"  docker exec -it {CONTAINER_NAME} bash\n")
         f.write(f"  # 查看完整编译日志:\n")
         f.write(f"  cat /gpt/gpt_log/arxiv_cache/{arxiv_id}/workfolder/merge_translate_zh.log\n")
         f.write(f"  # 编辑翻译文件:\n")

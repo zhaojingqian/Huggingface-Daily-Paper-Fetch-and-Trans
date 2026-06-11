@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Canary-run the slim LaTeX container without changing production data/indexes.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONTAINER="${GPT_ACADEMIC_SLIM_CONTAINER:-gpt-academic-latex-slim}"
+OUT_DIR="${GPT_ACADEMIC_SLIM_CANARY_OUT:-/tmp/paper-trans-latex-slim-canary}"
+IDS=("$@")
+
+if [ "${#IDS[@]}" -eq 0 ]; then
+  IDS=(2606.09967 2606.10917 2606.09828 2606.02060)
+fi
+
+mkdir -p "$OUT_DIR"
+
+if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+  echo "[slim-canary] ERROR: container is not running: ${CONTAINER}" >&2
+  echo "[slim-canary] Start it first: scripts/run_latex_slim.sh" >&2
+  exit 1
+fi
+
+echo "[slim-canary] container: ${CONTAINER}"
+echo "[slim-canary] output: ${OUT_DIR}"
+echo "[slim-canary] ids: ${IDS[*]}"
+
+for aid in "${IDS[@]}"; do
+  echo "[slim-canary] ==== ${aid} ===="
+  GPT_ACADEMIC_CONTAINER="$CONTAINER" \
+    python3 "${ROOT_DIR}/translate_full.py" "$aid" -o "$OUT_DIR" --no-cache --timeout 3600
+  pdf="${OUT_DIR}/${aid}_zh.pdf"
+  if [ ! -s "$pdf" ]; then
+    echo "[slim-canary] ERROR: missing output PDF: ${pdf}" >&2
+    exit 1
+  fi
+  ls -lh "$pdf"
+done
+
+echo "[slim-canary] all canary translations succeeded"
