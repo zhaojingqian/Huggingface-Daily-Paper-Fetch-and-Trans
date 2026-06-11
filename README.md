@@ -235,13 +235,21 @@ systemd unit：
 [Service]
 WorkingDirectory=/root/workspace/paper-trans
 Environment=BASE_PATH=/paper
-# 可选：验证 slim 容器时临时切换；生产默认仍不设置
-# Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 ExecStart=/root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/web_server.py
 Restart=always
 StandardOutput=append:/root/workspace/paper-trans/logs/web.log
 StandardError=append:/root/workspace/paper-trans/logs/web.log
 ```
+
+当前 Web 手动提交试跑 slim 容器，使用 systemd drop-in：
+
+```ini
+# /etc/systemd/system/paper-trans-web.service.d/10-slim-container.conf
+[Service]
+Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
+```
+
+回滚时删除该 drop-in 或改回 `gpt-academic-latex`，然后执行 `systemctl daemon-reload && systemctl restart paper-trans-web.service`。
 
 ---
 
