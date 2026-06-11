@@ -22,7 +22,8 @@
   - fresh slim 容器从新镜像启动成功，跳过 setup 后仍能解析 `ctex`、`bxcoloremoji`、`fontawesome`、`bbding`、`inconsolata`、`nicematrix`、`latin.ldf`，并能读取生产 `config_private.py`；
   - compile canary 通过 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
   - full no-cache canary 通过 `2606.08432`，`no_cache=True`，完整翻译+编译成功生成中文 PDF；虽然 PDF 仅约 0.95MB，但已用 `pdfinfo`/`pdftotext` 验证为 29 页、约 81k 可提取文本字符，原始 arXiv PDF 也仅约 1.1MB/24 页，属于论文素材体积较小而非空 PDF。
-- **安全策略**：旧生产容器 `gpt-academic-latex` 和旧镜像仍保留，尚未切换生产 cron/systemd，也未删除原容器/原镜像。
+- **Cron 试跑**：root crontab 已设置 `GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim`，今晚例行 daily/post/retry-pdf 会使用 slim 容器；05:00 容器重启任务同步改为 `docker restart $GPT_ACADEMIC_CONTAINER`。
+- **安全策略**：旧生产容器 `gpt-academic-latex` 和旧镜像仍保留；若今晚 cron 出现异常，可将 crontab 中 `GPT_ACADEMIC_CONTAINER` 改回 `gpt-academic-latex` 回滚。
 
 ---
 

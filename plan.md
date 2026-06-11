@@ -156,7 +156,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 在 40GB 服务器上用低磁盘 flatten 模式构建 slim 镜像，并记录最终镜像体积约 4.55GB。
 - [x] 使用 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060` 跑完 compile canary。
 - [x] 使用 `2606.08432` 跑完 full no-cache canary，验证 GPT 翻译阶段和 LaTeX 编译完整链路。
-- [ ] 将生产 cron/systemd 切换到 `gpt-academic-latex-slim` 并观察稳定性。
+- [x] 将 root cron 的例行翻译容器切换到 `gpt-academic-latex-slim` 做今晚试跑。
+- [ ] 观察今晚 cron daily/post/retry-pdf 运行结果和日志，确认 slim 稳定性。
 - [ ] 生产切换确认成功后，再删除原容器和原镜像释放约 15GB 空间。
 
 ---

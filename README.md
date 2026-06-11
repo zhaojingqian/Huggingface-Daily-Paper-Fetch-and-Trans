@@ -251,7 +251,8 @@ StandardError=append:/root/workspace/paper-trans/logs/web.log
 PYTHON=/root/.pyenv/versions/3.10.13/bin/python3
 PTDIR=/root/workspace/paper-trans
 RLOG=$PTDIR/logs/repair.log
-GPT_ACADEMIC_CONTAINER=gpt-academic-latex
+# 当前 cron 试跑 slim 翻译容器；回滚时改回 gpt-academic-latex
+GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 
 0 23 * * *   $PYTHON $PTDIR/run_daily.py   >> $PTDIR/logs/cron-daily.log   2>&1
 0  2 * * 0   $PYTHON $PTDIR/run_weekly.py  >> $PTDIR/logs/cron-weekly.log  2>&1
