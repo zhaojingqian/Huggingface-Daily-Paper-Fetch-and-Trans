@@ -225,7 +225,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 | Web 端口 | `18080` |
 | 绑定地址 | 默认 `127.0.0.1`，可用 `BIND_HOST` 覆盖 |
 | 路径前缀 | `BASE_PATH=/paper` |
-| Docker 容器 | 默认 `gpt-academic-latex`，可用 `GPT_ACADEMIC_CONTAINER` 覆盖 |
+| Docker 容器 | 代码默认 `gpt-academic-latex`，当前生产通过 `GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim` 使用 full-TeX slim |
 | 网络代理 | `http://127.0.0.1:7890`，失败时部分请求会切直连 |
 | Web 日志 | `logs/web.log` |
 
@@ -241,7 +241,7 @@ StandardOutput=append:/root/workspace/paper-trans/logs/web.log
 StandardError=append:/root/workspace/paper-trans/logs/web.log
 ```
 
-当前 Web 手动提交试跑 slim 容器，使用 systemd drop-in：
+当前 Web 手动提交使用 full-TeX slim 容器，systemd drop-in：
 
 ```ini
 # /etc/systemd/system/paper-trans-web.service.d/10-slim-container.conf
@@ -249,7 +249,7 @@ StandardError=append:/root/workspace/paper-trans/logs/web.log
 Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 ```
 
-回滚时删除该 drop-in 或改回 `gpt-academic-latex`，然后执行 `systemctl daemon-reload && systemctl restart paper-trans-web.service`。
+如需切换容器，修改该 drop-in 后执行 `systemctl daemon-reload && systemctl restart paper-trans-web.service`。原 `gpt-academic-latex` 容器和 `ghcr.io/binary-husky/gpt_academic_with_latex:master` 镜像已在 2026-06-12 删除，当前不再保留本机 Docker 回滚副本。
 
 ---
 
@@ -259,7 +259,7 @@ Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 PYTHON=/root/.pyenv/versions/3.10.13/bin/python3
 PTDIR=/root/workspace/paper-trans
 RLOG=$PTDIR/logs/repair.log
-# 当前 cron 试跑 slim 翻译容器；回滚时改回 gpt-academic-latex
+# 当前 cron 使用 full-TeX slim 翻译容器
 GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 
 0 23 * * *   $PYTHON $PTDIR/run_daily.py   >> $PTDIR/logs/cron-daily.log   2>&1
@@ -277,24 +277,37 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 0  7 28 * *  $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode monthly --days 60 >> $RLOG 2>&1
 ```
 
-### 可选 slim LaTeX 容器
+### full-TeX slim LaTeX 容器
 
-生产默认仍使用已有的 `gpt-academic-latex` 容器。slim 方案用于并行验证更小的中文翻译/LaTeX 运行环境；确认线上稳定前不要删除原容器或原镜像。
+当前生产翻译容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。它继续继承原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，避免逐个补 TeX 包；同时删除 torch、nvidia、transformers、nougat、缓存、文档和源码等中文翻译不需要的大体积内容。
 
-当前本机验证结果（2026-06-11）：
+当前本机状态（2026-06-12）：
 
 - 原镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`：约 15.4GB。
-- slim 镜像 `paper-trans-latex-slim:latest`：约 4.55GB。
-- 原生产容器 `gpt-academic-latex` 未删除，slim 容器 `gpt-academic-latex-slim` 独立运行。
+- full-TeX slim 镜像 `paper-trans-latex-slim:latest`：约 7.62GB。
+- 当前仅保留并运行 `gpt-academic-latex-slim`；原生产容器 `gpt-academic-latex` 与原 15.4GB 镜像已删除。
+- 删除旧镜像后 Docker overlay2 曾残留孤儿目录；确认 Docker images/containers/volumes/build cache 均为空后，停 Docker/containerd 清理孤儿 overlay2，再启动服务，根分区可用空间恢复到约 14GB。
 - compile canary 已通过：`2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
 - full no-cache canary 已通过：`2606.08432`。
 - 2026-06-12 复盘 2026-06-11 daily 失败项：`2606.11926`、`2606.12344` 已在 slim 容器下修复并恢复为 `pdf_status=ok`。
+- full-TeX slim 切换后再次用 `2606.11926`、`2606.12344` 复用中文 tex 备份重编译验证通过，PDF 分别约 2.52MB 和 1.88MB。
 
-slim 镜像保留必要 TeX/CJK 能力，同时用轻量 stub 覆盖常见装饰字体包：`fontawesome` v4/v5/v6、`bbding`、`inconsolata`、`libertine`、`newtxmath`、`zlmtt`，并为 `Inconsolatazi4-*.otf` 提供字体文件别名。新增 stub 时必须同时更新 `scripts/setup_docker_env.sh` 和 `docker/latex-slim/Dockerfile`。
+默认 `GPT_ACADEMIC_SLIM_TEX_PROFILE=full`，保留完整 TeX/font 运行时。历史的激进裁剪仍可用 `GPT_ACADEMIC_SLIM_TEX_PROFILE=slim` 显式开启；该模式会继续依赖轻量 stub 覆盖常见装饰字体包：`fontawesome` v4/v5/v6、`bbding`、`inconsolata`、`libertine`、`newtxmath`、`zlmtt`，并为 `Inconsolatazi4-*.otf` 提供字体文件别名。新增 stub 时必须同时更新 `scripts/setup_docker_env.sh` 和 `docker/latex-slim/Dockerfile`。
 
 ```bash
-# 默认使用低磁盘 flatten 模式：从当前生产镜像创建临时容器，裁剪大依赖后 docker export/import
+# 默认使用低磁盘 flatten 模式：从当前生产镜像创建临时容器，保留 full TeX，裁剪大依赖后 docker export/import
 ./scripts/build_latex_slim.sh
+
+# 只估算 rootfs 体积，不导入镜像
+GPT_ACADEMIC_SLIM_DRY_RUN=1 ./scripts/build_latex_slim.sh
+
+# 低磁盘切换时可先导出压缩 rootfs，删除旧镜像腾空间后再手动 docker import
+GPT_ACADEMIC_SLIM_EXPORT_ARCHIVE=/tmp/paper-trans-fulltex-slim.tar.gz \
+  GPT_ACADEMIC_SLIM_EXPORT_COMPRESSOR=pigz \
+  ./scripts/build_latex_slim.sh
+
+# 显式使用历史 slim TeX 裁剪策略
+GPT_ACADEMIC_SLIM_TEX_PROFILE=slim ./scripts/build_latex_slim.sh
 
 # 启动独立容器 gpt-academic-latex-slim，并复用 config_private.py
 ./scripts/run_latex_slim.sh

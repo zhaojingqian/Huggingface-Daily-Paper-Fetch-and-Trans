@@ -2,6 +2,33 @@
 
 ---
 
+## v4.12 — 2026-06-12
+
+### Docker 镜像瘦身最终切换
+
+#### full-TeX slim 生产容器落地
+
+- **背景**：4.55GB 激进 slim 镜像能通过 canary，但 2026-06-11 daily 继续暴露缺 TeX/font 包问题；逐个补包风险高、维护成本大。最终改为保留原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，只裁剪中文翻译不需要的 ML/runtime/cache/doc/source 负载。
+- **构建调整**：
+  - `scripts/build_latex_slim.sh` 新增 `GPT_ACADEMIC_SLIM_TEX_PROFILE`，默认 `full`，显式设为 `slim` 时才继续执行历史 TeX/font/JRE/asymptote 裁剪；
+  - 新增 `GPT_ACADEMIC_SLIM_DRY_RUN=1`，可只估算裁剪后的 rootfs 体积；
+  - 新增 `GPT_ACADEMIC_SLIM_EXPORT_ARCHIVE` 与 `GPT_ACADEMIC_SLIM_EXPORT_COMPRESSOR`，支持先导出压缩 rootfs，再删除旧镜像腾空间后手动 `docker import`，避免 40GB 根分区上的空间死锁；
+  - `scripts/setup_docker_env.sh` 与 `docker/latex-slim/Dockerfile` 的 `bxcoloremoji` 下载改为固定 CTAN 镜像回退，避免 `mirrors.ctan.org` 偶发 403 导致构建失败。
+- **生产切换**：
+  - 已生成并导入 `paper-trans-latex-slim:latest`，镜像大小约 7.62GB；
+  - 已启动 `gpt-academic-latex-slim`，并确认 `kpsewhich` 可解析 `libertine.sty`、`newtxmath.sty`、`zlmtt.sty`、`bxcoloremoji.sty`、`nicematrix.sty`、`latin.ldf`；
+  - root crontab 和 `paper-trans-web.service` drop-in 均已切到 `GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim`。
+- **磁盘清理**：
+  - 确认新容器可用后，删除旧容器 `gpt-academic-latex` 和旧镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`；
+  - 删除旧镜像后 Docker overlay2 残留孤儿目录，确认 Docker images/containers/volumes/build cache 均为空后，停 Docker/containerd 清理孤儿 overlay2，再启动服务；
+  - 删除临时 rootfs 压缩包后，根分区可用空间恢复到约 14GB，当前 Docker 仅保留 `paper-trans-latex-slim:latest` 与 `gpt-academic-latex-slim`。
+- **验证**：
+  - `GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim python3 translate_full.py 2606.11926 -o /tmp/paper-trans-fulltex-validate --keep-translation --timeout 900` 成功，PDF 约 2.52MB；
+  - `GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim python3 translate_full.py 2606.12344 -o /tmp/paper-trans-fulltex-validate --keep-translation --timeout 900` 成功，PDF 约 1.88MB；
+  - `/api/status` 本地抽查通过，报告当前容器为 `gpt-academic-latex-slim`。
+
+---
+
 ## v4.11 — 2026-06-12
 
 ### Slim 翻译容器试跑修复

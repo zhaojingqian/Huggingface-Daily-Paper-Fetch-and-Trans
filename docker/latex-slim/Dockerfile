@@ -50,7 +50,13 @@ RUN set -eux; \
         "${TEXDIR}/tex/latex/zlmtt" \
         "${TEXDIR}/fonts/opentype/public/inconsolatazi4"; \
     cd /tmp; \
-    curl -fsSL 'https://mirrors.ctan.org/macros/latex/contrib/bxcoloremoji.zip' -o bxcoloremoji.zip; \
+    for url in \
+        'https://ctan.math.illinois.edu/macros/latex/contrib/bxcoloremoji.zip' \
+        'https://mirrors.mit.edu/CTAN/macros/latex/contrib/bxcoloremoji.zip' \
+        'https://mirrors.ctan.org/macros/latex/contrib/bxcoloremoji.zip'; do \
+        curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 "$url" -o bxcoloremoji.zip && break; \
+    done; \
+    test -s bxcoloremoji.zip; \
     unzip -q bxcoloremoji.zip; \
     mkdir -p "${TEXDIR}/tex/latex/bxcoloremoji"; \
     cp bxcoloremoji/bxcoloremoji.sty bxcoloremoji/bxcoloremoji-names.def "${TEXDIR}/tex/latex/bxcoloremoji/"; \

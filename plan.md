@@ -20,7 +20,7 @@ Paper Hub 是一个面向 AI 论文阅读和归档的自动化系统：抓取 Hu
 | Weekly Top 10 | 完成 | `run_weekly.py` |
 | Monthly Top 10 | 完成 | `run_monthly.py` |
 | 摘要翻译 | 完成 | `translate_arxiv.py` |
-| 全文 PDF 翻译 | 完成 | `translate_full.py` + `full_translate_driver.py` |
+| 全文 PDF 翻译 | 完成 | `translate_full.py` + `full_translate_driver.py` + `gpt-academic-latex-slim` |
 | 统一 paper store | 完成 | `data/papers/<id>.json` / `<id>_zh.pdf` |
 | slim index | 完成 | `data/{daily,weekly,monthly,manual}/<key>/index.json` |
 | Web 页面 | 完成 | `web_server.py` |
@@ -75,6 +75,12 @@ paper_card() / detail page / bookmark page
 - `enrich_paper_entry()`：统一元数据合并。
 - `render_paper_actions()`：统一按钮链接生成。
 - `h_text()` / `h_attr()` / `js_str()`：统一输出转义。
+
+### 翻译容器
+
+当前生产容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。该镜像默认使用 `GPT_ACADEMIC_SLIM_TEX_PROFILE=full`，继承原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，只裁剪中文翻译不需要的 ML/runtime/cache/doc/source 负载。
+
+2026-06-12 已确认新容器可用，并删除旧容器 `gpt-academic-latex` 和旧镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`；本机不再保留旧 Docker 回滚副本。根分区可用空间从切换前的紧张状态恢复到约 14GB。
 
 ---
 
@@ -155,13 +161,16 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 将翻译容器名改为 `GPT_ACADEMIC_CONTAINER` 可覆盖，默认保持 `gpt-academic-latex`。
 - [x] 增加 `paper-trans-latex-slim` 构建、启动和 canary 脚本。
 - [x] 在 40GB 服务器上用低磁盘 flatten 模式构建 slim 镜像，并记录最终镜像体积约 4.55GB。
+- [x] 将最终生产方案调整为 full-TeX slim：默认保留完整 TeX/font 运行时，只裁剪 ML/runtime/cache/doc/source 负载，镜像体积约 7.62GB。
+- [x] 为低磁盘切换增加 dry-run 和压缩 rootfs 导出路径，避免无法同时容纳旧镜像、新镜像和构建中间层。
 - [x] 使用 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060` 跑完 compile canary。
 - [x] 使用 `2606.08432` 跑完 full no-cache canary，验证 GPT 翻译阶段和 LaTeX 编译完整链路。
 - [x] 将 root cron 的例行翻译容器切换到 `gpt-academic-latex-slim` 做今晚试跑。
 - [x] 将 `paper-trans-web.service` 的手动提交路径切换到 `gpt-academic-latex-slim` 做试跑。
 - [x] 复盘 2026-06-11 daily slim 失败项，补齐 `libertine`、`newtxmath`、`zlmtt`、`Inconsolatazi4` 兼容层，并恢复 `2606.11926`、`2606.12344` PDF 状态。
-- [ ] 观察今晚 cron daily/post/retry-pdf 运行结果和日志，确认 slim 稳定性。
-- [ ] 生产切换确认成功后，再删除原容器和原镜像释放约 15GB 空间。
+- [x] 使用 full-TeX slim 重新验证 `2606.11926`、`2606.12344`，确认 keep-translation 重编译链路正常。
+- [x] 生产 cron 和 Web 手动提交均切换到 `gpt-academic-latex-slim`。
+- [x] 删除原容器和原镜像，并清理 Docker overlay2 孤儿目录，根分区可用空间恢复到约 14GB。
 
 ---
 
@@ -172,6 +181,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 3. 当前 Web 是单文件 HTTP 服务，易部署但代码会继续增长；未来拆分前必须先扩大合约测试。
 4. 搜索是线性扫描全部 index 和 paper store，数据量继续增长后可能需要索引缓存。
 5. 手动提交和自动抓取共享 paper store，删除 PDF 时需要谨慎处理跨 mode 引用。
+6. 原 full Docker 镜像已从本机删除；如需回滚到上游 full 镜像，需要重新拉取或重新构建。
 
 ---
 

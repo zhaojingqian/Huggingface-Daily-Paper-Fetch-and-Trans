@@ -91,7 +91,17 @@ if [ -n "$ALREADY" ]; then
 else
     docker exec -u root "$CONTAINER" bash -c "
         cd /tmp && \
-        curl -fsSL 'https://mirrors.ctan.org/macros/latex/contrib/bxcoloremoji.zip' -o bxcoloremoji.zip && \
+        rm -rf bxcoloremoji bxcoloremoji.zip && \
+        for url in \
+            'https://ctan.math.illinois.edu/macros/latex/contrib/bxcoloremoji.zip' \
+            'https://mirrors.mit.edu/CTAN/macros/latex/contrib/bxcoloremoji.zip' \
+            'https://mirrors.ctan.org/macros/latex/contrib/bxcoloremoji.zip'; do \
+            echo \"  downloading bxcoloremoji: \$url\"; \
+            if curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 \"\$url\" -o bxcoloremoji.zip; then \
+                break; \
+            fi; \
+        done && \
+        test -s bxcoloremoji.zip && \
         unzip -q bxcoloremoji.zip && \
         TEXDIR=\$(kpsewhich -var-value TEXMFLOCAL) && \
         mkdir -p \${TEXDIR}/tex/latex/bxcoloremoji && \
