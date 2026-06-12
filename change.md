@@ -2,6 +2,26 @@
 
 ---
 
+## v4.13 — 2026-06-12
+
+### 数据产物刷新
+
+#### 2026-06-11 daily 三篇中文 PDF 重新生成
+
+- **范围**：重新生成 `data/daily/2026-06-11/index.json` 对应的三篇中文 PDF：
+  - `2606.12397_zh.pdf`：808,169 bytes，12 页，文本抽取约 35k 字符；
+  - `2606.11926_zh.pdf`：2,667,200 bytes，41 页，文本抽取约 140k 字符；
+  - `2606.12344_zh.pdf`：1,975,419 bytes，37 页，文本抽取约 86k 字符。
+- **执行方式**：使用当前生产容器 `gpt-academic-latex-slim`，通过 `translate_full.py --keep-translation` 复用宿主机 `data/tex_backup/*_merge_translate_zh.tex`，只重跑 LaTeX 编译并覆盖 `data/papers/*_zh.pdf`。
+- **验证**：
+  - 三篇 `translate_full.py` 均返回 success；
+  - `data/daily/2026-06-11/index.json` 与 paper store JSON 中三篇 `pdf_status` 均保持 `ok`；
+  - 本地 Web Range GET 对三篇 `/papers/<id>_zh.pdf` 均返回 `206 Partial Content`、`Content-Type: application/pdf`；
+  - 容器内 `pdfinfo` / `pdftotext` 可读取页数和文本内容。
+- **说明**：`data/` 为服务器数据产物目录，当前未被 git 跟踪；本次提交记录操作与验证结果，PDF 文件已在服务器本地刷新。
+
+---
+
 ## v4.12 — 2026-06-12
 
 ### Docker 镜像瘦身最终切换
