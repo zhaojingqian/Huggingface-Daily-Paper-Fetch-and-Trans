@@ -2,6 +2,24 @@
 
 ---
 
+## v4.15 — 2026-06-12
+
+### PDF 查看页缓存修复
+
+#### 重新生成 PDF 后仍显示旧内容
+
+- **问题**：`/paper/view/2606.12397` 和 `/paper/view/2606.12344` 路由已经正确，线上 `/paper/papers/<id>_zh.pdf` 的 hash 也与服务器本地新 PDF 一致；但浏览器/PDF viewer 可能仍使用此前打开过的旧 PDF 缓存。线上 nginx 对 PDF 返回 `Cache-Control: public, max-age=3600`，因此同一路径的 PDF 在短时间内可能不重新拉取。
+- **修复**：`/view/<arxiv_id>` 的 iframe PDF URL 增加文件 mtime 版本号：
+  - 旧：`/paper/papers/<id>_zh.pdf#view=FitH`
+  - 新：`/paper/papers/<id>_zh.pdf?v=<pdf_mtime>#view=FitH`
+- **缓存策略**：`/view/<id>` wrapper 返回 `Cache-Control: no-store`，PDF 文件本身继续保留 Range 与 nginx 缓存；重新生成 PDF 后只需刷新 wrapper，即可得到新的版本化 PDF URL。
+- **验证**：
+  - `2606.12397_zh.pdf` 线上 hash：`6f8e06c6b7614e115300844b5d472caabc5da636a9de7a16d6942dd6b827fa56`，与本地一致；
+  - `2606.12344_zh.pdf` 线上 hash：`42e52bc8519a33710fce38f50af6f07735205f8a975bdfd3dbd10e713eee4a73`，与本地一致；
+  - 合约测试增加 `BASE_PATH=/paper` 下带前缀 view/PDF/redirect 检查，并固定 iframe 版本号格式。
+
+---
+
 ## v4.14 — 2026-06-12
 
 ### 全文翻译质量与编译健康修复

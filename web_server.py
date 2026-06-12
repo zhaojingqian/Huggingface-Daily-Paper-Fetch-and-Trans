@@ -1347,10 +1347,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 静默
 
-    def send_html(self, html, code=200):
+    def send_html(self, html, code=200, cache_control=None):
         b = html.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
@@ -1668,7 +1670,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if os.path.exists(fp):
                     meta = _read_paper_store(arxiv_id)
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
-                    pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf"
+                    pdf_version = int(os.path.getmtime(fp))
+                    pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf?v={pdf_version}"
                     safe_title = html_lib.escape(title_zh, quote=True)
                     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head>
@@ -1680,7 +1683,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 </head><body>
 <iframe src="{pdf_src}#view=FitH" title="{safe_title}"></iframe>
 </body></html>"""
-                    return self.send_html(html)
+                    return self.send_html(html, cache_control="no-store")
                 return self.send_404(f"{arxiv_id} PDF 不存在")
 
         # ── /  首页 ──────────────────────────────────────

@@ -101,9 +101,10 @@ class WebServerContractTest(unittest.TestCase):
         html = body.decode("utf-8", errors="replace")
         self.assertEqual(resp.status, 200)
         self.assertIsNone(resp.getheader("Location"))
+        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
         self.assert_content_type(resp, "text/html")
         self.assertIn("<title>Lens：重新思考基础文本到图像模型的训练效率</title>", html)
-        self.assertIn(f'<iframe src="/papers/{SAMPLE_VIEW_ID}_zh.pdf#view=FitH"', html)
+        self.assertRegex(html, rf'<iframe src="/papers/{SAMPLE_VIEW_ID}_zh\.pdf\?v=\d+#view=FitH"')
         self.assert_umami_script(html)
 
     @unittest.skipUnless(
@@ -142,9 +143,10 @@ class WebServerContractTest(unittest.TestCase):
         finally:
             web_server.BASE_PATH = old_base
         self.assertEqual(resp.status, 200)
-        self.assertIn(f'<iframe src="/paper/papers/{SAMPLE_VIEW_ID}_zh.pdf#view=FitH"', html)
+        self.assertRegex(html, rf'<iframe src="/paper/papers/{SAMPLE_VIEW_ID}_zh\.pdf\?v=\d+#view=FitH"')
         self.assertEqual(prefixed_resp.status, 200)
-        self.assertIn(f'<iframe src="/paper/papers/{SAMPLE_VIEW_ID}_zh.pdf#view=FitH"', prefixed_html)
+        self.assertEqual(prefixed_resp.getheader("Cache-Control"), "no-store")
+        self.assertRegex(prefixed_html, rf'<iframe src="/paper/papers/{SAMPLE_VIEW_ID}_zh\.pdf\?v=\d+#view=FitH"')
         self.assertEqual(pdf_resp.status, 206)
         self.assert_content_type(pdf_resp, "application/pdf")
         self.assertEqual(redirect_resp.status, 302)

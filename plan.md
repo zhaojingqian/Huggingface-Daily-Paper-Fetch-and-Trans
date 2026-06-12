@@ -91,7 +91,7 @@ paper_card() / detail page / bookmark page
 | 行为 | 要求 |
 |---|---|
 | `/view/<id>` | 返回 HTML wrapper，不能默认 302 到裸 PDF |
-| PDF iframe | 指向 `{BASE_PATH}/papers/<id>_zh.pdf#view=FitH` |
+| PDF iframe | wrapper no-store；iframe 指向 `{BASE_PATH}/papers/<id>_zh.pdf?v=<pdf_mtime>#view=FitH`，重新生成后必须自动换 URL |
 | 详情按钮 | 继续指向 `/<mode>/<key>/papers/<id>` |
 | 中文 PDF 按钮 | 继续指向 `/view/<id>` |
 | 原文 PDF | 继续指向 `https://arxiv.org/pdf/<id>` |
@@ -135,6 +135,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 收敛 PDF 状态判断和按钮链接生成。
 - [x] 重建 README / plan / change 文档。
 - [x] 请求入口兼容 `BASE_PATH=/paper` 前缀，避免 `/paper/view/<id>` 与 `/paper/papers/<file>` 404。
+- [x] PDF wrapper iframe 增加 `v=<pdf_mtime>`，避免浏览器缓存旧的重新生成 PDF。
 
 ### Phase B — 安全的单文件整理
 

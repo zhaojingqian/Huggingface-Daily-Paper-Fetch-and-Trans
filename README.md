@@ -115,10 +115,10 @@ tail -f /root/workspace/paper-trans/logs/web.log
 wrapper 内部 iframe 指向：
 
 ```text
-{BASE_PATH}/papers/<arxiv_id>_zh.pdf#view=FitH
+{BASE_PATH}/papers/<arxiv_id>_zh.pdf?v=<pdf_mtime>#view=FitH
 ```
 
-`/papers/<id>_zh.pdf` 和 `/pdf/<id>/<title>.pdf` 都保留 PDF Range 支持，用于浏览器 PDF viewer 和大文件加载。
+`/view/<id>` wrapper 返回 `Cache-Control: no-store`，`v=<pdf_mtime>` 用于在重新生成中文 PDF 后绕开浏览器/PDF viewer 缓存，避免路由正确但 iframe 仍显示旧 PDF。`/papers/<id>_zh.pdf` 和 `/pdf/<id>/<title>.pdf` 都保留 PDF Range 支持，用于浏览器 PDF viewer 和大文件加载。
 
 ---
 
