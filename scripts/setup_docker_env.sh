@@ -5,7 +5,7 @@
 #   1. Noto Sans SemiBold 缺失（2603.16859 类论文使用 mac_automl 模板）
 #   2. fontset=windows 注入 Windows 专有 CJK 字体（SimSun/SimHei/KaiTi）在 Linux 不存在
 #   3. bxcoloremoji 包缺失（部分论文使用 emoji）
-#   4. fontawesome/fontawesome5/fontawesome6/bbding/inconsolata 包在精简 TeX 环境中缺失
+#   4. fontawesome/fontawesome5/fontawesome6/bbding/inconsolata/libertine/newtxmath/zlmtt 包在精简 TeX 环境中缺失
 #   5. ctex 包不在 xelatex 检测列表导致使用 pdflatex 编译失败
 #   6. \def\input@path 自定义路径无法被 gpt-academic 解析，导致多级目录论文 merge 失败
 #
@@ -102,13 +102,17 @@ else
 fi
 
 # ── 4. 安装轻量 stub（精简 TeX 环境可能无图标/字体包）────────────────────
-echo "=== [4/10] 安装 fontawesome/bbding/inconsolata stubs ==="
+echo "=== [4/10] 安装 fontawesome/bbding/inconsolata/libertine/newtxmath/zlmtt stubs ==="
 if docker exec "$CONTAINER" kpsewhich fontawesome.sty >/dev/null 2>&1 \
     && docker exec "$CONTAINER" kpsewhich fontawesome5.sty >/dev/null 2>&1 \
     && docker exec "$CONTAINER" kpsewhich fontawesome6.sty >/dev/null 2>&1 \
     && docker exec "$CONTAINER" kpsewhich bbding.sty >/dev/null 2>&1 \
-    && docker exec "$CONTAINER" kpsewhich inconsolata.sty >/dev/null 2>&1; then
-    echo "  fontawesome/fontawesome5/fontawesome6/bbding/inconsolata 已安装，跳过"
+    && docker exec "$CONTAINER" kpsewhich inconsolata.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich libertine.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich newtxmath.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich zlmtt.sty >/dev/null 2>&1 \
+    && docker exec "$CONTAINER" kpsewhich Inconsolatazi4-Regular.otf >/dev/null 2>&1; then
+    echo "  fontawesome/fontawesome5/fontawesome6/bbding/inconsolata/libertine/newtxmath/zlmtt 已安装，跳过"
 else
     docker exec -u root "$CONTAINER" bash -c "
         TEXDIR=\$(kpsewhich -var-value TEXMFLOCAL)
@@ -178,8 +182,52 @@ STYEOF
 \RequirePackage{lmodern}
 \renewcommand{\ttdefault}{lmtt}
 STYEOF
+        mkdir -p \${TEXDIR}/tex/latex/libertine
+        cat > \${TEXDIR}/tex/latex/libertine/libertine.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{libertine}[2024/01/01 libertine stub]
+% Keep slim images small by mapping the cosmetic Libertine family to Latin Modern.
+\DeclareOption*{}
+\ProcessOptions\relax
+\RequirePackage{lmodern}
+\renewcommand{\rmdefault}{lmr}
+\renewcommand{\sfdefault}{lmss}
+\renewcommand{\ttdefault}{lmtt}
+STYEOF
+        mkdir -p \${TEXDIR}/tex/latex/newtx
+        cat > \${TEXDIR}/tex/latex/newtx/newtxmath.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{newtxmath}[2024/01/01 newtxmath stub]
+% Preserve compile compatibility without pulling texlive-fonts-extra into the slim image.
+\DeclareOption*{}
+\ProcessOptions\relax
+\RequirePackage{amsmath}
+\RequirePackage{amssymb}
+\RequirePackage{mathrsfs}
+\RequirePackage{bm}
+STYEOF
+        mkdir -p \${TEXDIR}/tex/latex/zlmtt
+        cat > \${TEXDIR}/tex/latex/zlmtt/zlmtt.sty << 'STYEOF'
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{zlmtt}[2024/01/01 zlmtt stub]
+% zlmtt is a cosmetic typewriter font package; use Latin Modern Mono in slim images.
+\DeclareOption*{}
+\ProcessOptions\relax
+\RequirePackage{lmodern}
+\renewcommand{\ttdefault}{lmtt}
+STYEOF
+        FONTDIR=\${TEXDIR}/fonts/opentype/public/inconsolatazi4
+        mkdir -p \${FONTDIR}
+        REG=\$(kpsewhich lmmono10-regular.otf)
+        BOLD=\$(kpsewhich lmmonolt10-bold.otf || kpsewhich lmmono10-regular.otf)
+        IT=\$(kpsewhich lmmono10-italic.otf || kpsewhich lmmono10-regular.otf)
+        BOLDIT=\$(kpsewhich lmmonolt10-boldoblique.otf || kpsewhich lmmono10-italic.otf || kpsewhich lmmono10-regular.otf)
+        cp \${REG} \${FONTDIR}/Inconsolatazi4-Regular.otf
+        cp \${BOLD} \${FONTDIR}/Inconsolatazi4-Bold.otf
+        cp \${IT} \${FONTDIR}/Inconsolatazi4-Italic.otf
+        cp \${BOLDIT} \${FONTDIR}/Inconsolatazi4-BoldItalic.otf
         mktexlsr \${TEXDIR} 2>&1 | tail -2
-        echo 'fontawesome/bbding/inconsolata stubs installed to' \${TEXDIR}/tex/latex/
+        echo 'fontawesome/bbding/inconsolata/libertine/newtxmath/zlmtt stubs installed to' \${TEXDIR}/tex/latex/
     "
 fi
 
@@ -353,6 +401,10 @@ docker exec "$CONTAINER" kpsewhich fontawesome5.sty
 docker exec "$CONTAINER" kpsewhich fontawesome6.sty
 docker exec "$CONTAINER" kpsewhich bbding.sty
 docker exec "$CONTAINER" kpsewhich inconsolata.sty
+docker exec "$CONTAINER" kpsewhich libertine.sty
+docker exec "$CONTAINER" kpsewhich newtxmath.sty
+docker exec "$CONTAINER" kpsewhich zlmtt.sty
+docker exec "$CONTAINER" kpsewhich Inconsolatazi4-Regular.otf
 docker exec "$CONTAINER" grep -q "fandol" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py fandol ✅"
 docker exec "$CONTAINER" grep -q "ctex" /gpt/crazy_functions/latex_fns/latex_actions.py && echo "latex_actions.py ctex ✅"
 docker exec "$CONTAINER" grep -q "axessibility" /gpt/crazy_functions/latex_fns/latex_toolbox.py && echo "latex_toolbox.py axessibility ✅"

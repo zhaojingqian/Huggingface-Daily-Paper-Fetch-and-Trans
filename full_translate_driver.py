@@ -4,7 +4,7 @@
 用法: python3 full_translate_driver.py <arxiv_id> [--no-cache] [--retries N]
 输出: RESULT:SUCCESS:<pdf_path>  或  RESULT:ERROR:<msg>
 """
-import sys, os, glob, time, shutil
+import sys, os, glob, time, shutil, tarfile
 
 sys.path.insert(0, '/gpt')
 os.chdir('/gpt')
@@ -736,9 +736,124 @@ def source_cache_is_valid():
     if not os.path.exists(src_tar) or os.path.getsize(src_tar) < 1024:
         return False
     try:
-        import tarfile
         return tarfile.is_tarfile(src_tar)
     except Exception:
+        return False
+
+
+def prefetch_source_cache(max_rounds=3):
+    """预下载 arXiv 源码包，代理/直连交替重试，避免插件下载断流后直接失败。"""
+    src_dir = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print')
+    src_tar = os.path.join(src_dir, arxiv_id + '.tar')
+    tmp_tar = src_tar + '.part'
+    url = f'https://arxiv.org/e-print/{arxiv_id}'
+
+    if source_cache_is_valid():
+        print(f"[driver] ♻️  arXiv 源码缓存已存在: {src_tar}", flush=True)
+        return True
+
+    os.makedirs(src_dir, exist_ok=True)
+    plans = [('proxy', True), ('direct', False)]
+
+    for round_idx in range(1, max_rounds + 1):
+        for label, use_proxy in plans:
+            try:
+                if os.path.exists(tmp_tar):
+                    os.remove(tmp_tar)
+                session = _OrigSession()
+                if use_proxy:
+                    session.proxies.update(PROXIES_DICT)
+                else:
+                    session.trust_env = False
+                print(f"[driver] ⬇️  预下载 arXiv 源码 ({label}, round={round_idx}): {url}", flush=True)
+                with session.get(url, stream=True, timeout=(15, 180)) as r:
+                    r.raise_for_status()
+                    with open(tmp_tar, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+                if os.path.getsize(tmp_tar) < 1024:
+                    raise RuntimeError('downloaded source is too small')
+                if not tarfile.is_tarfile(tmp_tar):
+                    raise RuntimeError('downloaded source is not a valid tar archive')
+                os.replace(tmp_tar, src_tar)
+                kb = os.path.getsize(src_tar) // 1024
+                print(f"[driver] ✅ arXiv 源码预下载成功: {src_tar} ({kb}KB)", flush=True)
+                return True
+            except Exception as e:
+                print(f"[driver] ⚠️  arXiv 源码预下载失败 ({label}, round={round_idx}): {type(e).__name__}: {e}", flush=True)
+                try:
+                    if os.path.exists(tmp_tar):
+                        os.remove(tmp_tar)
+                except Exception:
+                    pass
+        time.sleep(min(2 * round_idx, 6))
+
+    return False
+
+
+def prepare_keep_translation_workfolder():
+    """
+    只有宿主机恢复了 merge_translate_zh.tex、但 workfolder 源码不完整时：
+    1. 确保 arXiv 源码包已缓存；
+    2. 解压源码并重建 gpt-academic workfolder；
+    3. 放回已翻译 tex，并尽量生成 merge.tex 供修补/诊断使用。
+    """
+    src_tar = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print', arxiv_id + '.tar')
+    extract_dst = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'extract')
+
+    if not os.path.exists(TRANSLATE_TEX):
+        return False
+    try:
+        with open(TRANSLATE_TEX, 'rb') as f:
+            translated_tex = f.read()
+    except Exception as e:
+        print(f"[driver] ⚠️  读取翻译 tex 失败，无法恢复 workfolder: {e}", flush=True)
+        return False
+
+    if not (source_cache_is_valid() or prefetch_source_cache()):
+        print(f"[driver] ⚠️  源码缓存不可用，无法恢复 workfolder", flush=True)
+        return False
+
+    try:
+        from toolbox import extract_archive
+        from crazy_functions.Latex_Function import (
+            descend_to_extracted_folder_if_exist,
+            move_project,
+        )
+        from crazy_functions.latex_fns import latex_toolbox as _lt_local
+
+        if os.path.exists(extract_dst):
+            shutil.rmtree(extract_dst)
+        os.makedirs(extract_dst, exist_ok=True)
+        extract_archive(file_path=src_tar, dest_dir=extract_dst)
+
+        project_folder = descend_to_extracted_folder_if_exist(extract_dst)
+        os.makedirs(project_folder, exist_ok=True)
+        # 也放一份到 extract 侧，若后续退回插件编译，move_project 后仍可跳过 GPT。
+        with open(os.path.join(project_folder, 'merge_translate_zh.tex'), 'wb') as f:
+            f.write(translated_tex)
+
+        workfolder = move_project(project_folder, arxiv_id)
+        with open(os.path.join(workfolder, 'merge_translate_zh.tex'), 'wb') as f:
+            f.write(translated_tex)
+
+        file_manifest = [
+            f for f in glob.glob(f'{workfolder}/**/*.tex', recursive=True)
+            if not os.path.basename(f).startswith('merge')
+        ]
+        if file_manifest:
+            maintex = _lt_local.find_main_tex_file(file_manifest, 'translate_zh')
+            with open(maintex, 'r', encoding='utf-8', errors='replace') as f:
+                merged_content = _lt_local.merge_tex_files(workfolder, f.read(), 'translate_zh')
+            with open(os.path.join(workfolder, 'merge.tex'), 'w', encoding='utf-8', errors='replace') as f:
+                f.write(merged_content)
+            print(f"[driver] ✅ 已恢复完整 workfolder 并生成 merge.tex: {workfolder}", flush=True)
+        else:
+            print(f"[driver] ⚠️  源码解压后未找到 tex 文件，仅恢复中文 tex: {workfolder}", flush=True)
+        return True
+    except Exception as e:
+        print(f"[driver] ⚠️  恢复 keep-translation workfolder 失败: {type(e).__name__}: {e}", flush=True)
         return False
 
 
@@ -755,34 +870,43 @@ if keep_translation and os.path.exists(TRANSLATE_TEX) and os.path.exists(ORIG_TE
     result_pdf = patch_and_recompile(WORKFOLDER, arxiv_id)
 else:
     if keep_translation and os.path.exists(TRANSLATE_TEX):
-        # 只有中文 tex、没有源码 workfolder 时，退回插件路径准备源码。
-        print(f"[driver] ♻️  发现翻译缓存但 workfolder 不完整，退回插件路径准备源码", flush=True)
+        # 只有中文 tex、没有完整源码 workfolder 时，先重建 workfolder 并直编译。
+        print(f"[driver] ♻️  发现翻译缓存但 workfolder 不完整，尝试恢复源码后直编译", flush=True)
+        if prepare_keep_translation_workfolder():
+            result_pdf = patch_and_recompile(WORKFOLDER, arxiv_id)
+        if result_pdf:
+            actual_no_cache = False
+        else:
+            print(f"[driver] ⚠️  直编译未成功，退回插件路径（仍尝试复用翻译 tex）", flush=True)
         actual_no_cache = False
     elif no_cache:
         # 强制重新翻译/编译；若源码包已经有效缓存，则复用源码，避免 arXiv 下载断流导致无法进入编译阶段。
         clear_compile_cache(full=True)
-        if source_cache_is_valid():
+        if source_cache_is_valid() or prefetch_source_cache():
             print(f"[driver] ♻️  复用已下载源码缓存（仍会重新翻译/编译）", flush=True)
             actual_no_cache = False
         else:
             actual_no_cache = True
     else:
+        if not source_cache_is_valid():
+            prefetch_source_cache()
         actual_no_cache = False
 
-    for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
-        if attempt == 1:
-            result_pdf = run_translation(actual_no_cache, attempt)
-        else:
-            # 重试：强制清缓存，重新翻译
-            print(f"\n[driver] ══ 第 {attempt} 次重试（清除缓存后重新翻译）══", flush=True)
-            clear_compile_cache()
-            result_pdf = run_translation(True, attempt)
+    if not result_pdf:
+        for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
+            if attempt == 1:
+                result_pdf = run_translation(actual_no_cache, attempt)
+            else:
+                # 重试：强制清缓存，重新翻译
+                print(f"\n[driver] ══ 第 {attempt} 次重试（清除缓存后重新翻译）══", flush=True)
+                clear_compile_cache()
+                result_pdf = run_translation(True, attempt)
 
-        if result_pdf:
-            break
-        if attempt <= max_retries:
-            print(f"[driver] 等待 5s 后重试...", flush=True)
-            time.sleep(5)
+            if result_pdf:
+                break
+            if attempt <= max_retries:
+                print(f"[driver] 等待 5s 后重试...", flush=True)
+                time.sleep(5)
 
     # ── Fallback：翻译完成但编译失败时，修补 verbatim 环境后重编译 ──────────────
     if not result_pdf:

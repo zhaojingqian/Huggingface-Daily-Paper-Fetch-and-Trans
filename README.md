@@ -72,7 +72,7 @@ python3 run_repair.py --retry-pdf --mode weekly --key 2026-W22
 python3 run_repair.py --retry-pdf --mode daily --days 7
 ```
 
-`retry-pdf` 会优先复用已有的翻译 tex 缓存；如果没有翻译 tex 但容器内已有有效 arXiv 源码包，也会复用源码包重新翻译/编译，避免网络断流时反复失败在源码下载阶段。
+`retry-pdf` 会优先复用已有的翻译 tex 缓存；如果只有宿主机侧 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。
 
 如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
 
@@ -288,6 +288,9 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 - 原生产容器 `gpt-academic-latex` 未删除，slim 容器 `gpt-academic-latex-slim` 独立运行。
 - compile canary 已通过：`2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
 - full no-cache canary 已通过：`2606.08432`。
+- 2026-06-12 复盘 2026-06-11 daily 失败项：`2606.11926`、`2606.12344` 已在 slim 容器下修复并恢复为 `pdf_status=ok`。
+
+slim 镜像保留必要 TeX/CJK 能力，同时用轻量 stub 覆盖常见装饰字体包：`fontawesome` v4/v5/v6、`bbding`、`inconsolata`、`libertine`、`newtxmath`、`zlmtt`，并为 `Inconsolatazi4-*.otf` 提供字体文件别名。新增 stub 时必须同时更新 `scripts/setup_docker_env.sh` 和 `docker/latex-slim/Dockerfile`。
 
 ```bash
 # 默认使用低磁盘 flatten 模式：从当前生产镜像创建临时容器，裁剪大依赖后 docker export/import

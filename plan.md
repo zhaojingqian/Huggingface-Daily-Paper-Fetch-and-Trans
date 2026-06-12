@@ -142,6 +142,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [ ] 为 `translate_arxiv.py` 的 JSON 修复逻辑增加样例测试。
 - [ ] 梳理 `full_translate_driver.py` fallback patch 的触发条件，沉淀为小型 fixtures。
 - [ ] 继续补充 PDF 失败诊断日志中的常见 LaTeX 错误分类。
+- [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。
 
 ### Phase D — 运维体验
 
@@ -158,6 +159,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 使用 `2606.08432` 跑完 full no-cache canary，验证 GPT 翻译阶段和 LaTeX 编译完整链路。
 - [x] 将 root cron 的例行翻译容器切换到 `gpt-academic-latex-slim` 做今晚试跑。
 - [x] 将 `paper-trans-web.service` 的手动提交路径切换到 `gpt-academic-latex-slim` 做试跑。
+- [x] 复盘 2026-06-11 daily slim 失败项，补齐 `libertine`、`newtxmath`、`zlmtt`、`Inconsolatazi4` 兼容层，并恢复 `2606.11926`、`2606.12344` PDF 状态。
 - [ ] 观察今晚 cron daily/post/retry-pdf 运行结果和日志，确认 slim 稳定性。
 - [ ] 生产切换确认成功后，再删除原容器和原镜像释放约 15GB 空间。
 

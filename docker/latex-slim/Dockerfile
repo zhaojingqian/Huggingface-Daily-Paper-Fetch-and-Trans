@@ -44,7 +44,11 @@ RUN set -eux; \
         "${TEXDIR}/tex/latex/fontawesome" \
         "${TEXDIR}/tex/latex/fontawesome5" \
         "${TEXDIR}/tex/latex/fontawesome6" \
-        "${TEXDIR}/tex/latex/inconsolata"; \
+        "${TEXDIR}/tex/latex/inconsolata" \
+        "${TEXDIR}/tex/latex/libertine" \
+        "${TEXDIR}/tex/latex/newtx" \
+        "${TEXDIR}/tex/latex/zlmtt" \
+        "${TEXDIR}/fonts/opentype/public/inconsolatazi4"; \
     cd /tmp; \
     curl -fsSL 'https://mirrors.ctan.org/macros/latex/contrib/bxcoloremoji.zip' -o bxcoloremoji.zip; \
     unzip -q bxcoloremoji.zip; \
@@ -106,6 +110,42 @@ RUN set -eux; \
         '\RequirePackage{lmodern}' \
         '\renewcommand{\ttdefault}{lmtt}' \
         > "${TEXDIR}/tex/latex/inconsolata/inconsolata.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{libertine}[2024/01/01 libertine stub]' \
+        '\DeclareOption*{}' \
+        '\ProcessOptions\relax' \
+        '\RequirePackage{lmodern}' \
+        '\renewcommand{\rmdefault}{lmr}' \
+        '\renewcommand{\sfdefault}{lmss}' \
+        '\renewcommand{\ttdefault}{lmtt}' \
+        > "${TEXDIR}/tex/latex/libertine/libertine.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{newtxmath}[2024/01/01 newtxmath stub]' \
+        '\DeclareOption*{}' \
+        '\ProcessOptions\relax' \
+        '\RequirePackage{amsmath}' \
+        '\RequirePackage{amssymb}' \
+        '\RequirePackage{mathrsfs}' \
+        '\RequirePackage{bm}' \
+        > "${TEXDIR}/tex/latex/newtx/newtxmath.sty"; \
+    printf '%s\n' \
+        '\NeedsTeXFormat{LaTeX2e}' \
+        '\ProvidesPackage{zlmtt}[2024/01/01 zlmtt stub]' \
+        '\DeclareOption*{}' \
+        '\ProcessOptions\relax' \
+        '\RequirePackage{lmodern}' \
+        '\renewcommand{\ttdefault}{lmtt}' \
+        > "${TEXDIR}/tex/latex/zlmtt/zlmtt.sty"; \
+    REG="$(kpsewhich lmmono10-regular.otf)"; \
+    BOLD="$(kpsewhich lmmonolt10-bold.otf || kpsewhich lmmono10-regular.otf)"; \
+    IT="$(kpsewhich lmmono10-italic.otf || kpsewhich lmmono10-regular.otf)"; \
+    BOLDIT="$(kpsewhich lmmonolt10-boldoblique.otf || kpsewhich lmmono10-italic.otf || kpsewhich lmmono10-regular.otf)"; \
+    cp "${REG}" "${TEXDIR}/fonts/opentype/public/inconsolatazi4/Inconsolatazi4-Regular.otf"; \
+    cp "${BOLD}" "${TEXDIR}/fonts/opentype/public/inconsolatazi4/Inconsolatazi4-Bold.otf"; \
+    cp "${IT}" "${TEXDIR}/fonts/opentype/public/inconsolatazi4/Inconsolatazi4-Italic.otf"; \
+    cp "${BOLDIT}" "${TEXDIR}/fonts/opentype/public/inconsolatazi4/Inconsolatazi4-BoldItalic.otf"; \
     mktexlsr "${TEXDIR}"; \
     rm -rf /tmp/bxcoloremoji /tmp/bxcoloremoji.zip
 

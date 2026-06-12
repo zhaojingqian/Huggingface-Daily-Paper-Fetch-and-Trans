@@ -2,6 +2,29 @@
 
 ---
 
+## v4.11 — 2026-06-12
+
+### Slim 翻译容器试跑修复
+
+#### 2026-06-11 两篇 daily PDF 失败修复
+
+- **影响论文**：`2606.11926` 和 `2606.12344`。
+- **根因**：
+  - `2606.11926` 已完成 GPT 翻译，但 slim TeX 环境缺少 `libertine.sty`，且该模板会按文件名查找 `Inconsolatazi4-*.otf`；
+  - `2606.12344` 首次失败在 arXiv 源码下载阶段，日志为 `ChunkedEncodingError / IncompleteRead`；下载修复后又暴露 slim 缺少 `newtxmath.sty` 和 `zlmtt.sty`；
+  - 容器缓存曾被清理，只有宿主机侧 `merge_translate_zh.tex` 备份时，旧 `--keep-translation` 无法重建完整 workfolder，只能退回插件路径。
+- **修复**：
+  - `scripts/setup_docker_env.sh` 与 `docker/latex-slim/Dockerfile` 增加轻量 stub：`libertine`、`newtxmath`、`zlmtt`，并为 `Inconsolatazi4` 文件名提供 Latin Modern Mono 字体别名；
+  - `full_translate_driver.py` 增加 arXiv 源码预下载：代理/直连交替重试，写入 `e-print/<id>.tar` 后验证 tar 有效，再交给 gpt-academic 使用，避免断流导致无法进入翻译/编译；
+  - `--keep-translation` 在 workfolder 不完整时会先用源码缓存重建 workfolder、放回中文 tex、生成 `merge.tex`，然后直接重编译，避免重复调用 GPT。
+- **验证**：
+  - 已对正在运行的 `gpt-academic-latex-slim` 执行 setup，`kpsewhich` 可解析 `libertine.sty`、`newtxmath.sty`、`zlmtt.sty` 和 `Inconsolatazi4-Regular.otf`；
+  - `GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim python3 run_repair.py --retry-pdf --mode daily --key 2026-06-11` 修复两篇失败论文；
+  - `data/daily/2026-06-11/index.json` 中 `2606.12397`、`2606.11926`、`2606.12344` 均为 `pdf_status=ok`；
+  - 生成 PDF：`2606.11926_zh.pdf` 约 2.52MB，`2606.12344_zh.pdf` 约 1.88MB。
+
+---
+
 ## v4.10 — 2026-06-11
 
 ### Docker 镜像瘦身闭环
