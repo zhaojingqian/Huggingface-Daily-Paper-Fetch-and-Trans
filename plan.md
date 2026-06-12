@@ -98,7 +98,7 @@ paper_card() / detail page / bookmark page
 | arXiv 原文 | 继续指向 `https://arxiv.org/abs/<id>` |
 | PDF 文件 | `/papers/<id>_zh.pdf` 保留 `Range` / `206` |
 | 直接 PDF | `/pdf/<id>/<title>.pdf` 保留中文 filename 响应头 |
-| 路径前缀 | `BASE_PATH=/paper` 下内部链接必须正确加前缀 |
+| 路径前缀 | `BASE_PATH=/paper` 下内部链接必须正确加前缀，请求入口也必须接受 `/paper/...` |
 
 ---
 
@@ -134,6 +134,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 新增 Web 合约测试。
 - [x] 收敛 PDF 状态判断和按钮链接生成。
 - [x] 重建 README / plan / change 文档。
+- [x] 请求入口兼容 `BASE_PATH=/paper` 前缀，避免 `/paper/view/<id>` 与 `/paper/papers/<file>` 404。
 
 ### Phase B — 安全的单文件整理
 
@@ -149,6 +150,10 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [ ] 梳理 `full_translate_driver.py` fallback patch 的触发条件，沉淀为小型 fixtures。
 - [ ] 继续补充 PDF 失败诊断日志中的常见 LaTeX 错误分类。
 - [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。
+- [x] 为 gpt-academic LaTeX splitter 增加普通正文扩展翻译补丁，避免 preserve 节点吞掉正文。
+- [x] 增加 `merge_translate_zh.tex` 翻译覆盖率门禁，拒绝大段英文漏译 PDF。
+- [x] 增加编译健康门禁和多轮 BibTeX/XeLaTeX fallback，拒绝 undefined command/cite/ref 残留。
+- [x] 增加自定义宏中文粘连、误生成 `\textWord`、唯一前缀 label/ref 的自动修补。
 
 ### Phase D — 运维体验
 

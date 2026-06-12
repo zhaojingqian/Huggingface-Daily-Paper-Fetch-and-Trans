@@ -205,6 +205,171 @@ if _latex_toolbox_spec:
     _lt.merge_tex_files_ = _patched_merge_tex_files_
     print(f"[driver] ✅ merge_tex_files_ 已 patch（系统 TeX 文件引用自动跳过）", flush=True)
 
+
+def _patch_latex_translation_splitter():
+    """
+    gpt-academic upstream is intentionally conservative: many LaTeX blocks are
+    marked as PRESERVE to protect compilation. In complex papers, ordinary prose
+    can become glued to those preserved blocks, so it never reaches the LLM and
+    the final PDF is only partially translated. Split large preserved nodes
+    again and send obvious prose lines through the translator.
+    """
+    if os.environ.get("PAPER_TRANS_EXPAND_TRANSLATION_SPLIT", "1") == "0":
+        print("[driver] ⚠️  latex translation splitter expansion disabled", flush=True)
+        return
+
+    import html as _html
+    import re as _re
+    from crazy_functions.latex_fns import latex_actions as _la
+    from crazy_functions.latex_fns.latex_toolbox import LinkedListNode as _Node
+
+    if getattr(_la.LatexPaperSplit, "_paper_trans_split_patch", False):
+        return
+
+    _orig_split = _la.LatexPaperSplit.split
+    protected_envs = {
+        "figure", "figure*", "table", "table*", "tabular", "tabular*",
+        "tabularx", "longtable", "algorithm", "algorithmic", "algorithm2e",
+        "lstlisting", "verbatim", "Verbatim", "minted", "equation",
+        "equation*", "align", "align*", "multline", "multline*", "gather",
+        "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
+    }
+    command_only_re = _re.compile(
+        r"^\\(?:includegraphics|label|ref|eqref|cite|citep|citet|citealt|"
+        r"bibliography|bibliographystyle|toprule|midrule|bottomrule|hline|"
+        r"cline|cmidrule|addlinespace|centering|raggedright|small|footnotesize|"
+        r"scriptsize|normalsize|vspace|hspace|vfill|newpage|clearpage|appendix|"
+        r"tableofcontents|maketitle|printbibliography)\b"
+    )
+    latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
+    inline_math_re = _re.compile(r"\$[^$]*\$")
+
+    def _line_has_translatable_prose(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("%"):
+            return False
+        if command_only_re.match(stripped):
+            return False
+        if stripped.count("&") >= 2:
+            return False
+        if _re.fullmatch(r"[\s{}\\\[\](),.;:~_^$&%#0-9+\-*/=<>|]+", stripped):
+            return False
+
+        rough = inline_math_re.sub(" ", stripped)
+        rough = latex_cmd_re.sub(" ", rough)
+        rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
+        letters = len(_re.findall(r"[A-Za-z]", rough))
+        cjk = len(_re.findall(r"[\u4e00-\u9fff]", rough))
+        words = _re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", rough)
+
+        if _re.match(r"^\\(?:section|subsection|subsubsection|paragraph|title)\*?\{", stripped):
+            return letters >= 6
+        if cjk >= 8:
+            return True
+        return letters >= 32 and len(words) >= 5
+
+    def _append(nodes, text: str, preserve: bool):
+        if not text:
+            return
+        if nodes and nodes[-1].preserve == preserve:
+            nodes[-1].string += text
+        else:
+            nodes.append(_Node(text, preserve=preserve))
+
+    def _split_preserved_text(text: str, in_document: bool):
+        nodes = []
+        env_stack = []
+        for line in text.splitlines(keepends=True):
+            if r"\begin{document}" in line:
+                _append(nodes, line, True)
+                in_document = True
+                continue
+            if r"\end{document}" in line:
+                _append(nodes, line, True)
+                in_document = False
+                continue
+
+            begins = _re.findall(r"\\begin\{([^}]+)\}", line)
+            ends = _re.findall(r"\\end\{([^}]+)\}", line)
+            line_protected = (
+                (not in_document)
+                or bool(env_stack)
+                or any(env in protected_envs for env in begins)
+                or any(env in protected_envs for env in ends)
+            )
+            transform = (not line_protected) and _line_has_translatable_prose(line)
+            _append(nodes, line, preserve=not transform)
+
+            for env in begins:
+                if env in protected_envs:
+                    env_stack.append(env)
+            for env in ends:
+                if env in protected_envs:
+                    if env in env_stack:
+                        # Drop the matching env and anything nested after it.
+                        pos = len(env_stack) - 1 - env_stack[::-1].index(env)
+                        env_stack = env_stack[:pos]
+                    elif env_stack:
+                        env_stack.pop()
+        return nodes, in_document
+
+    def _recompute_ranges(nodes):
+        n_line = 0
+        for node in nodes:
+            n_l = node.string.count("\n")
+            node.range = [n_line - 2, n_line + n_l + 2]
+            n_line += n_l
+
+    def _patched_split(self, txt, project_folder, opts):
+        res = _orig_split(self, txt, project_folder, opts)
+        original_transform = sum(1 for node in self.nodes if not node.preserve)
+        original_chars = sum(len(node.string) for node in self.nodes if not node.preserve)
+
+        expanded = []
+        in_document = False
+        for node in self.nodes:
+            if not node.preserve:
+                _append(expanded, node.string, False)
+                if r"\begin{document}" in node.string:
+                    in_document = True
+                if r"\end{document}" in node.string:
+                    in_document = False
+                continue
+            parts, in_document = _split_preserved_text(node.string, in_document)
+            for part in parts:
+                _append(expanded, part.string, part.preserve)
+
+        _recompute_ranges(expanded)
+        self.nodes = expanded
+        self.sp = [node.string for node in expanded if not node.preserve]
+
+        added = len(self.sp) - original_transform
+        added_chars = sum(len(node.string) for node in expanded if not node.preserve) - original_chars
+        print(
+            f"[driver] ✅ latex splitter expanded prose chunks: "
+            f"{original_transform} -> {len(self.sp)} (chars +{max(0, added_chars)})",
+            flush=True,
+        )
+        if added > 0:
+            try:
+                with open(os.path.join(project_folder, "debug_log.html"), "w", encoding="utf8") as f:
+                    for node in expanded:
+                        show_html = _html.escape(node.string).replace("\n", "<br/>")
+                        if node.preserve:
+                            f.write(f'<p style="color:red;">{show_html}</p>')
+                        else:
+                            f.write(f'<p style="color:black;">#{node.range}{show_html}#</p>')
+            except Exception as e:
+                print(f"[driver] ⚠️  rewrite debug_log.html failed: {e}", flush=True)
+        return self.sp
+
+    _la.LatexPaperSplit.split = _patched_split
+    _la.LatexPaperSplit._paper_trans_split_patch = True
+    print("[driver] ✅ LatexPaperSplit 已 patch（普通正文保守扩展翻译）", flush=True)
+
+
+_patch_latex_translation_splitter()
+
 from toolbox import get_conf, ChatBotWithCookies, default_user_name
 
 api_key   = get_conf('API_KEY')
@@ -219,6 +384,166 @@ arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
 
 # 模块级：收集插件运行中所有完整消息（不截断），供 diagnose_failure 分析
 _plugin_msgs_full: list[str] = []
+
+
+def translation_quality_report(workfolder: str) -> dict:
+    """
+    Inspect merge_translate_zh.tex and estimate whether ordinary prose was
+    actually translated. This intentionally ignores protected LaTeX blocks such
+    as tables, equations, listings, figures, and bibliographies.
+    """
+    import re as _re
+
+    trans_tex = os.path.join(workfolder, "merge_translate_zh.tex")
+    if not os.path.exists(trans_tex):
+        return {"ok": False, "reason": "missing merge_translate_zh.tex"}
+
+    protected_envs = {
+        "figure", "figure*", "table", "table*", "tabular", "tabular*",
+        "tabularx", "longtable", "algorithm", "algorithmic", "algorithm2e",
+        "lstlisting", "verbatim", "Verbatim", "minted", "equation",
+        "equation*", "align", "align*", "multline", "multline*", "gather",
+        "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
+    }
+    latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
+    inline_math_re = _re.compile(r"\$[^$]*\$")
+
+    with open(trans_tex, encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    in_document = False
+    env_stack: list[str] = []
+    cjk = 0
+    letters = 0
+    prose_lines = 0
+    long_english: list[tuple[int, str]] = []
+
+    for line_no, line in enumerate(lines, 1):
+        if r"\begin{document}" in line:
+            in_document = True
+            continue
+        if not in_document:
+            continue
+
+        begins = _re.findall(r"\\begin\{([^}]+)\}", line)
+        ends = _re.findall(r"\\end\{([^}]+)\}", line)
+        line_protected = (
+            bool(env_stack)
+            or any(env in protected_envs for env in begins)
+            or any(env in protected_envs for env in ends)
+        )
+
+        if not line_protected:
+            rough = inline_math_re.sub(" ", line)
+            rough = latex_cmd_re.sub(" ", rough)
+            rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
+            line_cjk = len(_re.findall(r"[\u4e00-\u9fff]", rough))
+            line_letters = len(_re.findall(r"[A-Za-z]", rough))
+            words = _re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", rough)
+            cjk += line_cjk
+            letters += line_letters
+            if line_letters >= 40 or line_cjk >= 10:
+                prose_lines += 1
+            if line_letters >= 80 and line_cjk <= 5 and len(words) >= 12:
+                long_english.append((line_no, line.strip()[:220]))
+
+        for env in begins:
+            if env in protected_envs:
+                env_stack.append(env)
+        for env in ends:
+            if env in protected_envs:
+                if env in env_stack:
+                    pos = len(env_stack) - 1 - env_stack[::-1].index(env)
+                    env_stack = env_stack[:pos]
+                elif env_stack:
+                    env_stack.pop()
+        if r"\end{document}" in line:
+            in_document = False
+
+    total = cjk + letters
+    cjk_pct = (cjk / total * 100) if total else 0.0
+    long_count = len(long_english)
+    fail = (
+        (long_count >= 30)
+        or (cjk_pct < 25.0 and long_count >= 8)
+        or (cjk_pct < 15.0 and prose_lines >= 20)
+    )
+    return {
+        "ok": not fail,
+        "cjk": cjk,
+        "letters": letters,
+        "cjk_pct": cjk_pct,
+        "prose_lines": prose_lines,
+        "long_english_lines": long_count,
+        "samples": long_english[:8],
+    }
+
+
+def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
+    report = translation_quality_report(workfolder)
+    if not report.get("ok"):
+        print(
+            f"[driver] ❌ 翻译覆盖率检查失败: {arxiv_id_} "
+            f"cjk_pct={report.get('cjk_pct', 0):.1f}% "
+            f"long_english_lines={report.get('long_english_lines', 0)} "
+            f"prose_lines={report.get('prose_lines', 0)}",
+            flush=True,
+        )
+        for line_no, sample in report.get("samples", []):
+            print(f"[driver]    untranslated line {line_no}: {sample}", flush=True)
+        return False
+
+    print(
+        f"[driver] ✅ 翻译覆盖率检查通过: {arxiv_id_} "
+        f"cjk_pct={report.get('cjk_pct', 0):.1f}% "
+        f"long_english_lines={report.get('long_english_lines', 0)}",
+        flush=True,
+    )
+    return True
+
+
+def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
+    """Reject PDFs that compiled but still have unresolved TeX/cite/ref issues."""
+    import re as _re
+
+    log_path = os.path.join(workfolder, "merge_translate_zh.log")
+    if not os.path.exists(log_path):
+        print(f"[driver] ⚠️  找不到编译日志，跳过健康检查: {log_path}", flush=True)
+        return True
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        log = f.read()
+
+    checks = [
+        ("undefined control sequence", r"Undefined control sequence"),
+        ("undefined citation", r"Citation .* undefined"),
+        ("undefined reference", r"Reference .* undefined"),
+        ("undefined references", r"There were undefined references"),
+        ("rerun labels", r"Label\(s\) may have changed"),
+        ("rerun cross-references", r"Rerun to get cross-references right"),
+        ("natbib undefined", r"Package natbib Warning: .* undefined"),
+    ]
+    failures = [name for name, pattern in checks if _re.search(pattern, log)]
+    if failures:
+        print(
+            f"[driver] ❌ 编译健康检查失败: {arxiv_id_} "
+            f"issues={', '.join(failures)}",
+            flush=True,
+        )
+        for m in _re.finditer(
+            r".{0,120}(Undefined control sequence|Citation .* undefined|"
+            r"Reference .* undefined|There were undefined references|"
+            r"Label\(s\) may have changed|Rerun to get cross-references right|"
+            r"Package natbib Warning: .* undefined).{0,160}",
+            log,
+            flags=_re.DOTALL,
+        ):
+            sample = " ".join(m.group(0).split())
+            print(f"[driver]    log: {sample[:260]}", flush=True)
+            break
+        return False
+
+    print(f"[driver] ✅ 编译健康检查通过: {arxiv_id_}", flush=True)
+    return True
 
 
 def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
@@ -289,6 +614,10 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
     candidate = os.path.join(translation_dir, 'translate_zh.pdf')
     if os.path.exists(candidate) and os.path.getsize(candidate) > 50 * 1024:
         kb = os.path.getsize(candidate) // 1024
+        if not translation_quality_ok(workfolder, arxiv_id):
+            return None
+        if not latex_compile_health_ok(workfolder, arxiv_id):
+            return None
         print(f"[driver|{elapsed()}] ✅ translate_zh.pdf ({kb}KB)", flush=True)
         return candidate
 
@@ -297,6 +626,10 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
         fp = os.path.join(workfolder, fname)
         if os.path.exists(fp) and os.path.getsize(fp) > 50 * 1024:
             kb = os.path.getsize(fp) // 1024
+            if not translation_quality_ok(workfolder, arxiv_id):
+                return None
+            if not latex_compile_health_ok(workfolder, arxiv_id):
+                return None
             print(f"[driver|{elapsed()}] ✅ workfolder/{fname} ({kb}KB)", flush=True)
             return fp
 
@@ -310,6 +643,10 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
         best = max(root_pdfs, key=os.path.getsize)
         if os.path.getsize(best) > 50 * 1024:
             kb = os.path.getsize(best) // 1024
+            if not translation_quality_ok(workfolder, arxiv_id):
+                return None
+            if not latex_compile_health_ok(workfolder, arxiv_id):
+                return None
             print(f"[driver|{elapsed()}] ✅ 找到 workfolder 根目录 PDF: {os.path.basename(best)} ({kb}KB)", flush=True)
             return best
 
@@ -487,6 +824,150 @@ def patch_unbalanced_groups_in_tcolorboxes(trans_tex_path):
     return total
 
 
+def patch_custom_macro_cjk_glue(trans_tex_path):
+    """
+    GPT may translate text around no-argument custom macros into forms like
+    ``\\name的``. Under XeLaTeX/CJK this can be parsed as one longer undefined
+    control sequence instead of macro ``\\name`` followed by Chinese text. Add
+    an empty group delimiter after simple custom macros when they are glued to a
+    CJK character or ASCII letter.
+    """
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    macro_names = set()
+    for m in _re.finditer(
+        r'\\(?:newcommand|renewcommand|providecommand)\s*\{\\([A-Za-z@]+)\}'
+        r'(?:\[(\d+)\])?',
+        text,
+    ):
+        arg_count = m.group(2)
+        if arg_count in (None, '0'):
+            macro_names.add(m.group(1))
+
+    if not macro_names:
+        return 0
+
+    definition_spans = []
+    for name in macro_names:
+        for m in _re.finditer(
+            r'\\(?:newcommand|renewcommand|providecommand)\s*\{\\'
+            + _re.escape(name) + r'\}',
+            text,
+        ):
+            definition_spans.append((m.start(), m.end()))
+
+    def _in_definition(pos):
+        return any(start <= pos < end for start, end in definition_spans)
+
+    names_pat = '|'.join(_re.escape(n) for n in sorted(macro_names, key=len, reverse=True))
+    pattern_slash_cjk = _re.compile(r'\\(' + names_pat + r')\\(?=[\u4e00-\u9fff])')
+    pattern_glued = _re.compile(r'\\(' + names_pat + r')(?![A-Za-z@{])(?=[\u4e00-\u9fffA-Za-z])')
+
+    total = 0
+
+    def _replace(m):
+        nonlocal total
+        if _in_definition(m.start()):
+            return m.group(0)
+        total += 1
+        return '\\' + m.group(1) + '{}'
+
+    new_text = pattern_slash_cjk.sub(_replace, text)
+    new_text = pattern_glued.sub(_replace, new_text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_custom_macro_cjk_glue: 为 {total} 处自定义宏补充分隔符", flush=True)
+    return total
+
+
+def patch_stray_text_word_commands(trans_tex_path):
+    """
+    Repair translation artifacts like ``\\textTest:``. These usually come from
+    plain prompt text where GPT glued ``\\text`` to an English word, producing an
+    undefined LaTeX command.
+    """
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    defined = {
+        m.group(1)
+        for m in _re.finditer(
+            r'\\(?:newcommand|renewcommand|providecommand)\s*\{\\([A-Za-z@]+)\}',
+            text,
+        )
+    }
+    pattern = _re.compile(r'\\text([A-Z][A-Za-z]{1,40})(?=[:：,，.;；!?！？\s])')
+    total = 0
+
+    def _replace(m):
+        nonlocal total
+        full_name = 'text' + m.group(1)
+        if full_name in defined:
+            return m.group(0)
+        total += 1
+        return r'\textbf{' + m.group(1) + '}'
+
+    new_text = pattern.sub(_replace, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_stray_text_word_commands: 修复了 {total} 个误生成的 text 命令", flush=True)
+    return total
+
+
+def patch_undefined_unique_ref_labels(trans_tex_path):
+    """
+    If a source has a ref to ``foo`` but only defines one longer label such as
+    ``foo_bar``, rewrite that ref. This fixes upstream label/ref drift without
+    guessing when multiple candidates exist.
+    """
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    labels = set(_re.findall(r'\\label\{([^{}]+)\}', text))
+    if not labels:
+        return 0
+
+    ref_pattern = _re.compile(r'\\(ref|eqref|autoref|cref|Cref)\{([^{}]+)\}')
+    replacements: dict[str, str] = {}
+    for label in sorted({m.group(2) for m in ref_pattern.finditer(text)} - labels):
+        candidates = sorted(
+            target for target in labels
+            if target.startswith(label + '_') or target.startswith(label + '-')
+        )
+        if len(candidates) == 1:
+            replacements[label] = candidates[0]
+
+    if not replacements:
+        return 0
+
+    total = 0
+
+    def _replace(m):
+        nonlocal total
+        label = m.group(2)
+        if label not in replacements:
+            return m.group(0)
+        total += 1
+        return '\\' + m.group(1) + '{' + replacements[label] + '}'
+
+    new_text = ref_pattern.sub(_replace, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        detail = ', '.join(f'{k}->{v}' for k, v in replacements.items())
+        print(f"[driver] 🔧 patch_undefined_unique_ref_labels: 修复了 {total} 个 ref ({detail})", flush=True)
+    return total
+
+
 def patch_verbatim_envs(trans_tex_path, orig_tex_path):
     """
     将翻译后的 tex 文件中所有 verbatim 类环境（tcblisting / lstlisting / verbatim）
@@ -551,19 +1032,31 @@ def patch_and_recompile(workfolder, arxiv_id_):
     n = patch_verbatim_envs(trans_tex, orig_tex)
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
     patch_unbalanced_groups_in_tcolorboxes(trans_tex)
+    patch_custom_macro_cjk_glue(trans_tex)
+    patch_stray_text_word_commands(trans_tex)
+    patch_undefined_unique_ref_labels(trans_tex)
 
     try:
-        _sp.run(
+        for cmd in (
             ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            cwd=workfolder, timeout=300,
-            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-        )
+            ['bibtex', 'merge_translate_zh'],
+            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+        ):
+            _sp.run(
+                cmd, cwd=workfolder, timeout=300,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
     except Exception as e:
-        print(f"[driver] ⚠️  xelatex 执行异常: {e}", flush=True)
+        print(f"[driver] ⚠️  LaTeX/BibTeX 执行异常: {e}", flush=True)
         return None
 
     if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 50 * 1024:
         kb = os.path.getsize(output_pdf) // 1024
+        if not translation_quality_ok(workfolder, arxiv_id_):
+            return None
+        if not latex_compile_health_ok(workfolder, arxiv_id_):
+            return None
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copy2(output_pdf, dest_pdf)
         print(f"[driver] ✅ 修补重编译成功: {dest_pdf} ({kb}KB)", flush=True)

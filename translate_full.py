@@ -75,6 +75,20 @@ def _restore_tex_to_container(arxiv_id: str) -> bool:
     )
     ok = r.returncode == 0
     if ok:
+        # docker cp writes files as root. The driver runs as gptuser and needs to
+        # rewrite merge_translate_zh.tex during keep-translation repair passes.
+        chown = subprocess.run(
+            ["docker", "exec", "-u", "root", CONTAINER_NAME,
+             "chown", "-R", "gptuser:gptuser", workfolder],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        chmod = subprocess.run(
+            ["docker", "exec", "-u", "root", CONTAINER_NAME,
+             "chmod", "-R", "u+rw", workfolder],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if chown.returncode != 0 or chmod.returncode != 0:
+            print(f"⚠️  已恢复 tex，但重设容器权限失败: {workfolder}", flush=True)
         print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex}", flush=True)
     return ok
 

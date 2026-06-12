@@ -2,6 +2,48 @@
 
 ---
 
+## v4.14 — 2026-06-12
+
+### 全文翻译质量与编译健康修复
+
+#### 2606.06021 与 2026-06-11 daily 三篇中文 PDF 重新生成
+
+- **影响论文**：`2606.06021`、`2606.12397`、`2606.11926`、`2606.12344`。
+- **根因定位**：
+  - 大段英文不是 PDF 编译造成的，而是 `merge_translate_zh.tex` 本身已经包含大量未翻译正文；
+  - gpt-academic 的 LaTeX splitter 对复杂论文过于保守，会把普通正文粘进 `preserve=True` 节点，导致这些正文没有送入 GPT 翻译；
+  - `--keep-translation` 遇到已存在 `merge_translate_zh.tex` 会跳过 GPT，因此会反复发布旧的半翻译 tex；
+  - `2606.12397` 的 cite/ref 问题不是 bib key 损坏，实际是 `\name\的` / `\Name\的` 这类自定义宏与中文粘连触发 `Undefined control sequence`；
+  - `2606.11926` 另有 `\textTest:` 误生成命令；`2606.12344` 原始源码存在 `\ref{fig:leak_fix_openclaw}` 与唯一实际 label `fig:leak_fix_openclaw_multilingual` 不一致。
+- **修复**：
+  - `full_translate_driver.py` patch `LatexPaperSplit.split`，把被保守 preserve 的明显普通正文重新拆出并送翻译；
+  - 新增 `merge_translate_zh.tex` 翻译覆盖率检查，忽略 figure/table/equation/verbatim/bibliography 等保护块，发现低 CJK 覆盖或大量长英文正文时拒绝发布 PDF；
+  - 新增编译健康检查，拒绝带 `Undefined control sequence`、undefined citation/reference、rerun cross-reference 等残留问题的 PDF；
+  - fallback 重编译改为 `xelatex -> bibtex -> xelatex -> xelatex`，并加入自定义宏中文粘连、误生成 `\textWord`、唯一前缀 ref label 修补；
+  - `translate_full.py --keep-translation` 在恢复宿主机 tex 备份后重设容器 workfolder 属主，避免 `docker cp` 生成 root-owned 文件后驱动无法改写 tex。
+- **最终产物**：
+  - `2606.06021_zh.pdf`：4,235,411 bytes，29 页，文本抽取约 92k 字符，正文 CJK 覆盖约 79.6%；
+  - `2606.12397_zh.pdf`：854,351 bytes，15 页，文本抽取约 48k 字符，正文 CJK 覆盖约 89.8%；
+  - `2606.11926_zh.pdf`：2,690,472 bytes，39 页，文本抽取约 139k 字符，正文 CJK 覆盖约 78.9%；
+  - `2606.12344_zh.pdf`：2,021,696 bytes，37 页，文本抽取约 93k 字符，正文 CJK 覆盖约 73.9%。
+- **验证**：
+  - 四篇容器内 `merge_translate_zh.log` 均无 undefined control sequence、undefined citation/reference、rerun cross-reference 残留；
+  - 四篇 `pdfinfo` / `pdftotext` 均可读取页数和文本内容；
+  - 本地 Web Range GET 对 `/paper/papers/<id>_zh.pdf` 均返回 `206 Partial Content`、`Content-Type: application/pdf`；
+  - `/paper/view/<id>` 均返回 HTML wrapper，iframe 指向 `/paper/papers/<id>_zh.pdf#view=FitH`。
+
+### Web 路由修复
+
+#### BASE_PATH=/paper 前缀请求兼容
+
+- **问题**：页面生成已按 `BASE_PATH=/paper` 输出 `/paper/view/<id>` 和 `/paper/papers/<id>_zh.pdf`，但 HTTP handler 入口只识别去前缀后的 `/view/<id>` / `/papers/<file>`，导致直接访问 `/paper/view/<id>` 返回 404。
+- **修复**：
+  - 新增 `route_path()`，在请求入口统一剥离部署前缀后再路由；
+  - 新增 `with_base_path()`，redirect 的内部目标自动补回 `/paper`；
+  - 重启本地 Web 服务后验证 `/paper/view/<id>`、`/paper/papers/<id>_zh.pdf` 和旧 `/paper/papers/<id>` 重定向均正常。
+
+---
+
 ## v4.13 — 2026-06-12
 
 ### 数据产物刷新

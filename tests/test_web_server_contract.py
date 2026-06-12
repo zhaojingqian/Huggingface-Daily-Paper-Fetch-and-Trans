@@ -132,10 +132,23 @@ class WebServerContractTest(unittest.TestCase):
         try:
             resp, body = self.request(f"/view/{SAMPLE_VIEW_ID}")
             html = body.decode("utf-8", errors="replace")
+            prefixed_resp, prefixed_body = self.request(f"/paper/view/{SAMPLE_VIEW_ID}")
+            prefixed_html = prefixed_body.decode("utf-8", errors="replace")
+            pdf_resp, _ = self.request(
+                f"/paper/papers/{SAMPLE_VIEW_ID}_zh.pdf",
+                headers={"Range": "bytes=0-0"},
+            )
+            redirect_resp, _ = self.request(f"/paper/papers/{SAMPLE_VIEW_ID}")
         finally:
             web_server.BASE_PATH = old_base
         self.assertEqual(resp.status, 200)
         self.assertIn(f'<iframe src="/paper/papers/{SAMPLE_VIEW_ID}_zh.pdf#view=FitH"', html)
+        self.assertEqual(prefixed_resp.status, 200)
+        self.assertIn(f'<iframe src="/paper/papers/{SAMPLE_VIEW_ID}_zh.pdf#view=FitH"', prefixed_html)
+        self.assertEqual(pdf_resp.status, 206)
+        self.assert_content_type(pdf_resp, "application/pdf")
+        self.assertEqual(redirect_resp.status, 302)
+        self.assertEqual(redirect_resp.getheader("Location"), f"/paper/detail/{SAMPLE_VIEW_ID}")
 
         old_base = web_server.BASE_PATH
         web_server.BASE_PATH = "/paper"

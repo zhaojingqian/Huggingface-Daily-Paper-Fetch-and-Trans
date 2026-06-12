@@ -74,6 +74,8 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；如果只有宿主机侧 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。
 
+全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 和交叉引用未收敛的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义宏与中文粘连、误生成的 `\textWord` 命令，以及唯一可推断的 label/ref 不一致。
+
 如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
 
 ### Web 服务
@@ -103,6 +105,8 @@ tail -f /root/workspace/paper-trans/logs/web.log
 | `/submit` | HTML/API | 手动提交页面和 API |
 | `/search` | HTML/API | 搜索页面和 API |
 | `/status` | HTML/API | 系统状态页面和 API |
+
+当服务以 `BASE_PATH=/paper` 部署时，请求入口同时接受带前缀的线上路径，例如 `/paper/view/<arxiv_id>` 和 `/paper/papers/<file>`；内部 redirect 会自动保留 `/paper` 前缀。
 
 ### PDF 查看页说明
 
@@ -175,7 +179,7 @@ paper-trans/
 - `enrich_paper_entry()` 统一 slim index + paper store 合并。
 - `render_paper_actions()` 统一详情、全文 PDF、arXiv、原文 PDF 链接生成。
 - `h_text()`、`h_attr()`、`js_str()` 分别处理 HTML 文本、HTML 属性、inline JS 字符串。
-- `BASE_PATH=/paper` 由 systemd 注入，页面生成时为内部链接添加前缀；JS API 调用使用 `window.BP`。
+- `BASE_PATH=/paper` 由 systemd 注入，页面生成时为内部链接添加前缀，请求入口会剥离此前缀后路由；JS API 调用使用 `window.BP`。
 
 ---
 

@@ -36,6 +36,21 @@ HTTP_HEADERS = {
 }
 
 
+def route_path(path):
+    """Return the app-internal path after removing the deployment prefix."""
+    raw = unquote(path).split("?")[0]
+    if BASE_PATH and (raw == BASE_PATH or raw.startswith(BASE_PATH + "/")):
+        raw = raw[len(BASE_PATH):] or "/"
+    return raw
+
+
+def with_base_path(location):
+    """Prefix internal redirect targets when the app is mounted below BASE_PATH."""
+    if BASE_PATH and location.startswith("/") and not location.startswith(BASE_PATH + "/"):
+        return BASE_PATH + location
+    return location
+
+
 
 # ── 手动提交任务 ──────────────────────────────────────────────────────────────
 MANUAL_DIR       = os.path.join(DATA_DIR, "manual")
@@ -1342,7 +1357,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_redirect(self, location, code=302):
         self.send_response(code)
-        self.send_header("Location", location)
+        self.send_header("Location", with_base_path(location))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -1422,7 +1437,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_POST(self):
-        raw = unquote(self.path).split("?")[0]
+        raw = route_path(self.path)
 
         # ── /api/paper/delete  删除论文 ────────────────────
         if raw == "/api/paper/delete":
@@ -1552,7 +1567,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_json(bm)
 
     def do_GET(self):
-        raw  = unquote(self.path).split("?")[0]
+        raw  = route_path(self.path)
         parts = [p for p in raw.strip("/").split("/") if p]
 
         # ── /api/submit/status  任务状态 ───────────────────
