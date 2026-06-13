@@ -156,6 +156,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 增加编译健康门禁和多轮 BibTeX/XeLaTeX fallback，拒绝 undefined command/cite/ref 残留。
 - [x] 增加自定义宏中文粘连、误生成 `\textWord`、唯一前缀 label/ref 的自动修补。
 - [x] 增加旧式 fontawesome alias、XeLaTeX microtype、本地 `NVIDIASans` 字体映射和 BibTeX 中间文件恢复补丁，修复 2026-06-12 daily 两篇失败 PDF。
+- [x] 基于 gpt-academic 原始 splitter 增加 preserve 节点二次安全拆分，覆盖表格单元格和 algorithmic 说明文字，同时保留硬保护环境不翻译。
 
 ### Phase D — 运维体验
 

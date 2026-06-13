@@ -234,6 +234,12 @@ def _patch_latex_translation_splitter():
         "equation*", "align", "align*", "multline", "multline*", "gather",
         "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
     }
+    soft_text_envs = {
+        "tabular", "tabular*", "tabularx", "longtable", "array",
+        "algorithmic", "algorithmic*", "algorithm2e",
+    }
+    hard_protected_envs = protected_envs - soft_text_envs
+    tracked_envs = protected_envs | soft_text_envs | {"center"}
     command_only_re = _re.compile(
         r"^\\(?:includegraphics|label|ref|eqref|cite|citep|citet|citealt|"
         r"bibliography|bibliographystyle|toprule|midrule|bottomrule|hline|"
@@ -244,29 +250,47 @@ def _patch_latex_translation_splitter():
     latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
     inline_math_re = _re.compile(r"\$[^$]*\$")
 
-    def _line_has_translatable_prose(line: str) -> bool:
-        stripped = line.strip()
+    def _rough_text(line: str) -> str:
+        rough = inline_math_re.sub(" ", line)
+        rough = _re.sub(
+            r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}\{([^{}]*)\}",
+            r" \1 ",
+            rough,
+        )
+        for _ in range(3):
+            rough = _re.sub(
+                r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
+                r"scriptsize|normalsize|large|Large|captionof)\*?"
+                r"(?:\[[^\]]*\])?(?:\{[^{}]*\})?\{([^{}]*)\}",
+                r" \1 ",
+                rough,
+            )
+        rough = latex_cmd_re.sub(" ", rough)
+        rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
+        return rough
+
+    def _text_has_translatable_prose(text: str, min_letters=32, min_words=5) -> bool:
+        stripped = text.strip()
         if not stripped or stripped.startswith("%"):
             return False
         if command_only_re.match(stripped):
             return False
-        if stripped.count("&") >= 2:
-            return False
         if _re.fullmatch(r"[\s{}\\\[\](),.;:~_^$&%#0-9+\-*/=<>|]+", stripped):
             return False
 
-        rough = inline_math_re.sub(" ", stripped)
-        rough = latex_cmd_re.sub(" ", rough)
-        rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
+        rough = _rough_text(stripped)
         letters = len(_re.findall(r"[A-Za-z]", rough))
         cjk = len(_re.findall(r"[\u4e00-\u9fff]", rough))
         words = _re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", rough)
 
         if _re.match(r"^\\(?:section|subsection|subsubsection|paragraph|title)\*?\{", stripped):
             return letters >= 6
-        if cjk >= 8:
-            return True
-        return letters >= 32 and len(words) >= 5
+        if cjk >= 8 and cjk >= letters:
+            return False
+        return letters >= min_letters and len(words) >= min_words
+
+    def _line_has_translatable_prose(line: str) -> bool:
+        return _text_has_translatable_prose(line, min_letters=32, min_words=5)
 
     def _append(nodes, text: str, preserve: bool):
         if not text:
@@ -276,42 +300,163 @@ def _patch_latex_translation_splitter():
         else:
             nodes.append(_Node(text, preserve=preserve))
 
-    def _split_preserved_text(text: str, in_document: bool):
+    def _split_comment(line: str):
+        for idx, ch in enumerate(line):
+            if ch == "%" and (idx == 0 or line[idx - 1] != "\\"):
+                return line[:idx], line[idx:]
+        return line, ""
+
+    def _append_translatable_fragment(nodes, text: str, min_letters=32, min_words=5):
+        if not text:
+            return
+        leading_len = len(text) - len(text.lstrip())
+        trailing_len = len(text.rstrip()) if text.rstrip() else 0
+        leading = text[:leading_len]
+        core = text[leading_len:trailing_len]
+        trailing = text[trailing_len:]
+        if _text_has_translatable_prose(core, min_letters=min_letters, min_words=min_words):
+            _append(nodes, leading, True)
+            _append(nodes, core, False)
+            _append(nodes, trailing, True)
+        else:
+            _append(nodes, text, True)
+
+    def _split_unescaped_ampersands(text: str):
+        tokens = []
+        start = 0
+        for m in _re.finditer(r"(?<!\\)&", text):
+            tokens.append(("cell", text[start:m.start()]))
+            tokens.append(("delimiter", text[m.start():m.end()]))
+            start = m.end()
+        tokens.append(("cell", text[start:]))
+        return tokens
+
+    def _split_tabular_line(line: str):
         nodes = []
-        env_stack = []
+        code, comment = _split_comment(line)
+        newline = "\n" if code.endswith("\n") else ""
+        if newline:
+            code = code[:-1]
+        if _re.match(r"^\s*\\(?:toprule|midrule|bottomrule|hline|cline|cmidrule|addlinespace)\b", code.strip()):
+            _append(nodes, line, True)
+            return nodes
+
+        suffix = ""
+        row_end = _re.search(r"(?<!\\)(\\\\(?:\[[^\]]*\])?\s*)$", code)
+        if row_end:
+            suffix = row_end.group(1)
+            code = code[:row_end.start()]
+
+        for kind, token in _split_unescaped_ampersands(code):
+            if kind == "delimiter":
+                _append(nodes, token, True)
+            else:
+                _append_translatable_fragment(nodes, token, min_letters=5, min_words=1)
+        _append(nodes, suffix + comment + newline, True)
+        return nodes
+
+    def _find_matching_brace(text: str, open_idx: int) -> int:
+        depth = 0
+        for idx in range(open_idx, len(text)):
+            ch = text[idx]
+            if ch == "{" and (idx == 0 or text[idx - 1] != "\\"):
+                depth += 1
+            elif ch == "}" and (idx == 0 or text[idx - 1] != "\\"):
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return -1
+
+    def _split_algorithmic_line(line: str):
+        nodes = []
+        code, comment = _split_comment(line)
+        newline = "\n" if code.endswith("\n") else ""
+        if newline:
+            code = code[:-1]
+        m = _re.match(r"^(\s*\\Comment\s*)\{", code)
+        if m:
+            open_idx = m.end() - 1
+            close_idx = _find_matching_brace(code, open_idx)
+            if close_idx > open_idx:
+                _append(nodes, code[:open_idx + 1], True)
+                _append_translatable_fragment(nodes, code[open_idx + 1:close_idx], min_letters=5, min_words=1)
+                _append(nodes, code[close_idx:] + comment + newline, True)
+                return nodes
+        m = _re.match(r"^(\s*\\(?:State|Require|Ensure|Return)\b\s*)(.*)$", code)
+        if m:
+            _append(nodes, m.group(1), True)
+            _append_translatable_fragment(nodes, m.group(2), min_letters=5, min_words=1)
+            _append(nodes, comment + newline, True)
+            return nodes
+        m = _re.match(r"^(\s*\\(?:If|ElsIf|For|ForAll|While)\s*)\{", code)
+        if m:
+            open_idx = m.end() - 1
+            close_idx = _find_matching_brace(code, open_idx)
+            if close_idx > open_idx:
+                _append(nodes, code[:open_idx + 1], True)
+                _append_translatable_fragment(nodes, code[open_idx + 1:close_idx], min_letters=5, min_words=1)
+                _append(nodes, code[close_idx:] + comment + newline, True)
+                return nodes
+        _append_translatable_fragment(nodes, code, min_letters=12, min_words=2)
+        _append(nodes, comment + newline, True)
+        return nodes
+
+    def _update_env_stack(line: str, env_stack: list[str]):
+        begins = _re.findall(r"\\begin\{([^}]+)\}", line)
+        ends = _re.findall(r"\\end\{([^}]+)\}", line)
+        for env in begins:
+            if env in tracked_envs:
+                env_stack.append(env)
+        for env in ends:
+            if env in tracked_envs:
+                if env in env_stack:
+                    pos = len(env_stack) - 1 - env_stack[::-1].index(env)
+                    env_stack = env_stack[:pos]
+                elif env_stack:
+                    env_stack.pop()
+        return env_stack
+
+    def _split_preserved_text(text: str, state: dict):
+        nodes = []
         for line in text.splitlines(keepends=True):
             if r"\begin{document}" in line:
                 _append(nodes, line, True)
-                in_document = True
+                state["in_document"] = True
+                state["env_stack"] = _update_env_stack(line, state["env_stack"])
                 continue
             if r"\end{document}" in line:
                 _append(nodes, line, True)
-                in_document = False
+                state["in_document"] = False
+                state["env_stack"] = _update_env_stack(line, state["env_stack"])
                 continue
 
+            active_env = state["env_stack"][-1] if state["env_stack"] else None
+            in_soft_env = active_env in soft_text_envs
+            hard_active = any(env in hard_protected_envs for env in state["env_stack"])
             begins = _re.findall(r"\\begin\{([^}]+)\}", line)
             ends = _re.findall(r"\\end\{([^}]+)\}", line)
-            line_protected = (
-                (not in_document)
-                or bool(env_stack)
-                or any(env in protected_envs for env in begins)
-                or any(env in protected_envs for env in ends)
-            )
-            transform = (not line_protected) and _line_has_translatable_prose(line)
-            _append(nodes, line, preserve=not transform)
+            structural_line = any(env in tracked_envs for env in begins + ends)
 
-            for env in begins:
-                if env in protected_envs:
-                    env_stack.append(env)
-            for env in ends:
-                if env in protected_envs:
-                    if env in env_stack:
-                        # Drop the matching env and anything nested after it.
-                        pos = len(env_stack) - 1 - env_stack[::-1].index(env)
-                        env_stack = env_stack[:pos]
-                    elif env_stack:
-                        env_stack.pop()
-        return nodes, in_document
+            if state["in_document"] and in_soft_env and not structural_line:
+                if active_env.startswith("tabular") or active_env in {"longtable", "array"}:
+                    for part in _split_tabular_line(line):
+                        _append(nodes, part.string, part.preserve)
+                elif active_env.startswith("algorithm"):
+                    for part in _split_algorithmic_line(line):
+                        _append(nodes, part.string, part.preserve)
+                else:
+                    _append_translatable_fragment(nodes, line, min_letters=12, min_words=2)
+            else:
+                line_protected = (
+                    (not state["in_document"])
+                    or hard_active
+                    or structural_line
+                )
+                transform = (not line_protected) and _line_has_translatable_prose(line)
+                _append(nodes, line, preserve=not transform)
+
+            state["env_stack"] = _update_env_stack(line, state["env_stack"])
+        return nodes
 
     def _recompute_ranges(nodes):
         n_line = 0
@@ -326,16 +471,17 @@ def _patch_latex_translation_splitter():
         original_chars = sum(len(node.string) for node in self.nodes if not node.preserve)
 
         expanded = []
-        in_document = False
+        state = {"in_document": False, "env_stack": []}
         for node in self.nodes:
             if not node.preserve:
                 _append(expanded, node.string, False)
                 if r"\begin{document}" in node.string:
-                    in_document = True
+                    state["in_document"] = True
                 if r"\end{document}" in node.string:
-                    in_document = False
+                    state["in_document"] = False
+                state["env_stack"] = _update_env_stack(node.string, state["env_stack"])
                 continue
-            parts, in_document = _split_preserved_text(node.string, in_document)
+            parts = _split_preserved_text(node.string, state)
             for part in parts:
                 _append(expanded, part.string, part.preserve)
 
@@ -389,8 +535,9 @@ _plugin_msgs_full: list[str] = []
 def translation_quality_report(workfolder: str) -> dict:
     """
     Inspect merge_translate_zh.tex and estimate whether ordinary prose was
-    actually translated. This intentionally ignores protected LaTeX blocks such
-    as tables, equations, listings, figures, and bibliographies.
+    actually translated. This intentionally ignores hard LaTeX blocks such as
+    equations, listings, figures, and bibliographies, but still inspects prose
+    inside table cells and algorithmic descriptions.
     """
     import re as _re
 
@@ -405,8 +552,33 @@ def translation_quality_report(workfolder: str) -> dict:
         "equation*", "align", "align*", "multline", "multline*", "gather",
         "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
     }
+    soft_text_envs = {
+        "tabular", "tabular*", "tabularx", "longtable", "array",
+        "algorithmic", "algorithmic*", "algorithm2e",
+    }
+    hard_protected_envs = protected_envs - soft_text_envs
+    tracked_envs = protected_envs | soft_text_envs
     latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
     inline_math_re = _re.compile(r"\$[^$]*\$")
+
+    def _rough_text(line: str) -> str:
+        rough = inline_math_re.sub(" ", line)
+        rough = _re.sub(
+            r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}\{([^{}]*)\}",
+            r" \1 ",
+            rough,
+        )
+        for _ in range(3):
+            rough = _re.sub(
+                r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
+                r"scriptsize|normalsize|large|Large|captionof)\*?"
+                r"(?:\[[^\]]*\])?(?:\{[^{}]*\})?\{([^{}]*)\}",
+                r" \1 ",
+                rough,
+            )
+        rough = latex_cmd_re.sub(" ", rough)
+        rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
+        return rough
 
     with open(trans_tex, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
@@ -417,6 +589,7 @@ def translation_quality_report(workfolder: str) -> dict:
     letters = 0
     prose_lines = 0
     long_english: list[tuple[int, str]] = []
+    very_long_english = 0
 
     for line_no, line in enumerate(lines, 1):
         if r"\begin{document}" in line:
@@ -427,16 +600,17 @@ def translation_quality_report(workfolder: str) -> dict:
 
         begins = _re.findall(r"\\begin\{([^}]+)\}", line)
         ends = _re.findall(r"\\end\{([^}]+)\}", line)
+        active_env = env_stack[-1] if env_stack else None
+        in_soft_env = active_env in soft_text_envs
+        hard_active = any(env in hard_protected_envs for env in env_stack)
+        structural_line = any(env in tracked_envs for env in begins + ends)
         line_protected = (
-            bool(env_stack)
-            or any(env in protected_envs for env in begins)
-            or any(env in protected_envs for env in ends)
+            (hard_active and not in_soft_env)
+            or structural_line
         )
 
         if not line_protected:
-            rough = inline_math_re.sub(" ", line)
-            rough = latex_cmd_re.sub(" ", rough)
-            rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
+            rough = _rough_text(line)
             line_cjk = len(_re.findall(r"[\u4e00-\u9fff]", rough))
             line_letters = len(_re.findall(r"[A-Za-z]", rough))
             words = _re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", rough)
@@ -446,12 +620,14 @@ def translation_quality_report(workfolder: str) -> dict:
                 prose_lines += 1
             if line_letters >= 80 and line_cjk <= 5 and len(words) >= 12:
                 long_english.append((line_no, line.strip()[:220]))
+            if line_letters >= 180 and line_cjk <= 8 and len(words) >= 24:
+                very_long_english += 1
 
         for env in begins:
-            if env in protected_envs:
+            if env in tracked_envs:
                 env_stack.append(env)
         for env in ends:
-            if env in protected_envs:
+            if env in tracked_envs:
                 if env in env_stack:
                     pos = len(env_stack) - 1 - env_stack[::-1].index(env)
                     env_stack = env_stack[:pos]
@@ -464,8 +640,9 @@ def translation_quality_report(workfolder: str) -> dict:
     cjk_pct = (cjk / total * 100) if total else 0.0
     long_count = len(long_english)
     fail = (
-        (long_count >= 30)
-        or (cjk_pct < 25.0 and long_count >= 8)
+        (long_count >= 10)
+        or (very_long_english >= 3)
+        or (cjk_pct < 45.0 and long_count >= 4)
         or (cjk_pct < 15.0 and prose_lines >= 20)
     )
     return {
@@ -475,6 +652,7 @@ def translation_quality_report(workfolder: str) -> dict:
         "cjk_pct": cjk_pct,
         "prose_lines": prose_lines,
         "long_english_lines": long_count,
+        "very_long_english_lines": very_long_english,
         "samples": long_english[:8],
     }
 
@@ -923,6 +1101,44 @@ def patch_stray_text_word_commands(trans_tex_path):
     return total
 
 
+def patch_algorithmic_command_glue(trans_tex_path):
+    """Repair algorithmic commands glued to translated CJK text."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    total = 0
+
+    def _comment_replace(m):
+        nonlocal total
+        total += 1
+        return m.group('indent') + r'\Comment{' + m.group('body').strip() + '}'
+
+    new_text = _re.sub(
+        r'(?m)^(?P<indent>\s*)\\Comment(?P<body>[\u4e00-\u9fff][^{}\n]*)$',
+        _comment_replace,
+        text,
+    )
+
+    def _space_replace(m):
+        nonlocal total
+        total += 1
+        return '\\' + m.group(1) + ' '
+
+    new_text = _re.sub(
+        r'\\(State|Require|Ensure|Return)(?=[\u4e00-\u9fff])',
+        _space_replace,
+        new_text,
+    )
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_algorithmic_command_glue: 修复了 {total} 处 algorithmic 命令粘连", flush=True)
+    return total
+
+
 def patch_undefined_unique_ref_labels(trans_tex_path):
     """
     If a source has a ref to ``foo`` but only defines one longer label such as
@@ -1303,6 +1519,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_unbalanced_groups_in_tcolorboxes(trans_tex)
     patch_custom_macro_cjk_glue(trans_tex)
     patch_stray_text_word_commands(trans_tex)
+    patch_algorithmic_command_glue(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
     clean_latex_intermediates(workfolder)
     synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)

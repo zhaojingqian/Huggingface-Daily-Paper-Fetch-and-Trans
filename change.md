@@ -2,6 +2,33 @@
 
 ---
 
+## v4.17 — 2026-06-13
+
+### 全文翻译覆盖率优化
+
+#### 基于 gpt-academic 原始切分逻辑的安全扩展
+
+- **影响论文**：`2606.13679` 和 `2606.13681`。
+- **根因定位**：
+  - gpt-academic 原始 `LatexPaperSplit` 会先按 mask 将 title 前、短 begin/end 环境、figure/table/algorithm/equation 等区域标成 `PRESERVE`，再把 caption/abstract 等少量区域反向放回 `TRANSFORM`；
+  - 该策略能保护编译，但遇到正文被短环境包裹、表格单元里放长段自然语言、algorithmic 中有说明文字时，会把可翻译正文留在 preserve 区；
+  - `2606.13679` 的 abstract、Introduction、Related Work 存在大段正文未翻译；`2606.13681` 的附录正文、偏好演化表格、algorithmic 说明文字存在残留英文。
+- **修复**：
+  - 保留 gpt-academic 原始 splitter 作为第一层切分，不直接改写上游 mask 规则；
+  - 在原始 `PRESERVE` 节点上做二次安全拆分：普通正文行重新送入 GPT；`tabular/tabularx/longtable/array` 只拆出单元格文本，保留 `&`、行尾 `\\` 和 rule 命令；`algorithmic` 只拆出 `\State/\Require/\Ensure/\Comment/\For/\If` 的自然语言参数，保留 LaTeX 命令和括号；
+  - 翻译覆盖率门禁同步纳入表格长文本和 algorithmic 说明文字，但继续忽略 figure/equation/verbatim/listing/bibliography 等硬保护区域；
+  - fallback 增加 `algorithmic` 命令粘连修复，处理 `\Comment中文` 这类 GPT 翻译后丢失空格/括号的编译副作用。
+- **结果**：
+  - `2606.13679` 重跑 no-cache：chunk 从 45 扩到 130，正文 CJK 覆盖约 75.1%，`long_english_lines=0`，PDF 5,319,916 bytes，20 页；
+  - `2606.13681` 重跑 no-cache：chunk 从 197 扩到 609，正文 CJK 覆盖约 85.5%，`long_english_lines=0`，PDF 3,727,808 bytes，55 页；
+  - 两篇旧漏译位置抽查均已变为中文；保留 prompt/json/listing 示例中的英文原文，不强行翻译代码或示例协议。
+- **验证**：
+  - 两篇容器内 `merge_translate_zh.log` 无 undefined command、missing number、undefined citation/reference、rerun cross-reference 残留；
+  - `pdfinfo` 可读取两篇页数和文件体积；
+  - `data/daily/2026-06-12/index.json` 与 paper store JSON 中两篇 `pdf_status` 保持 `ok`。
+
+---
+
 ## v4.16 — 2026-06-13
 
 ### 全文翻译编译修复

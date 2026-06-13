@@ -76,6 +76,8 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 和交叉引用未收敛的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义宏与中文粘连、误生成的 `\textWord` 命令，以及唯一可推断的 label/ref 不一致。
 
+splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、bibliography 等硬保护区域。
+
 fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，从 tex 预生成 BibTeX 中间文件，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 字体映射时回退到容器已有字体。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。
 
 如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
