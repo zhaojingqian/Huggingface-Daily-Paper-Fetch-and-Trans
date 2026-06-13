@@ -515,6 +515,7 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
 
     checks = [
         ("undefined control sequence", r"Undefined control sequence"),
+        ("missing number", r"Missing number, treated as zero"),
         ("undefined citation", r"Citation .* undefined"),
         ("undefined reference", r"Reference .* undefined"),
         ("undefined references", r"There were undefined references"),
@@ -530,7 +531,8 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
             flush=True,
         )
         for m in _re.finditer(
-            r".{0,120}(Undefined control sequence|Citation .* undefined|"
+            r".{0,120}(Undefined control sequence|Missing number, treated as zero|"
+            r"Citation .* undefined|"
             r"Reference .* undefined|There were undefined references|"
             r"Label\(s\) may have changed|Rerun to get cross-references right|"
             r"Package natbib Warning: .* undefined).{0,160}",
@@ -968,6 +970,267 @@ def patch_undefined_unique_ref_labels(trans_tex_path):
     return total
 
 
+def _insert_before_begin_document(text: str, insertion: str) -> tuple[str, bool]:
+    marker = r'\begin{document}'
+    pos = text.find(marker)
+    if pos < 0:
+        return text, False
+    return text[:pos] + insertion + '\n' + text[pos:], True
+
+
+def patch_fontawesome_legacy_aliases(trans_tex_path):
+    """Provide common fontawesome5 aliases used by older templates."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    workfolder = os.path.dirname(trans_tex_path)
+    sibling_text = ''
+    for ext in ('*.sty', '*.cls'):
+        for path in glob.glob(os.path.join(workfolder, ext)):
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    sibling_text += f.read() + '\n'
+            except Exception:
+                pass
+
+    if r'\faGlobe' not in (text + sibling_text) or r'\newcommand{\faGlobe}' in text:
+        return 0
+
+    insertion = (
+        r'% paper-trans fallback for fontawesome5 legacy aliases' '\n'
+        r'\providecommand{\faGlobe}{\ifcsname faIcon\endcsname\faIcon{globe}\else\textcircled{G}\fi}'
+    )
+    new_text, ok = _insert_before_begin_document(text, insertion)
+    if not ok:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print("[driver] 🔧 patch_fontawesome_legacy_aliases: 补充 \\faGlobe fallback", flush=True)
+    return 1
+
+
+def clean_latex_intermediates(workfolder):
+    """Remove stale LaTeX/BibTeX intermediates before deterministic recompiles."""
+    removed = 0
+    for ext in ('aux', 'bbl', 'blg', 'log', 'out', 'toc', 'ptc', 'fls', 'fdb_latexmk'):
+        path = os.path.join(workfolder, f'merge_translate_zh.{ext}')
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except Exception:
+                pass
+    if removed:
+        print(f"[driver] 🧹 clean_latex_intermediates: 清理了 {removed} 个旧中间文件", flush=True)
+    return removed
+
+
+def synthesize_bbl_from_tex(workfolder, trans_tex_path):
+    """Create a minimal aux from citation commands and run BibTeX before XeLaTeX."""
+    import re as _re
+    import subprocess as _sp
+
+    with open(trans_tex_path, encoding='utf-8', errors='replace') as f:
+        text = f.read()
+
+    bibdata = _re.findall(r'\\bibliography\{([^{}]+)\}', text)
+    if not bibdata:
+        return False
+    bibstyle = _re.findall(r'\\bibliographystyle\{([^{}]+)\}', text)
+    style = bibstyle[-1] if bibstyle else 'plainnat'
+    data = bibdata[-1]
+
+    cite_re = _re.compile(
+        r'\\(?:citep|citet|citealt|citeauthor|citeyearpar|cite)'
+        r'(?:\[[^\]]*\]){0,2}\{([^{}]+)\}'
+    )
+    keys: list[str] = []
+    seen = set()
+    for m in cite_re.finditer(text):
+        for key in m.group(1).split(','):
+            key = key.strip()
+            if key and key not in seen:
+                keys.append(key)
+                seen.add(key)
+    if not keys:
+        return False
+
+    aux_path = os.path.join(workfolder, 'merge_translate_zh.aux')
+    with open(aux_path, 'w', encoding='utf-8') as f:
+        f.write('\\relax\n')
+        for key in keys:
+            f.write('\\citation{' + key + '}\n')
+        f.write('\\bibstyle{' + style + '}\n')
+        f.write('\\bibdata{' + data + '}\n')
+
+    r = _sp.run(
+        ['bibtex', 'merge_translate_zh'],
+        cwd=workfolder, timeout=120,
+        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+    )
+    bbl_path = os.path.join(workfolder, 'merge_translate_zh.bbl')
+    ok = r.returncode == 0 and os.path.exists(bbl_path) and os.path.getsize(bbl_path) > 0
+    if ok:
+        print(f"[driver] 🔧 synthesize_bbl_from_tex: 预生成 bbl ({len(keys)} citations)", flush=True)
+    return ok
+
+
+def patch_enumitem_for_optional_lists(trans_tex_path):
+    """Load enumitem when translated/source text uses itemize/enumerate options."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    if r'\usepackage{enumitem}' in text or r'\usepackage[shortlabels]{enumitem}' in text:
+        return 0
+    if not _re.search(r'\\begin\{(?:itemize|enumerate|description)\}\[[^\]]+\]', text):
+        return 0
+
+    new_text, ok = _insert_before_begin_document(
+        text,
+        r'% paper-trans fallback for optional list arguments' '\n' r'\usepackage{enumitem}',
+    )
+    if not ok:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print("[driver] 🔧 patch_enumitem_for_optional_lists: 补充 enumitem", flush=True)
+    return 1
+
+
+def patch_microtype_for_xelatex(trans_tex_path):
+    """Disable microtype features that can break XeLaTeX with non-native fonts."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    if 'microtype' not in text:
+        return 0
+
+    total = 0
+    option_line = r'\PassOptionsToPackage{protrusion=false,expansion=false,tracking=false}{microtype}'
+    if option_line not in text:
+        docclass = _re.search(r'\\documentclass(?:\[[^\]]*\])?\{[^{}]+\}', text)
+        if docclass:
+            text = text[:docclass.start()] + option_line + '\n' + text[docclass.start():]
+            total += 1
+
+    package_re = _re.compile(r'(?m)^(\s*)\\usepackage(?:\[[^\]]*\])?\{microtype\}\s*$')
+    text, removed = package_re.subn(r'\1% paper-trans: microtype disabled for XeLaTeX', text)
+    total += removed
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        print(f"[driver] 🔧 patch_microtype_for_xelatex: 禁用 {total} 处 microtype 高风险特性", flush=True)
+    return total
+
+
+def patch_local_microtype_loads(workfolder):
+    """Disable local class/style microtype loads that force pdfTeX-only options."""
+    import re as _re
+
+    total = 0
+    pattern = _re.compile(r'\\(?:AtEndOfClass\{)?\\RequirePackage(?:\[[^\]]*\])?\{microtype\}\}?')
+    for path in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+        if 'microtype' not in text:
+            continue
+        new_text, count = pattern.subn('% paper-trans: local microtype load disabled for XeLaTeX', text)
+        if count:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            total += count
+    if total:
+        print(f"[driver] 🔧 patch_local_microtype_loads: 禁用 {total} 处本地 class/style microtype 加载", flush=True)
+    return total
+
+
+def patch_local_nvidia_font_maps(workfolder):
+    """Disable bundled NVIDIA Sans pdfmap hooks when their TFM files are absent."""
+    import re as _re
+    import subprocess as _sp
+
+    try:
+        tfm = _sp.run(
+            ['kpsewhich', 'NVIDIASans_It.tfm'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if tfm.returncode == 0 and tfm.stdout.strip():
+            return 0
+    except Exception:
+        pass
+
+    total = 0
+    patterns = [
+        _re.compile(r'(?m)^(?P<indent>\s*)\\input\{NVIDIA-Sans-Font-TTF/t1NVIDIASans\.fd\}\s*$'),
+        _re.compile(r'(?m)^(?P<indent>\s*)\\pdfmapline\{\+NVIDIASans_[^{}]+\}\s*$'),
+        _re.compile(r'(?m)^(?P<indent>\s*)\\renewcommand\{\\rmdefault\}\{NVIDIASans\}\s*$'),
+    ]
+    for path in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+        if 'NVIDIASans' not in text:
+            continue
+
+        def _comment(m):
+            return m.group('indent') + '% paper-trans: disabled unavailable NVIDIASans font map'
+
+        new_text = text
+        count = 0
+        for pattern in patterns:
+            new_text, n = pattern.subn(_comment, new_text)
+            count += n
+        if count:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            total += count
+    if total:
+        print(f"[driver] 🔧 patch_local_nvidia_font_maps: 禁用 {total} 处不可用 NVIDIASans 映射", flush=True)
+    return total
+
+
+def patch_long_citation_lists(trans_tex_path, max_keys=3):
+    """
+    Split very long citation lists. Some templates/engines can write truncated
+    \\citation lines to .aux, which makes BibTeX skip \\bibdata and leaves an
+    empty .bbl. Shorter adjacent citation commands avoid that aux corruption.
+    """
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    cite_re = _re.compile(r'\\(citep|citet|citealt|citeauthor|citeyearpar|cite)\{([^{}]+)\}')
+    total = 0
+
+    def _replace(m):
+        nonlocal total
+        keys = [k.strip() for k in m.group(2).split(',') if k.strip()]
+        if len(keys) <= max_keys:
+            return m.group(0)
+        total += 1
+        cmd = m.group(1)
+        chunks = [keys[i:i + max_keys] for i in range(0, len(keys), max_keys)]
+        return ''.join('\\' + cmd + '{' + ','.join(chunk) + '}' for chunk in chunks)
+
+    new_text = cite_re.sub(_replace, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_long_citation_lists: 拆分了 {total} 个超长 citation", flush=True)
+    return total
+
+
 def patch_verbatim_envs(trans_tex_path, orig_tex_path):
     """
     将翻译后的 tex 文件中所有 verbatim 类环境（tcblisting / lstlisting / verbatim）
@@ -1029,20 +1292,33 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_body_endinput(trans_tex)
     fix_label_ref_emdash(trans_tex)
     patch_tcolorbox_small_groups(trans_tex)
+    patch_fontawesome_legacy_aliases(trans_tex)
+    patch_enumitem_for_optional_lists(trans_tex)
+    patch_microtype_for_xelatex(trans_tex)
+    patch_local_microtype_loads(workfolder)
+    patch_local_nvidia_font_maps(workfolder)
+    patch_long_citation_lists(trans_tex)
     n = patch_verbatim_envs(trans_tex, orig_tex)
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
     patch_unbalanced_groups_in_tcolorboxes(trans_tex)
     patch_custom_macro_cjk_glue(trans_tex)
     patch_stray_text_word_commands(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
+    clean_latex_intermediates(workfolder)
+    synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
 
     try:
-        for cmd in (
+        cmds = [
+            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+        ] if synthesized_bbl else [
             ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
             ['bibtex', 'merge_translate_zh'],
             ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
             ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-        ):
+        ]
+        for cmd in cmds:
             _sp.run(
                 cmd, cwd=workfolder, timeout=300,
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,

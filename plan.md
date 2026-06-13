@@ -155,6 +155,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 增加 `merge_translate_zh.tex` 翻译覆盖率门禁，拒绝大段英文漏译 PDF。
 - [x] 增加编译健康门禁和多轮 BibTeX/XeLaTeX fallback，拒绝 undefined command/cite/ref 残留。
 - [x] 增加自定义宏中文粘连、误生成 `\textWord`、唯一前缀 label/ref 的自动修补。
+- [x] 增加旧式 fontawesome alias、XeLaTeX microtype、本地 `NVIDIASans` 字体映射和 BibTeX 中间文件恢复补丁，修复 2026-06-12 daily 两篇失败 PDF。
 
 ### Phase D — 运维体验
 

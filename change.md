@@ -2,6 +2,34 @@
 
 ---
 
+## v4.16 — 2026-06-13
+
+### 全文翻译编译修复
+
+#### 2026-06-12 daily 两篇失败 PDF 恢复
+
+- **影响论文**：`2606.13681` 和 `2606.13673`。
+- **根因定位**：
+  - `2606.13681` 使用的 NeurIPS 模板引用旧式 `\faGlobe`，但当前 `fontawesome5` 没有该别名；同时存在 XeLaTeX 下 `microtype` 非兼容特性和带可选参数的 list 环境；
+  - `2606.13673` 的 NVIDIA technical report 模板硬编码 `NVIDIASans_*` T1/pdfmap 字体，但容器和源码包均缺少对应 TFM/字体映射，`xdvipdfmx` 在第 5 页报 `Unable to find TFM file "NVIDIASans_It"`，只留下 42KB 半截 PDF；
+  - `2606.13673` 后续看到的 `File ended while scanning use of \citation` 是 LaTeX 中途崩溃后写坏 `.aux` 的副作用，不是中文翻译内容损坏。
+- **修复**：
+  - `full_translate_driver.py` 增加 `\faGlobe` legacy alias fallback；
+  - 对 XeLaTeX 下高风险 `microtype` 显式加载进行禁用，并扫描本地 `.cls/.sty` 中的 `\RequirePackage{microtype}`；
+  - 对含可选参数的 `itemize/enumerate/description` 自动补 `enumitem`；
+  - 在 fallback 重编译前清理旧 `.aux/.bbl/.log` 等中间文件，并从 `merge_translate_zh.tex` 的 citation/bibliography 信息预生成 `.bbl`；
+  - 新增 NVIDIA Sans 本地模板补丁：当 `kpsewhich NVIDIASans_It.tfm` 不存在时，注释本地 class/style 中的 `NVIDIASans` `\input`、`\pdfmapline` 和 `\rmdefault` 覆盖，让模板回退到容器已有字体。
+- **结果**：
+  - `2606.13681_zh.pdf` 重新生成成功：3,677,117 bytes，56 页，正文 CJK 覆盖约 86.4%；
+  - `2606.13673_zh.pdf` 重新生成成功：1,560,088 bytes，27 页，正文 CJK 覆盖约 82.3%；
+  - `data/daily/2026-06-12/index.json` 与两篇 paper store JSON 的 `pdf_status` 已更新为 `ok`。
+- **验证**：
+  - 两篇 `translate_full.py --keep-translation` 均返回 success；
+  - 两篇容器内编译健康检查均通过，无 undefined command/citation/reference 残留；
+  - `pdfinfo` 可读取页数和文件体积，确认不再是半截小 PDF。
+
+---
+
 ## v4.15 — 2026-06-12
 
 ### PDF 查看页缓存修复
