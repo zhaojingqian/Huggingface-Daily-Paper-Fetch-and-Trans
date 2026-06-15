@@ -2,6 +2,38 @@
 
 ---
 
+## v4.18 — 2026-06-15
+
+### 全文翻译失败恢复
+
+#### 2026-06-14 daily `2606.09426` 中文 PDF 修复
+
+- **影响论文**：`2606.09426`，WeaveBench。
+- **根因定位**：
+  - 原始 gpt-academic splitter 对超长正文行和 cite 密集段落切分不够细，少数正文 chunk 被模型回显为英文；
+  - 论文定义了 `climode`、`guimode`、`failmode` 和 `trajact*` 轨迹环境，这些内容本质是代码/操作轨迹示例，应保持原样，但此前会被翻译或被质量门禁误判为漏译；
+  - `trajact*` 环境被模型改写后会生成 `trajaIMG` 等非法命令，导致 LaTeX 编译失败；
+  - arXiv 源码包包含可用的 `main.bbl`，但没有 `references_v2.bib`，旧 fallback 跑 BibTeX 后得到空 `merge_translate_zh.bbl`，继而触发 undefined citation；
+  - 失败缓存中还混入了模型生成的非原文残留，例如 “Please provide...” 和伪造的通用引言段落。
+- **修复**：
+  - 在保留 gpt-academic 原始 mask 的基础上，对超长普通正文行按句子边界继续拆分，降低长段英文回显概率；
+  - 将 `climode`、`guimode`、`failmode`、`trajactCLI`、`trajactGUI`、`trajactFAIL`、`trajactFAILpair` 作为硬保护环境，翻译前不拆入 GPT，质量门禁也不按正文检查；
+  - fallback 重编译时从原始 `merge.tex` 恢复上述 verbatim 类环境块，修复已损坏的旧翻译 tex；
+  - 当 BibTeX 不可用、缺 `.bib` 或生成空 `.bbl` 时，自动复用源码包中已有且包含 `\bibitem` 的 `.bbl`；
+  - 新增模型非原文残留清理，移除常见 “请提供/Please provide” 和伪造模板段落。
+  - `translate_full.py` 在同篇 PDF 成功生成后自动清理旧 `logs/pdf_errors/<arxiv_id>.log`，避免已恢复论文仍被旧失败日志误导。
+- **结果**：
+  - 使用 `gpt-academic-latex-slim` 对 `2606.09426` 复用翻译 tex 重编译成功；
+  - `data/papers/2606.09426_zh.pdf` 已刷新：6,009,381 bytes，34 页；
+  - `data/papers/2606.09426.json` 与 `data/daily/2026-06-14/index.json` 的 `pdf_status` 已更新为 `ok`。
+  - 旧失败诊断 `logs/pdf_errors/2606.09426.log` 已清理。
+- **验证**：
+  - 翻译覆盖率门禁通过：`cjk_pct=77.1%`，`long_english_lines=0`；
+  - 编译健康检查通过，最新容器内 `merge_translate_zh.log` 无 undefined command、undefined citation/reference、fatal error 残留；
+  - 当前 `merge_translate_zh.tex` 无 “Please provide”、 “请提供”、`lecun2015deep`、`ribeiro2016should` 等失败缓存残留。
+
+---
+
 ## v4.17 — 2026-06-13
 
 ### 全文翻译覆盖率优化

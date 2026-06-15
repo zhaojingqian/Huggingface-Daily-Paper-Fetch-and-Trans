@@ -78,9 +78,11 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、bibliography 等硬保护区域。
 
-fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，从 tex 预生成 BibTeX 中间文件，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 字体映射时回退到容器已有字体。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。
+对超长普通正文行，splitter 会按句子边界继续拆分，避免长段 cite 密集内容被模型整体回显成英文。`climode`、`guimode`、`failmode` 和 `trajact*` 这类 CLI/GUI 轨迹环境被视作硬保护环境：翻译时保持原文，质量门禁不把其中的代码、命令或操作轨迹当作漏译正文。
 
-如果 `logs/pdf_errors/<arxiv_id>.log` 中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
+fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，从 tex 预生成 BibTeX 中间文件，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 字体映射时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。
+
+`logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
 
 ### Web 服务
 

@@ -233,6 +233,8 @@ def _patch_latex_translation_splitter():
         "lstlisting", "verbatim", "Verbatim", "minted", "equation",
         "equation*", "align", "align*", "multline", "multline*", "gather",
         "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
+        "climode", "guimode", "failmode", "trajactCLI", "trajactGUI",
+        "trajactFAIL", "trajactFAILpair",
     }
     soft_text_envs = {
         "tabular", "tabular*", "tabularx", "longtable", "array",
@@ -292,10 +294,10 @@ def _patch_latex_translation_splitter():
     def _line_has_translatable_prose(line: str) -> bool:
         return _text_has_translatable_prose(line, min_letters=32, min_words=5)
 
-    def _append(nodes, text: str, preserve: bool):
+    def _append(nodes, text: str, preserve: bool, merge: bool = True):
         if not text:
             return
-        if nodes and nodes[-1].preserve == preserve:
+        if merge and nodes and nodes[-1].preserve == preserve:
             nodes[-1].string += text
         else:
             nodes.append(_Node(text, preserve=preserve))
@@ -416,6 +418,43 @@ def _patch_latex_translation_splitter():
                     env_stack.pop()
         return env_stack
 
+    def _split_long_transform_line(line: str):
+        if len(_rough_text(line)) < 420:
+            return [line]
+
+        parts = []
+        start = 0
+        brace_depth = 0
+        in_math = False
+        for idx, ch in enumerate(line):
+            prev = line[idx - 1] if idx else ""
+            if ch == "$" and prev != "\\":
+                in_math = not in_math
+            elif not in_math and ch == "{" and prev != "\\":
+                brace_depth += 1
+            elif not in_math and ch == "}" and prev != "\\" and brace_depth > 0:
+                brace_depth -= 1
+            if brace_depth == 0 and not in_math and ch in ".;。；":
+                nxt = line[idx + 1] if idx + 1 < len(line) else ""
+                if nxt.isspace() and idx + 1 - start >= 180:
+                    end = idx + 1
+                    while end < len(line) and line[end].isspace() and line[end] != "\n":
+                        end += 1
+                    parts.append(line[start:end])
+                    start = end
+        if start < len(line):
+            parts.append(line[start:])
+        return parts if len(parts) > 1 else [line]
+
+    def _split_transform_text(text: str):
+        parts = []
+        for line in text.splitlines(keepends=True):
+            if _line_has_translatable_prose(line):
+                parts.extend(_split_long_transform_line(line))
+            else:
+                parts.append(line)
+        return parts
+
     def _split_preserved_text(text: str, state: dict):
         nodes = []
         for line in text.splitlines(keepends=True):
@@ -474,7 +513,8 @@ def _patch_latex_translation_splitter():
         state = {"in_document": False, "env_stack": []}
         for node in self.nodes:
             if not node.preserve:
-                _append(expanded, node.string, False)
+                for part in _split_transform_text(node.string):
+                    _append(expanded, part, False, merge=False)
                 if r"\begin{document}" in node.string:
                     state["in_document"] = True
                 if r"\end{document}" in node.string:
@@ -551,6 +591,8 @@ def translation_quality_report(workfolder: str) -> dict:
         "lstlisting", "verbatim", "Verbatim", "minted", "equation",
         "equation*", "align", "align*", "multline", "multline*", "gather",
         "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
+        "climode", "guimode", "failmode", "trajactCLI", "trajactGUI",
+        "trajactFAIL", "trajactFAILpair",
     }
     soft_text_envs = {
         "tabular", "tabular*", "tabularx", "longtable", "array",
@@ -1139,6 +1181,36 @@ def patch_algorithmic_command_glue(trans_tex_path):
     return total
 
 
+def patch_llm_translation_artifacts(trans_tex_path):
+    """Remove common LLM refusal/request artifacts inserted into translated TeX."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    new_text = text
+    patterns = [
+        r'\n\\section\{引言\}\s*\n\s*在过去的几十年中.*?我们希望本工作能够为相关领域提供新的思路和工具。\s*',
+        r'Please provide the section from the English academic paper that you would like me to translate into Chinese\.',
+        r'Please provide[^。\n]*?(?:Chinese|中文)[^。\n]*(?:\.|。)?',
+        r'请提供您需要翻译的英文学术论文部分内容。',
+        r'请提供需要翻译的英文学术论文部分内容。',
+        r'请提供您需要翻译的英文学术论文部分。',
+        r'请提供[^。\n]*?(?:论文|文本)[^。\n]*?(?:。|$)',
+        r'抱歉，您提供的文本仅包含[^。\n]*?(?:。|$)',
+    ]
+    total = 0
+    for pattern in patterns:
+        new_text, count = _re.subn(pattern, '', new_text, flags=_re.DOTALL)
+        total += count
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_llm_translation_artifacts: 清理了 {total} 处非原文翻译残留", flush=True)
+    return total
+
+
 def patch_undefined_unique_ref_labels(trans_tex_path):
     """
     If a source has a ref to ``foo`` but only defines one longer label such as
@@ -1249,9 +1321,37 @@ def synthesize_bbl_from_tex(workfolder, trans_tex_path):
     with open(trans_tex_path, encoding='utf-8', errors='replace') as f:
         text = f.read()
 
+    bbl_path = os.path.join(workfolder, 'merge_translate_zh.bbl')
+
+    def _copy_existing_bbl(reason: str) -> bool:
+        candidates: list[str] = []
+        for m in _re.finditer(r'\\(?:input|include)\{([^{}]+\.bbl)\}', text):
+            p = os.path.join(workfolder, m.group(1))
+            if os.path.exists(p):
+                candidates.append(p)
+        for p in glob.glob(os.path.join(workfolder, '*.bbl')):
+            if os.path.basename(p) != 'merge_translate_zh.bbl':
+                candidates.append(p)
+        candidates = sorted(set(candidates), key=lambda p: os.path.getsize(p), reverse=True)
+        for src in candidates:
+            try:
+                content = open(src, encoding='utf-8', errors='replace').read()
+            except Exception:
+                continue
+            if r'\bibitem' not in content:
+                continue
+            shutil.copy2(src, bbl_path)
+            print(
+                f"[driver] 🔧 synthesize_bbl_from_tex: 复用现有 bbl "
+                f"({os.path.basename(src)}, {reason})",
+                flush=True,
+            )
+            return True
+        return False
+
     bibdata = _re.findall(r'\\bibliography\{([^{}]+)\}', text)
     if not bibdata:
-        return False
+        return _copy_existing_bbl('no bibliography command')
     bibstyle = _re.findall(r'\\bibliographystyle\{([^{}]+)\}', text)
     style = bibstyle[-1] if bibstyle else 'plainnat'
     data = bibdata[-1]
@@ -1284,10 +1384,11 @@ def synthesize_bbl_from_tex(workfolder, trans_tex_path):
         cwd=workfolder, timeout=120,
         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
     )
-    bbl_path = os.path.join(workfolder, 'merge_translate_zh.bbl')
     ok = r.returncode == 0 and os.path.exists(bbl_path) and os.path.getsize(bbl_path) > 0
     if ok:
         print(f"[driver] 🔧 synthesize_bbl_from_tex: 预生成 bbl ({len(keys)} citations)", flush=True)
+    else:
+        ok = _copy_existing_bbl('bibtex unavailable')
     return ok
 
 
@@ -1460,6 +1561,8 @@ def patch_verbatim_envs(trans_tex_path, orig_tex_path):
 
     VERBATIM_ENVS = [
         'tcblisting', 'lstlisting', 'verbatim', 'Verbatim', 'minted',
+        'climode', 'guimode', 'failmode',
+        'trajactCLI', 'trajactGUI', 'trajactFAIL', 'trajactFAILpair',
         *_discover_tcb_listing_envs(orig),
         *_discover_tcb_listing_envs(trans),
     ]
@@ -1520,6 +1623,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_custom_macro_cjk_glue(trans_tex)
     patch_stray_text_word_commands(trans_tex)
     patch_algorithmic_command_glue(trans_tex)
+    patch_llm_translation_artifacts(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
     clean_latex_intermediates(workfolder)
     synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)

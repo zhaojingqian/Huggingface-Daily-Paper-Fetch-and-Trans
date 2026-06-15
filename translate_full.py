@@ -325,6 +325,21 @@ def _write_error_log(arxiv_id: str, stdout: str):
     print(f"📋 错误诊断已写入: {log_path}", flush=True)
 
 
+def _clear_error_log(arxiv_id: str):
+    """Remove stale failure diagnosis after the same paper succeeds."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(base_dir, "logs", "pdf_errors", f"{arxiv_id}.log")
+    if not os.path.exists(log_path):
+        return False
+    try:
+        os.remove(log_path)
+        print(f"🧹 已清理旧错误诊断: {log_path}", flush=True)
+        return True
+    except OSError as e:
+        print(f"⚠️  旧错误诊断清理失败: {log_path} ({e})", flush=True)
+        return False
+
+
 def translate_full(arxiv_id: str, output_dir: str,
                    no_cache: bool = False, timeout: int = 3600,
                    keep_translation: bool = False) -> dict:
@@ -395,6 +410,7 @@ def translate_full(arxiv_id: str, output_dir: str,
                 result['pdf_path'] = local_pdf
                 size_mb = os.path.getsize(local_pdf) / 1024 / 1024
                 print(f"✅ PDF 翻译成功: {local_pdf} ({size_mb:.2f} MB)", flush=True)
+                _clear_error_log(arxiv_id)
             else:
                 result['error'] = "PDF 复制成功但文件过小或为空"
                 print(f"❌ {result['error']}", flush=True)
