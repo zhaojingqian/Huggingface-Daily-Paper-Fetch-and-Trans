@@ -19,16 +19,21 @@ from pathlib import Path
 
 DEFAULT_CONTAINER_NAME = "gpt-academic-latex"
 CONTAINER_NAME  = os.environ.get("GPT_ACADEMIC_CONTAINER", DEFAULT_CONTAINER_NAME)
-DRIVER_SCRIPT   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "full_translate_driver.py")
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
+DRIVER_SUPPORT_FILES = [
+    DRIVER_SCRIPT,
+    os.path.join(BASE_DIR, "latex_translation_filters.py"),
+]
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
 # 宿主机侧 tex 备份目录（容器重启后可从这里恢复翻译缓存，避免重复调 GPT）
 TEX_BACKUP_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "data", "tex_backup")
+TEX_FAILED_BACKUP_DIR = os.path.join(BASE_DIR, "data", "tex_backup_failed")
 
 
-def _backup_tex_from_container(arxiv_id: str) -> bool:
+def _backup_tex_from_container(arxiv_id: str, failed: bool = False) -> bool:
     """
     将容器内已翻译的 merge_translate_zh.tex 备份到宿主机 TEX_BACKUP_DIR。
     容器重启后可通过 _restore_tex_to_container 恢复，避免重新调用 GPT 翻译。
@@ -42,15 +47,17 @@ def _backup_tex_from_container(arxiv_id: str) -> bool:
     )
     if check.returncode != 0:
         return False
-    os.makedirs(TEX_BACKUP_DIR, exist_ok=True)
-    local_tex = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
+    backup_dir = TEX_FAILED_BACKUP_DIR if failed else TEX_BACKUP_DIR
+    os.makedirs(backup_dir, exist_ok=True)
+    local_tex = os.path.join(backup_dir, f"{arxiv_id}_merge_translate_zh.tex")
     r = subprocess.run(
         ["docker", "cp", f"{CONTAINER_NAME}:{container_tex}", local_tex],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     ok = r.returncode == 0 and os.path.exists(local_tex) and os.path.getsize(local_tex) > 0
     if ok:
-        print(f"💾 已备份翻译 tex 到宿主机: {local_tex}", flush=True)
+        label = "失败现场 tex" if failed else "翻译 tex"
+        print(f"💾 已备份{label} 到宿主机: {local_tex}", flush=True)
     return ok
 
 
@@ -102,13 +109,23 @@ def check_container():
 
 
 def copy_driver_to_container():
-    """将驱动脚本复制进容器"""
-    r = subprocess.run(
-        ["docker", "cp", DRIVER_SCRIPT,
-         f"{CONTAINER_NAME}:/tmp/full_translate_driver.py"],
+    """将驱动脚本及其纯 Python 支持模块复制进容器"""
+    copied = []
+    for src in DRIVER_SUPPORT_FILES:
+        name = os.path.basename(src)
+        dst = f"{CONTAINER_NAME}:/tmp/{name}"
+        r = subprocess.run(
+            ["docker", "cp", src, dst],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if r.returncode != 0:
+            return False
+        copied.append(f"/tmp/{name}")
+    chmod = subprocess.run(
+        ["docker", "exec", "-u", "root", CONTAINER_NAME, "chmod", "0644", *copied],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    return r.returncode == 0
+    return chmod.returncode == 0
 
 
 def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
@@ -340,6 +357,20 @@ def _clear_error_log(arxiv_id: str):
         return False
 
 
+def _clear_failed_tex_backup(arxiv_id: str):
+    """Remove stale failed-run tex backup after a successful PDF build."""
+    path = os.path.join(TEX_FAILED_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
+    if not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        print(f"🧹 已清理旧失败现场 tex: {path}", flush=True)
+        return True
+    except OSError as e:
+        print(f"⚠️  旧失败现场 tex 清理失败: {path} ({e})", flush=True)
+        return False
+
+
 def translate_full(arxiv_id: str, output_dir: str,
                    no_cache: bool = False, timeout: int = 3600,
                    keep_translation: bool = False) -> dict:
@@ -380,12 +411,10 @@ def translate_full(arxiv_id: str, output_dir: str,
     elapsed = time.time() - t0
     print(f"⏱️  耗时: {elapsed:.0f}s", flush=True)
 
-    # 无论成功失败，只要容器内有翻译 tex 就备份到宿主机（容器重启后可复用）
-    _backup_tex_from_container(arxiv_id)
-
     if rc == -1:
         result['error'] = f"超时 ({timeout}s)"
         print(f"❌ {result['error']}", flush=True)
+        _backup_tex_from_container(arxiv_id, failed=True)
         return result
 
     # 4. 解析输出
@@ -398,6 +427,7 @@ def translate_full(arxiv_id: str, output_dir: str,
     if kind == "error" or kind == "unknown":
         result['error'] = container_path or "翻译失败（驱动所有重试均未生成 PDF）"
         print(f"❌ {result['error']}", flush=True)
+        _backup_tex_from_container(arxiv_id, failed=True)
         _write_error_log(arxiv_id, stdout)
         return result
 
@@ -410,13 +440,17 @@ def translate_full(arxiv_id: str, output_dir: str,
                 result['pdf_path'] = local_pdf
                 size_mb = os.path.getsize(local_pdf) / 1024 / 1024
                 print(f"✅ PDF 翻译成功: {local_pdf} ({size_mb:.2f} MB)", flush=True)
+                _backup_tex_from_container(arxiv_id)
                 _clear_error_log(arxiv_id)
+                _clear_failed_tex_backup(arxiv_id)
             else:
                 result['error'] = "PDF 复制成功但文件过小或为空"
                 print(f"❌ {result['error']}", flush=True)
+                _backup_tex_from_container(arxiv_id, failed=True)
         else:
             result['error'] = f"无法从容器复制 PDF: {container_path}"
             print(f"❌ {result['error']}", flush=True)
+            _backup_tex_from_container(arxiv_id, failed=True)
 
     return result
 

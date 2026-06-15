@@ -109,8 +109,9 @@ paper_card() / detail page / bookmark page
 ```bash
 python3 -m py_compile \
   web_server.py translate_arxiv.py translate_full.py \
-  full_translate_driver.py run_papers.py run_repair.py \
-  tests/test_web_server_contract.py
+  full_translate_driver.py latex_translation_filters.py \
+  run_papers.py run_repair.py \
+  tests/test_web_server_contract.py tests/test_latex_translation_filters.py
 
 python3 -m unittest discover -s tests -v
 /root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v
@@ -158,6 +159,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 增加旧式 fontawesome alias、XeLaTeX microtype、本地 `NVIDIASans` 字体映射和 BibTeX 中间文件恢复补丁，修复 2026-06-12 daily 两篇失败 PDF。
 - [x] 基于 gpt-academic 原始 splitter 增加 preserve 节点二次安全拆分，覆盖表格单元格和 algorithmic 说明文字，同时保留硬保护环境不翻译。
 - [x] 增加超长正文句子级拆分、CLI/GUI 轨迹环境硬保护、verbatim 环境恢复和缺 `.bib` 时复用既有 `.bbl`，修复 2026-06-14 daily `2606.09426` 失败 PDF。
+- [x] 抽象 `latex_translation_filters.py`，统一 splitter、质量门禁和 fallback 的环境筛选/过滤条件，并支持环境变量扩展。
 
 ### Phase D — 运维体验
 

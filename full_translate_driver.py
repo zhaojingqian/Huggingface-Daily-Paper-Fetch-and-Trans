@@ -5,6 +5,7 @@
 输出: RESULT:SUCCESS:<pdf_path>  或  RESULT:ERROR:<msg>
 """
 import sys, os, glob, time, shutil, tarfile
+import latex_translation_filters as _ltf
 
 sys.path.insert(0, '/gpt')
 os.chdir('/gpt')
@@ -227,21 +228,7 @@ def _patch_latex_translation_splitter():
         return
 
     _orig_split = _la.LatexPaperSplit.split
-    protected_envs = {
-        "figure", "figure*", "table", "table*", "tabular", "tabular*",
-        "tabularx", "longtable", "algorithm", "algorithmic", "algorithm2e",
-        "lstlisting", "verbatim", "Verbatim", "minted", "equation",
-        "equation*", "align", "align*", "multline", "multline*", "gather",
-        "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
-        "climode", "guimode", "failmode", "trajactCLI", "trajactGUI",
-        "trajactFAIL", "trajactFAILpair",
-    }
-    soft_text_envs = {
-        "tabular", "tabular*", "tabularx", "longtable", "array",
-        "algorithmic", "algorithmic*", "algorithm2e",
-    }
-    hard_protected_envs = protected_envs - soft_text_envs
-    tracked_envs = protected_envs | soft_text_envs | {"center"}
+    tracked_static_envs = _ltf.tracked_envs() | {"center"}
     command_only_re = _re.compile(
         r"^\\(?:includegraphics|label|ref|eqref|cite|citep|citet|citealt|"
         r"bibliography|bibliographystyle|toprule|midrule|bottomrule|hline|"
@@ -266,10 +253,13 @@ def _patch_latex_translation_splitter():
                 r"(?:\[[^\]]*\])?(?:\{[^{}]*\})?\{([^{}]*)\}",
                 r" \1 ",
                 rough,
-            )
+        )
         rough = latex_cmd_re.sub(" ", rough)
         rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
         return rough
+
+    def _env_is_tracked(env: str | None) -> bool:
+        return env == "center" or _ltf.is_tracked_env(env)
 
     def _text_has_translatable_prose(text: str, min_letters=32, min_words=5) -> bool:
         stripped = text.strip()
@@ -407,10 +397,10 @@ def _patch_latex_translation_splitter():
         begins = _re.findall(r"\\begin\{([^}]+)\}", line)
         ends = _re.findall(r"\\end\{([^}]+)\}", line)
         for env in begins:
-            if env in tracked_envs:
+            if _env_is_tracked(env):
                 env_stack.append(env)
         for env in ends:
-            if env in tracked_envs:
+            if _env_is_tracked(env):
                 if env in env_stack:
                     pos = len(env_stack) - 1 - env_stack[::-1].index(env)
                     env_stack = env_stack[:pos]
@@ -470,11 +460,11 @@ def _patch_latex_translation_splitter():
                 continue
 
             active_env = state["env_stack"][-1] if state["env_stack"] else None
-            in_soft_env = active_env in soft_text_envs
-            hard_active = any(env in hard_protected_envs for env in state["env_stack"])
+            in_soft_env = _ltf.is_soft_text_env(active_env)
+            hard_active = any(_ltf.is_hard_protected_env(env) for env in state["env_stack"])
             begins = _re.findall(r"\\begin\{([^}]+)\}", line)
             ends = _re.findall(r"\\end\{([^}]+)\}", line)
-            structural_line = any(env in tracked_envs for env in begins + ends)
+            structural_line = any(_env_is_tracked(env) for env in begins + ends)
 
             if state["in_document"] and in_soft_env and not structural_line:
                 if active_env.startswith("tabular") or active_env in {"longtable", "array"}:
@@ -551,7 +541,8 @@ def _patch_latex_translation_splitter():
 
     _la.LatexPaperSplit.split = _patched_split
     _la.LatexPaperSplit._paper_trans_split_patch = True
-    print("[driver] ✅ LatexPaperSplit 已 patch（普通正文保守扩展翻译）", flush=True)
+    dynamic_note = " + dynamic env policy" if tracked_static_envs else ""
+    print(f"[driver] ✅ LatexPaperSplit 已 patch（普通正文保守扩展翻译{dynamic_note}）", flush=True)
 
 
 _patch_latex_translation_splitter()
@@ -585,21 +576,6 @@ def translation_quality_report(workfolder: str) -> dict:
     if not os.path.exists(trans_tex):
         return {"ok": False, "reason": "missing merge_translate_zh.tex"}
 
-    protected_envs = {
-        "figure", "figure*", "table", "table*", "tabular", "tabular*",
-        "tabularx", "longtable", "algorithm", "algorithmic", "algorithm2e",
-        "lstlisting", "verbatim", "Verbatim", "minted", "equation",
-        "equation*", "align", "align*", "multline", "multline*", "gather",
-        "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
-        "climode", "guimode", "failmode", "trajactCLI", "trajactGUI",
-        "trajactFAIL", "trajactFAILpair",
-    }
-    soft_text_envs = {
-        "tabular", "tabular*", "tabularx", "longtable", "array",
-        "algorithmic", "algorithmic*", "algorithm2e",
-    }
-    hard_protected_envs = protected_envs - soft_text_envs
-    tracked_envs = protected_envs | soft_text_envs
     latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
     inline_math_re = _re.compile(r"\$[^$]*\$")
 
@@ -622,6 +598,9 @@ def translation_quality_report(workfolder: str) -> dict:
         rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
         return rough
 
+    def _env_is_tracked(env: str | None) -> bool:
+        return _ltf.is_tracked_env(env)
+
     with open(trans_tex, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
 
@@ -643,9 +622,9 @@ def translation_quality_report(workfolder: str) -> dict:
         begins = _re.findall(r"\\begin\{([^}]+)\}", line)
         ends = _re.findall(r"\\end\{([^}]+)\}", line)
         active_env = env_stack[-1] if env_stack else None
-        in_soft_env = active_env in soft_text_envs
-        hard_active = any(env in hard_protected_envs for env in env_stack)
-        structural_line = any(env in tracked_envs for env in begins + ends)
+        in_soft_env = _ltf.is_soft_text_env(active_env)
+        hard_active = any(_ltf.is_hard_protected_env(env) for env in env_stack)
+        structural_line = any(_env_is_tracked(env) for env in begins + ends)
         line_protected = (
             (hard_active and not in_soft_env)
             or structural_line
@@ -666,10 +645,10 @@ def translation_quality_report(workfolder: str) -> dict:
                 very_long_english += 1
 
         for env in begins:
-            if env in tracked_envs:
+            if _env_is_tracked(env):
                 env_stack.append(env)
         for env in ends:
-            if env in tracked_envs:
+            if _env_is_tracked(env):
                 if env in env_stack:
                     pos = len(env_stack) - 1 - env_stack[::-1].index(env)
                     env_stack = env_stack[:pos]
@@ -1183,26 +1162,10 @@ def patch_algorithmic_command_glue(trans_tex_path):
 
 def patch_llm_translation_artifacts(trans_tex_path):
     """Remove common LLM refusal/request artifacts inserted into translated TeX."""
-    import re as _re
-
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
-    new_text = text
-    patterns = [
-        r'\n\\section\{引言\}\s*\n\s*在过去的几十年中.*?我们希望本工作能够为相关领域提供新的思路和工具。\s*',
-        r'Please provide the section from the English academic paper that you would like me to translate into Chinese\.',
-        r'Please provide[^。\n]*?(?:Chinese|中文)[^。\n]*(?:\.|。)?',
-        r'请提供您需要翻译的英文学术论文部分内容。',
-        r'请提供需要翻译的英文学术论文部分内容。',
-        r'请提供您需要翻译的英文学术论文部分。',
-        r'请提供[^。\n]*?(?:论文|文本)[^。\n]*?(?:。|$)',
-        r'抱歉，您提供的文本仅包含[^。\n]*?(?:。|$)',
-    ]
-    total = 0
-    for pattern in patterns:
-        new_text, count = _re.subn(pattern, '', new_text, flags=_re.DOTALL)
-        total += count
+    new_text, total = _ltf.strip_llm_translation_artifacts(text)
 
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
@@ -1559,14 +1522,7 @@ def patch_verbatim_envs(trans_tex_path, orig_tex_path):
     with open(trans_tex_path, encoding='utf-8') as f:
         trans = f.read()
 
-    VERBATIM_ENVS = [
-        'tcblisting', 'lstlisting', 'verbatim', 'Verbatim', 'minted',
-        'climode', 'guimode', 'failmode',
-        'trajactCLI', 'trajactGUI', 'trajactFAIL', 'trajactFAILpair',
-        *_discover_tcb_listing_envs(orig),
-        *_discover_tcb_listing_envs(trans),
-    ]
-    VERBATIM_ENVS = sorted(set(VERBATIM_ENVS))
+    VERBATIM_ENVS = sorted(_ltf.verbatim_restore_envs(orig, trans))
 
     result = trans
     total = 0

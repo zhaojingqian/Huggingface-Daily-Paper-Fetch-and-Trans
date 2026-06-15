@@ -2,6 +2,28 @@
 
 ---
 
+## v4.19 — 2026-06-15
+
+### 翻译过滤策略抽象化
+
+#### LaTeX 环境保护与模型残留清理通用化
+
+- **背景**：`2606.09426` 修复中暴露出一类可复用规则：自定义 CLI/GUI 轨迹、prompt、code、trace、listing 环境应该统一保护；LLM “请提供/Please provide” 这类非原文残留也应该统一过滤，而不是每次在 splitter、质量门禁和 fallback 里分别硬编码。
+- **修复**：
+  - 新增 `latex_translation_filters.py`，统一维护 LaTeX 环境策略和 LLM artifact 过滤策略；
+  - splitter、`translation_quality_report()` 和 `patch_verbatim_envs()` 改为复用同一套策略；
+  - 自定义环境按命名特征动态识别：CLI/GUI、trace、trajectory、transcript、console、terminal、shell、prompt、code、log、listing、verbatim、minted 等环境默认硬保护；
+  - 区分“硬保护”和“可从原文恢复”：table/figure/equation 仍可保护编译，但 fallback 不再把它们恢复成英文；只有 verbatim/listing/trace/prompt/CLI/GUI 等环境参与原文块恢复；
+  - 支持通过 `PAPER_TRANS_EXTRA_HARD_ENVS`、`PAPER_TRANS_EXTRA_SOFT_ENVS`、`PAPER_TRANS_EXTRA_RESTORE_ENVS` 和 `PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS` 扩展过滤条件；
+  - `translate_full.py` 复制驱动时同步复制策略模块，并在容器内 chmod 为可读，避免 gptuser import 权限问题；
+  - tex 备份改为成功后才覆盖 `data/tex_backup/`，失败现场另存 `data/tex_backup_failed/`，避免质量门禁失败污染可复用翻译缓存；同篇 PDF 成功后自动清理旧失败现场 tex。
+- **验证**：
+  - 新增 `tests/test_latex_translation_filters.py`，覆盖动态环境识别、恢复环境筛选、环境变量扩展和 LLM 残留清理；
+  - `2606.09426` 使用 `gpt-academic-latex-slim` no-cache 完整重跑成功，`cjk_pct=74.1%`，`long_english_lines=1`，编译健康检查通过；
+  - `data/papers/2606.09426_zh.pdf` 已刷新，旧失败日志已自动清理，成功 tex 备份已恢复为干净版本。
+
+---
+
 ## v4.18 — 2026-06-15
 
 ### 全文翻译失败恢复
