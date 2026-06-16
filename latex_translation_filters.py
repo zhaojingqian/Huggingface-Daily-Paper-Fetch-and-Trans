@@ -35,6 +35,7 @@ DYNAMIC_HARD_ENV_RE = re.compile(
     r"(?i)("
     r"(?:^|[_-])(?:cli|gui|trace|traj|trajectory|transcript|console|terminal|"
     r"shell|prompt|code|log|verbatim|listing|minted)(?:$|[_-])"
+    r"|(?:prompt|code|trace|traj|trajectory|transcript|console|terminal|log)(?:box|block)$"
     r"|(?:cli|gui|fail)mode$"
     r"|^trajact"
     r"|(?:listing|verbatim|transcript|trajectory|trace|prompt|codeblock)$"
@@ -122,11 +123,35 @@ LLM_ARTIFACT_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(r"Please provide[^。\n]*?(?:Chinese|中文)[^。\n]*(?:\.|。)?", re.IGNORECASE),
+    re.compile(r"Please provide the text you would like me to translate\.", re.IGNORECASE),
+    re.compile(r"Please provide the text you want me to translate\.", re.IGNORECASE),
+    re.compile(r"Please provide the English text you want me to translate\.", re.IGNORECASE),
+    re.compile(r"Please provide the English section you want me to translate\.", re.IGNORECASE),
+    re.compile(r"\(?Please provide the section you want translated\.\)?", re.IGNORECASE),
+    re.compile(r"If you provide the section you want translated, I can proceed\.", re.IGNORECASE),
+    re.compile(r"If you provide the English academic paper section, I will translate it for you accordingly\.", re.IGNORECASE),
+    re.compile(r"Below is the translated text(?: in Chinese)?:?", re.IGNORECASE),
+    re.compile(r"Below is a section from an English academic paper, translated into Chinese(?:\.|:)?", re.IGNORECASE),
+    re.compile(r"Below is the translation of your provided English academic paper section into Chinese\.?", re.IGNORECASE),
+    re.compile(r"LaTeX commands and equations are kept unchanged\.?", re.IGNORECASE),
     re.compile(r"请提供您需要翻译的英文学术论文部分内容。"),
     re.compile(r"请提供需要翻译的英文学术论文部分内容。"),
     re.compile(r"请提供您需要翻译的英文学术论文部分。"),
+    re.compile(r"请提供您需要翻译的具体英文内容。"),
+    re.compile(r"请提供需要翻译的具体英文内容。"),
+    re.compile(r"请提供需要翻译的具体英文段落内容。"),
+    re.compile(r"好的，请提供需要翻译的英文部分。"),
     re.compile(r"请提供[^。\n]*?(?:论文|文本)[^。\n]*?(?:。|$)"),
+    re.compile(r"下面是一篇英文学术论文的部分内容，翻译成中文如下。请注意保留所有的latex命令不变："),
     re.compile(r"抱歉，您提供的文本仅包含[^。\n]*?(?:。|$)"),
+    re.compile(r"机器学习在过去几十年中取得了显著的进展\\cite\{smith2020advances\}。.*?\\cite\{lecun2015deep\}。", re.DOTALL),
+    re.compile(r"本文提出了一种基于深度学习的新方法，用于图像分类任务。.*?探索其在其他视觉任务中的应用潜力。", re.DOTALL),
+    re.compile(r"近年来，深度学习在图像识别、自然语言处理等领域取得了显著进展.*?实验部分将在多个公开数据集上验证所提方法的有效性，并与现有主流方法进行对比分析。", re.DOTALL),
+    re.compile(r"\\section\{引言\}\s*在过去的几十年里，机器学习已经成为人工智能领域的核心方法之一.*?提出若干有待解决的挑战。", re.DOTALL),
+    re.compile(r"\\section\{相关工作\}\s*近年来，深度学习在图像识别、自然语言处理等领域取得了显著进展.*?半监督分类的准确率。", re.DOTALL),
+    re.compile(r"在现代计算机科学的发展过程中，机器学习技术得到了广泛的应用。.*?\\cite\{mnih2015human\}。", re.DOTALL),
+    re.compile(r"近年来，迁移学习作为一种有效的方法被提出.*?\\cite\{mnih2015human\}。", re.DOTALL),
+    re.compile(r"为了解决数据不足的问题，许多研究关注于半监督学习和无监督学习方法\\cite\{lecun2015deep\}。此外，迁移学习.*?仍然是一个挑战。", re.DOTALL),
 )
 
 

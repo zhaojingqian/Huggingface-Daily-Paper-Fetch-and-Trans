@@ -423,6 +423,15 @@ def retry_pdf(mode=None, key=None):
                                        no_cache=not has_cache,
                                        keep_translation=has_cache,
                                        timeout=3600)
+                    if has_cache and not r.get("pdf_path"):
+                        print(
+                            f"[retry-pdf] ⚠️  {aid} — 缓存重编译失败，清缓存后重新翻译全文...",
+                            flush=True,
+                        )
+                        r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
+                                           no_cache=True,
+                                           keep_translation=False,
+                                           timeout=3600)
                     if r.get("pdf_path"):
                         slim["pdf_status"] = "ok"
                         _paper_store_update_pdf_status(aid, "ok")

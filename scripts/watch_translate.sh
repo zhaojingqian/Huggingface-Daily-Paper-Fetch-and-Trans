@@ -3,7 +3,7 @@
 # 用法: ./scripts/watch_translate.sh [arxiv_id]
 # 不传参数则自动检测正在翻译的论文
 
-CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex}"
+CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"
 AID="${1:-}"
 
 # 自动检测

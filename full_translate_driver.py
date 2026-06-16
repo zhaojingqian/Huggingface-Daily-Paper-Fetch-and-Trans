@@ -718,8 +718,6 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
         ("undefined citation", r"Citation .* undefined"),
         ("undefined reference", r"Reference .* undefined"),
         ("undefined references", r"There were undefined references"),
-        ("rerun labels", r"Label\(s\) may have changed"),
-        ("rerun cross-references", r"Rerun to get cross-references right"),
         ("natbib undefined", r"Package natbib Warning: .* undefined"),
     ]
     failures = [name for name, pattern in checks if _re.search(pattern, log)]
@@ -1160,6 +1158,37 @@ def patch_algorithmic_command_glue(trans_tex_path):
     return total
 
 
+def patch_algorithm2e_keyword_aliases(trans_tex_path):
+    """Restore algorithm2e keyword aliases if translation renamed definitions."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    needed = []
+    for name in ('Input', 'Output', 'KwIn', 'KwOut'):
+        if '\\' + name + '{' in text and ('\\SetKwInOut{' + name + '}') not in text:
+            needed.append(name)
+    if not needed or r'\SetKwInOut' not in text:
+        return 0
+
+    alias_lines = ['% paper-trans: restore algorithm2e keyword aliases']
+    for name in needed:
+        label = 'Input' if name in ('Input', 'KwIn') else 'Output'
+        alias_lines.append(r'\SetKwInOut{' + name + '}{' + label + '}')
+    insertion = '\n'.join(alias_lines)
+
+    pos = text.find(r'\begin{algorithm')
+    if pos < 0:
+        pos = text.find(r'\begin{document}')
+    if pos < 0:
+        return 0
+
+    new_text = text[:pos] + insertion + '\n' + text[pos:]
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print(f"[driver] 🔧 patch_algorithm2e_keyword_aliases: 恢复 {len(needed)} 个 algorithm2e 关键字别名", flush=True)
+    return len(needed)
+
+
 def patch_llm_translation_artifacts(trans_tex_path):
     """Remove common LLM refusal/request artifacts inserted into translated TeX."""
     with open(trans_tex_path, encoding='utf-8') as f:
@@ -1171,6 +1200,150 @@ def patch_llm_translation_artifacts(trans_tex_path):
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
         print(f"[driver] 🔧 patch_llm_translation_artifacts: 清理了 {total} 处非原文翻译残留", flush=True)
+    return total
+
+
+def patch_stray_closing_brace_after_cjk_sentence(trans_tex_path):
+    """Remove obvious extra ``}`` after translated CJK prose sentences."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        lines = f.readlines()
+
+    total = 0
+    anchor = r'(?:图像|图|表格|表|公式|式|第|附录)'
+    pattern = _re.compile(r'([。！？；，、])\}(?=' + anchor + r'(?:\s*~?\\(?:ref|eqref|autoref|cref|Cref)\{|\b|[\u4e00-\u9fff]))')
+
+    def _brace_balance(prefix):
+        balance = 0
+        escaped = False
+        for ch in prefix:
+            if escaped:
+                escaped = False
+                continue
+            if ch == '\\':
+                escaped = True
+                continue
+            if ch == '{':
+                balance += 1
+            elif ch == '}':
+                balance -= 1
+        return balance
+
+    new_lines = []
+    for line in lines:
+        pieces = []
+        last = 0
+        for m in pattern.finditer(line):
+            pieces.append(line[last:m.start()])
+            if _brace_balance(line[:m.start()]) <= 0:
+                pieces.append(m.group(1))
+                total += 1
+            else:
+                pieces.append(m.group(0))
+            last = m.end()
+        pieces.append(line[last:])
+        new_lines.append(''.join(pieces))
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+        print(f"[driver] 🔧 patch_stray_closing_brace_after_cjk_sentence: 移除了 {total} 个多余右花括号", flush=True)
+    return total
+
+
+def patch_unclosed_textbf_reference_heads(trans_tex_path):
+    """Close section lead-in bold text if a previous repair removed the brace."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    total = 0
+    pattern = _re.compile(
+        r'(\\textbf\{[^{}\n]{1,100}?[。！？；：:])'
+        r'(?=((?:如)?(?:图像|图|表格|表|公式|式|第|附录)\s*~?\\(?:ref|eqref|autoref|cref|Cref)\{))'
+    )
+
+    def _replace(m):
+        nonlocal total
+        total += 1
+        return m.group(1) + '}'
+
+    new_text = pattern.sub(_replace, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_unclosed_textbf_reference_heads: 补齐了 {total} 个 textbf 右花括号", flush=True)
+    return total
+
+
+def patch_inline_math_delimiter_artifacts(trans_tex_path):
+    """Repair common LLM-produced orphan ``\\)`` inline-math delimiters."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        lines = f.readlines()
+
+    total = 0
+    new_lines = []
+    math_cmd_re = _re.compile(r'\\(?:mathcal|mathbf|mathbb|mathrm|mathsf|mathscr|operatorname|Pi|pi|Delta|Theta|Omega)\b')
+    for line in lines:
+        new_line = line
+        if r'\)' in line and r'\(' not in line:
+            candidate = line.replace(r'\)', '$')
+            if candidate.count('$') >= 2 and math_cmd_re.search(candidate):
+                new_line = candidate
+        if new_line != line:
+            total += 1
+        new_lines.append(new_line)
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+        print(f"[driver] 🔧 patch_inline_math_delimiter_artifacts: 修复了 {total} 行 orphan inline math delimiter", flush=True)
+    return total
+
+
+def patch_common_command_cjk_glue(trans_tex_path):
+    """Add a separating space when safe LaTeX commands are glued to CJK text."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    safe_commands = (
+        'newline', 'newpage', 'clearpage', 'noindent', 'indent',
+        'smallskip', 'medskip', 'bigskip',
+    )
+    pattern = _re.compile(r'\\(' + '|'.join(safe_commands) + r')(?=[\u4e00-\u9fff])')
+    new_text, total = pattern.subn(lambda m: '\\' + m.group(1) + ' ', text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_common_command_cjk_glue: 修复了 {total} 处命令/CJK 粘连", flush=True)
+    return total
+
+
+def patch_duplicate_end_environments(trans_tex_path):
+    """Remove accidental duplicated environment endings produced by translation."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    total = 0
+
+    def _replace(m):
+        nonlocal total
+        total += 1
+        return r'\end{' + m.group(1) + '}'
+
+    new_text = _re.sub(r'\\end\{(proof|lemma|theorem|proposition|corollary)\}\s*\\end\{\1\}', _replace, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_duplicate_end_environments: 移除了 {total} 个重复 end 环境", flush=True)
     return total
 
 
@@ -1244,26 +1417,71 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
             except Exception:
                 pass
 
-    if r'\faGlobe' not in (text + sibling_text) or r'\newcommand{\faGlobe}' in text:
+    aliases = {
+        'faGlobe': ('globe', 'G'),
+        'faGithub': ('github', 'GH'),
+        'faTrophy': ('trophy', 'T'),
+    }
+    combined = text + sibling_text
+    needed = [
+        (name, icon, fallback)
+        for name, (icon, fallback) in aliases.items()
+        if ('\\' + name) in combined
+        and ('\\newcommand{\\' + name + '}') not in text
+        and ('\\providecommand{\\' + name + '}') not in text
+    ]
+    if not needed:
         return 0
 
-    insertion = (
-        r'% paper-trans fallback for fontawesome5 legacy aliases' '\n'
-        r'\providecommand{\faGlobe}{\ifcsname faIcon\endcsname\faIcon{globe}\else\textcircled{G}\fi}'
-    )
+    lines = [r'% paper-trans fallback for fontawesome5 legacy aliases']
+    for name, icon, fallback in needed:
+        lines.append(
+            '\\providecommand{\\' + name + '}{\\ifcsname faIcon\\endcsname\\faIcon{'
+            + icon + '}\\else\\textcircled{' + fallback + '}\\fi}'
+        )
+    insertion = '\n'.join(lines)
     new_text, ok = _insert_before_begin_document(text, insertion)
     if not ok:
         return 0
     with open(trans_tex_path, 'w', encoding='utf-8') as f:
         f.write(new_text)
-    print("[driver] 🔧 patch_fontawesome_legacy_aliases: 补充 \\faGlobe fallback", flush=True)
+    names = ','.join('\\' + name for name, _icon, _fallback in needed)
+    print(f"[driver] 🔧 patch_fontawesome_legacy_aliases: 补充 {names} fallback", flush=True)
+    return len(needed)
+
+
+def patch_pdftex_primitives_for_xelatex(trans_tex_path):
+    """Provide harmless fallbacks for pdfTeX primitives used by templates."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    if r'\pdfinfo' not in text or r'\providecommand{\pdfinfo}' in text:
+        return 0
+
+    insertion = (
+        r'% paper-trans fallback for pdfTeX primitives under XeLaTeX' '\n'
+        r'\providecommand{\pdfinfo}[1]{}'
+    )
+    first_pdfinfo = text.find(r'\pdfinfo')
+    if first_pdfinfo >= 0:
+        new_text = text[:first_pdfinfo] + insertion + '\n' + text[first_pdfinfo:]
+    else:
+        new_text, ok = _insert_before_begin_document(text, insertion)
+        if not ok:
+            return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print("[driver] 🔧 patch_pdftex_primitives_for_xelatex: 补充 \\pdfinfo fallback", flush=True)
     return 1
 
 
 def clean_latex_intermediates(workfolder):
     """Remove stale LaTeX/BibTeX intermediates before deterministic recompiles."""
     removed = 0
-    for ext in ('aux', 'bbl', 'blg', 'log', 'out', 'toc', 'ptc', 'fls', 'fdb_latexmk'):
+    for ext in (
+        'aux', 'bbl', 'blg', 'log', 'out', 'toc', 'ptc', 'fls', 'fdb_latexmk',
+        'lof', 'lot', 'lol', 'nav', 'snm', 'vrb', 'xdv', 'synctex.gz', 'pdf',
+    ):
         path = os.path.join(workfolder, f'merge_translate_zh.{ext}')
         if os.path.exists(path):
             try:
@@ -1274,6 +1492,50 @@ def clean_latex_intermediates(workfolder):
     if removed:
         print(f"[driver] 🧹 clean_latex_intermediates: 清理了 {removed} 个旧中间文件", flush=True)
     return removed
+
+
+def sanitize_latex_aux_file(workfolder):
+    """Drop fragile aux rows while keeping citation and compact label data."""
+    import re as _re
+
+    aux_path = os.path.join(workfolder, 'merge_translate_zh.aux')
+    if not os.path.exists(aux_path):
+        return 0
+    try:
+        with open(aux_path, encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+    except Exception:
+        return 0
+    kept = []
+    removed = 0
+    compacted = 0
+    label_re = _re.compile(r'^\\newlabel\{([^{}]+)\}\{\{([^{}]*)\}\{([^{}]*)\}')
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith(r'\@writefile'):
+            removed += 1
+            continue
+        if stripped.startswith(r'\newlabel'):
+            m = label_re.match(stripped)
+            if m:
+                kept.append(r'\newlabel{' + m.group(1) + '}{{' + m.group(2) + '}{' + m.group(3) + '}}' + '\n')
+                if kept[-1] != line:
+                    compacted += 1
+                continue
+            removed += 1
+            continue
+        kept.append(line)
+
+    if removed or compacted:
+        with open(aux_path, 'w', encoding='utf-8') as f:
+            f.writelines(kept)
+        detail = []
+        if removed:
+            detail.append(f"移除 {removed} 行")
+        if compacted:
+            detail.append(f"压缩 {compacted} 个 newlabel")
+        print(f"[driver] 🧹 sanitize_latex_aux_file: {', '.join(detail)}", flush=True)
+    return removed + compacted
 
 
 def synthesize_bbl_from_tex(workfolder, trans_tex_path):
@@ -1313,14 +1575,25 @@ def synthesize_bbl_from_tex(workfolder, trans_tex_path):
         return False
 
     bibdata = _re.findall(r'\\bibliography\{([^{}]+)\}', text)
+    bibstyle = _re.findall(r'\\bibliographystyle\{([^{}]+)\}', text)
+    if not bibdata:
+        orig_tex_path = os.path.join(workfolder, 'merge.tex')
+        if os.path.exists(orig_tex_path):
+            try:
+                with open(orig_tex_path, encoding='utf-8', errors='replace') as f:
+                    orig_text = f.read()
+                bibdata = _re.findall(r'\\bibliography\{([^{}]+)\}', orig_text)
+                if not bibstyle:
+                    bibstyle = _re.findall(r'\\bibliographystyle\{([^{}]+)\}', orig_text)
+            except Exception:
+                pass
     if not bibdata:
         return _copy_existing_bbl('no bibliography command')
-    bibstyle = _re.findall(r'\\bibliographystyle\{([^{}]+)\}', text)
     style = bibstyle[-1] if bibstyle else 'plainnat'
     data = bibdata[-1]
 
     cite_re = _re.compile(
-        r'\\(?:citep|citet|citealt|citeauthor|citeyearpar|cite)'
+        r'\\(?:citep|citet|citealt|citeauthor|citeyearpar|citealp|citeyear|nocite|cite)'
         r'(?:\[[^\]]*\]){0,2}\{([^{}]+)\}'
     )
     keys: list[str] = []
@@ -1353,6 +1626,183 @@ def synthesize_bbl_from_tex(workfolder, trans_tex_path):
     else:
         ok = _copy_existing_bbl('bibtex unavailable')
     return ok
+
+
+def patch_unsafe_bibtex_keys(workfolder, trans_tex_path):
+    """Normalize citation keys with characters that can destabilize BibTeX/natbib."""
+    import re as _re
+
+    def _safe_key(key):
+        pieces = []
+        for ch in key:
+            if ch.isalnum() or ch in '_:./-':
+                pieces.append(ch)
+            elif ch == '+':
+                pieces.append('p')
+            elif ch == '#':
+                pieces.append('num')
+            else:
+                pieces.append('_')
+        safe = ''.join(pieces).strip('._-:/')
+        safe = _re.sub(r'_+', '_', safe)
+        return safe or 'citation_key'
+
+    bib_paths = glob.glob(os.path.join(workfolder, '*.bib'))
+    keys = set()
+    entry_re = _re.compile(r'(@[A-Za-z]+\s*\{\s*)([^,\s{}]+)(\s*,)')
+    for path in bib_paths:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                content = f.read()
+        except Exception:
+            continue
+        keys.update(entry_re.findall(content))
+
+    mapping: dict[str, str] = {}
+    used = {key for _prefix, key, _suffix in keys if _re.fullmatch(r'[A-Za-z0-9:_./-]+', key)}
+    for _prefix, key, _suffix in keys:
+        if _re.fullmatch(r'[A-Za-z0-9:_./-]+', key):
+            continue
+        safe = _safe_key(key)
+        base = safe
+        idx = 2
+        while safe in used:
+            safe = f"{base}_{idx}"
+            idx += 1
+        used.add(safe)
+        mapping[key] = safe
+
+    if not mapping:
+        return 0
+
+    for path in bib_paths:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                content = f.read()
+        except Exception:
+            continue
+
+        def _entry_replace(m):
+            key = m.group(2)
+            return m.group(1) + mapping.get(key, key) + m.group(3)
+
+        new_content = entry_re.sub(_entry_replace, content)
+        if new_content != content:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    cite_re = _re.compile(
+        r'\\(?P<cmd>citep|citet|citealt|citeauthor|citeyearpar|citealp|citeyear|nocite|cite)'
+        r'(?P<opts>(?:\[[^\]]*\]){0,2})\{(?P<keys>[^{}]+)\}'
+    )
+
+    def _cite_replace(m):
+        keys = [k.strip() for k in m.group('keys').split(',') if k.strip()]
+        new_keys = [mapping.get(k, k) for k in keys]
+        return '\\' + m.group('cmd') + m.group('opts') + '{' + ','.join(new_keys) + '}'
+
+    new_text = cite_re.sub(_cite_replace, text)
+    if new_text != text:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+
+    sample = ','.join(f"{old}->{new}" for old, new in list(mapping.items())[:8])
+    print(f"[driver] 🔧 patch_unsafe_bibtex_keys: 规范化 {len(mapping)} 个 citation key ({sample})", flush=True)
+    return len(mapping)
+
+
+def patch_missing_bibitem_citations(trans_tex_path, bbl_path):
+    """Degrade citations whose keys are not present in the generated .bbl."""
+    import re as _re
+
+    if not os.path.exists(bbl_path):
+        return 0
+    try:
+        with open(bbl_path, encoding='utf-8', errors='replace') as f:
+            bbl = f.read()
+    except Exception:
+        return 0
+
+    bibitems = set(_re.findall(r'\\bibitem(?:\[[^\]]*\])?\{([^{}]+)\}', bbl))
+    if not bibitems:
+        return 0
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    cite_re = _re.compile(
+        r'\\(?P<cmd>citep|citet|citealt|citeauthor|citeyearpar|citealp|citeyear|nocite|cite)'
+        r'(?P<opts>(?:\[[^\]]*\]){0,2})\{(?P<keys>[^{}]+)\}'
+    )
+    missing_seen: list[str] = []
+
+    def _replace(m):
+        keys = [k.strip() for k in m.group('keys').split(',') if k.strip()]
+        present = [k for k in keys if k in bibitems]
+        missing = [k for k in keys if k not in bibitems]
+        if not missing:
+            return m.group(0)
+        for key in missing:
+            if key not in missing_seen:
+                missing_seen.append(key)
+        if m.group('cmd') == 'nocite':
+            if present:
+                return r'\nocite{' + ','.join(present) + '}'
+            return ''
+        marker = r'\textsuperscript{[缺失引用:' + ','.join(missing) + ']}'
+        if present:
+            return '\\' + m.group('cmd') + m.group('opts') + '{' + ','.join(present) + '}' + marker
+        return marker
+
+    new_text = cite_re.sub(_replace, text)
+    total = len(missing_seen)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        sample = ','.join(missing_seen[:12])
+        print(f"[driver] 🔧 patch_missing_bibitem_citations: 降级 {total} 个缺失 bibitem ({sample})", flush=True)
+    return total
+
+
+def patch_bibliography_to_generated_bbl(workfolder, trans_tex_path):
+    """Input the generated bbl directly so XeLaTeX does not depend on BibTeX state."""
+    import re as _re
+
+    bbl_path = os.path.join(workfolder, 'merge_translate_zh.bbl')
+    if not os.path.exists(bbl_path) or os.path.getsize(bbl_path) <= 0:
+        return 0
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    if r'\input{merge_translate_zh.bbl}' in text:
+        return 0
+    if r'\bibliography' not in text:
+        return 0
+
+    replacement = r'\input{merge_translate_zh.bbl}'
+    pattern = _re.compile(
+        r'(?:^[ \t]*\\bibliographystyle\{[^{}]+\}[ \t]*(?:\r?\n|\s))*'
+        r'^[ \t]*\\bibliography\{[^{}]+\}[ \t]*',
+        _re.MULTILINE,
+    )
+    new_text, total = pattern.subn(lambda _m: replacement, text, count=1)
+    if not total:
+        new_text, total = _re.subn(
+            r'\\bibliography\{[^{}]+\}',
+            lambda _m: replacement,
+            text,
+            count=1,
+        )
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print("[driver] 🔧 patch_bibliography_to_generated_bbl: 直接接入生成的 bbl", flush=True)
+    return total
 
 
 def patch_enumitem_for_optional_lists(trans_tex_path):
@@ -1479,6 +1929,41 @@ def patch_local_nvidia_font_maps(workfolder):
     return total
 
 
+def patch_local_pdftex_engine_guards(workfolder):
+    """Disable local class/style guards that forbid XeLaTeX."""
+    import re as _re
+
+    total = 0
+    patterns = [
+        _re.compile(r'(?m)^(?P<indent>\s*)\\RequirePDFTeX\s*$'),
+        _re.compile(r'(?m)^(?P<indent>\s*)\\RequirePackage\{pdftexcmds\}\s*$'),
+    ]
+    for path in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+        if 'RequirePDFTeX' not in text and 'pdftexcmds' not in text:
+            continue
+
+        def _comment(m):
+            return m.group('indent') + '% paper-trans: disabled pdfTeX-only guard for XeLaTeX'
+
+        new_text = text
+        count = 0
+        for pattern in patterns:
+            new_text, n = pattern.subn(_comment, new_text)
+            count += n
+        if count:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            total += count
+    if total:
+        print(f"[driver] 🔧 patch_local_pdftex_engine_guards: 禁用 {total} 处 PDFTeX-only guard", flush=True)
+    return total
+
+
 def patch_long_citation_lists(trans_tex_path, max_keys=3):
     """
     Split very long citation lists. Some templates/engines can write truncated
@@ -1568,10 +2053,12 @@ def patch_and_recompile(workfolder, arxiv_id_):
     fix_label_ref_emdash(trans_tex)
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
+    patch_pdftex_primitives_for_xelatex(trans_tex)
     patch_enumitem_for_optional_lists(trans_tex)
     patch_microtype_for_xelatex(trans_tex)
     patch_local_microtype_loads(workfolder)
     patch_local_nvidia_font_maps(workfolder)
+    patch_local_pdftex_engine_guards(workfolder)
     patch_long_citation_lists(trans_tex)
     n = patch_verbatim_envs(trans_tex, orig_tex)
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
@@ -1579,27 +2066,60 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_custom_macro_cjk_glue(trans_tex)
     patch_stray_text_word_commands(trans_tex)
     patch_algorithmic_command_glue(trans_tex)
+    patch_algorithm2e_keyword_aliases(trans_tex)
     patch_llm_translation_artifacts(trans_tex)
+    patch_stray_closing_brace_after_cjk_sentence(trans_tex)
+    patch_unclosed_textbf_reference_heads(trans_tex)
+    patch_inline_math_delimiter_artifacts(trans_tex)
+    patch_common_command_cjk_glue(trans_tex)
+    patch_duplicate_end_environments(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
     clean_latex_intermediates(workfolder)
+    patch_unsafe_bibtex_keys(workfolder, trans_tex)
     synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
+    if synthesized_bbl:
+        bbl_path = os.path.join(workfolder, 'merge_translate_zh.bbl')
+        if patch_missing_bibitem_citations(trans_tex, bbl_path):
+            clean_latex_intermediates(workfolder)
+            synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
+        if synthesized_bbl:
+            patch_bibliography_to_generated_bbl(workfolder, trans_tex)
+
+    def _latex_cmds(engine, has_bbl):
+        return [
+            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+        ] if has_bbl else [
+            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            ['bibtex', 'merge_translate_zh'],
+            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+        ]
+
+    def _run_latex_cmds(cmds):
+        segfault = False
+        for cmd in cmds:
+            r = _sp.run(
+                cmd, cwd=workfolder, timeout=300,
+                stdout=_sp.DEVNULL, stderr=_sp.PIPE,
+            )
+            if cmd[0] in ('xelatex', 'lualatex'):
+                sanitize_latex_aux_file(workfolder)
+            stderr = (r.stderr or b'').decode('utf-8', errors='replace')
+            if r.returncode >= 128 or 'Segmentation fault' in stderr:
+                segfault = True
+        return segfault
 
     try:
-        cmds = [
-            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-        ] if synthesized_bbl else [
-            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            ['bibtex', 'merge_translate_zh'],
-            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-        ]
-        for cmd in cmds:
-            _sp.run(
-                cmd, cwd=workfolder, timeout=300,
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
+        segfault = _run_latex_cmds(_latex_cmds('xelatex', synthesized_bbl))
+        if segfault:
+            print("[driver] ⚠️  xelatex 触发 segfault，切换 lualatex 重编译", flush=True)
+            clean_latex_intermediates(workfolder)
+            synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
+            if synthesized_bbl:
+                patch_bibliography_to_generated_bbl(workfolder, trans_tex)
+            _run_latex_cmds(_latex_cmds('lualatex', synthesized_bbl))
     except Exception as e:
         print(f"[driver] ⚠️  LaTeX/BibTeX 执行异常: {e}", flush=True)
         return None

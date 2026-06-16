@@ -1,10 +1,10 @@
 #!/bin/bash
-# 定时清理 gpt-academic-latex 容器内的翻译缓存
+# 定时清理 gpt-academic-latex-slim 容器内的翻译缓存
 # 只清容器内的临时缓存，不触碰 /root/workspace/paper-trans/data/（网站数据）
 # 建议每月1日 03:00 执行（见 crontab）
 
 LOG=/root/workspace/paper-trans/logs/cleanup.log
-CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex}"
+CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"
 
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') 开始清理 ===" >> "$LOG"
 

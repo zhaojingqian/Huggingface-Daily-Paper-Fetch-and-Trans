@@ -160,6 +160,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 基于 gpt-academic 原始 splitter 增加 preserve 节点二次安全拆分，覆盖表格单元格和 algorithmic 说明文字，同时保留硬保护环境不翻译。
 - [x] 增加超长正文句子级拆分、CLI/GUI 轨迹环境硬保护、verbatim 环境恢复和缺 `.bib` 时复用既有 `.bbl`，修复 2026-06-14 daily `2606.09426` 失败 PDF。
 - [x] 抽象 `latex_translation_filters.py`，统一 splitter、质量门禁和 fallback 的环境筛选/过滤条件，并支持环境变量扩展。
+- [x] 修复 retry-pdf slim 默认容器、精确容器检查、容器内翻译缓存复用和缓存失败后的 no-cache fallback。
+- [x] 加固 fallback 编译：安全 aux、直接接入生成 bbl、不安全 citation key 规范化、LuaLaTeX segfault fallback、algorithm2e/FontAwesome 兼容和更多 LLM artifact 过滤。
 
 ### Phase D — 运维体验
 
@@ -169,7 +171,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 ### Phase E — Docker 镜像瘦身验证
 
-- [x] 将翻译容器名改为 `GPT_ACADEMIC_CONTAINER` 可覆盖，默认保持 `gpt-academic-latex`。
+- [x] 将翻译容器名改为 `GPT_ACADEMIC_CONTAINER` 可覆盖，默认使用 `gpt-academic-latex-slim`。
 - [x] 增加 `paper-trans-latex-slim` 构建、启动和 canary 脚本。
 - [x] 在 40GB 服务器上用低磁盘 flatten 模式构建 slim 镜像，并记录最终镜像体积约 4.55GB。
 - [x] 将最终生产方案调整为 full-TeX slim：默认保留完整 TeX/font 运行时，只裁剪 ML/runtime/cache/doc/source 负载，镜像体积约 7.62GB。

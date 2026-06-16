@@ -23,7 +23,7 @@ UMAMI_SCRIPT = (
     '<script defer src="https://cloud.umami.is/script.js" '
     'data-website-id="848a0bed-4004-423d-8f2b-52c9cbd39d93"></script>'
 )
-GPT_ACADEMIC_CONTAINER = os.environ.get("GPT_ACADEMIC_CONTAINER", "gpt-academic-latex")
+GPT_ACADEMIC_CONTAINER = os.environ.get("GPT_ACADEMIC_CONTAINER", "gpt-academic-latex-slim")
 
 PROXY = "http://127.0.0.1:7890"
 HTTP_HEADERS = {

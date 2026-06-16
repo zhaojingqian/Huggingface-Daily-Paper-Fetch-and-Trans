@@ -17,7 +17,7 @@ import shutil
 import json
 from pathlib import Path
 
-DEFAULT_CONTAINER_NAME = "gpt-academic-latex"
+DEFAULT_CONTAINER_NAME = "gpt-academic-latex-slim"
 CONTAINER_NAME  = os.environ.get("GPT_ACADEMIC_CONTAINER", DEFAULT_CONTAINER_NAME)
 BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
@@ -33,13 +33,46 @@ TEX_BACKUP_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 TEX_FAILED_BACKUP_DIR = os.path.join(BASE_DIR, "data", "tex_backup_failed")
 
 
+def _container_workfolder(arxiv_id: str) -> str:
+    return f"{CONTAINER_CACHE}/{arxiv_id}/workfolder"
+
+
+def _container_translated_tex(arxiv_id: str) -> str:
+    return f"{_container_workfolder(arxiv_id)}/merge_translate_zh.tex"
+
+
+def _container_tex_exists(arxiv_id: str) -> bool:
+    return subprocess.run(
+        ["docker", "exec", CONTAINER_NAME, "test", "-s", _container_translated_tex(arxiv_id)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def _ensure_workfolder_writable(arxiv_id: str) -> bool:
+    workfolder = _container_workfolder(arxiv_id)
+    chown = subprocess.run(
+        ["docker", "exec", "-u", "root", CONTAINER_NAME,
+         "chown", "-R", "gptuser:gptuser", workfolder],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    chmod = subprocess.run(
+        ["docker", "exec", "-u", "root", CONTAINER_NAME,
+         "chmod", "-R", "u+rw", workfolder],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    ok = chown.returncode == 0 and chmod.returncode == 0
+    if not ok:
+        print(f"⚠️  重设容器 workfolder 权限失败: {workfolder}", flush=True)
+    return ok
+
+
 def _backup_tex_from_container(arxiv_id: str, failed: bool = False) -> bool:
     """
     将容器内已翻译的 merge_translate_zh.tex 备份到宿主机 TEX_BACKUP_DIR。
     容器重启后可通过 _restore_tex_to_container 恢复，避免重新调用 GPT 翻译。
     返回是否备份成功。
     """
-    container_tex = f"{CONTAINER_CACHE}/{arxiv_id}/workfolder/merge_translate_zh.tex"
+    container_tex = _container_translated_tex(arxiv_id)
     # 先确认文件在容器内存在且非空
     check = subprocess.run(
         ["docker", "exec", CONTAINER_NAME, "test", "-s", container_tex],
@@ -69,13 +102,13 @@ def _restore_tex_to_container(arxiv_id: str) -> bool:
     local_tex = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
     if not os.path.exists(local_tex) or os.path.getsize(local_tex) == 0:
         return False
-    workfolder = f"{CONTAINER_CACHE}/{arxiv_id}/workfolder"
+    workfolder = _container_workfolder(arxiv_id)
     # 确保容器内目标目录存在
     subprocess.run(
         ["docker", "exec", CONTAINER_NAME, "mkdir", "-p", workfolder],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    container_tex = f"{workfolder}/merge_translate_zh.tex"
+    container_tex = _container_translated_tex(arxiv_id)
     r = subprocess.run(
         ["docker", "cp", local_tex, f"{CONTAINER_NAME}:{container_tex}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -84,28 +117,29 @@ def _restore_tex_to_container(arxiv_id: str) -> bool:
     if ok:
         # docker cp writes files as root. The driver runs as gptuser and needs to
         # rewrite merge_translate_zh.tex during keep-translation repair passes.
-        chown = subprocess.run(
-            ["docker", "exec", "-u", "root", CONTAINER_NAME,
-             "chown", "-R", "gptuser:gptuser", workfolder],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        chmod = subprocess.run(
-            ["docker", "exec", "-u", "root", CONTAINER_NAME,
-             "chmod", "-R", "u+rw", workfolder],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if chown.returncode != 0 or chmod.returncode != 0:
-            print(f"⚠️  已恢复 tex，但重设容器权限失败: {workfolder}", flush=True)
+        _ensure_workfolder_writable(arxiv_id)
         print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex}", flush=True)
     return ok
 
 
+def _prepare_keep_translation(arxiv_id: str) -> bool:
+    """Prepare an existing translated tex for a compile-only retry."""
+    if _restore_tex_to_container(arxiv_id):
+        return True
+    if _container_tex_exists(arxiv_id):
+        _ensure_workfolder_writable(arxiv_id)
+        print(f"♻️  容器内已有翻译 tex，直接复用: {_container_translated_tex(arxiv_id)}", flush=True)
+        return True
+    return False
+
+
 def check_container():
     r = subprocess.run(
-        ["docker", "ps", "-q", "-f", f"name={CONTAINER_NAME}"],
+        ["docker", "container", "inspect", "-f", "{{.State.Running}}", CONTAINER_NAME],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True,
     )
-    return r.stdout.strip() != b""
+    return r.returncode == 0 and r.stdout.strip() == "true"
 
 
 def copy_driver_to_container():
@@ -117,14 +151,23 @@ def copy_driver_to_container():
         r = subprocess.run(
             ["docker", "cp", src, dst],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True,
         )
         if r.returncode != 0:
+            msg = (r.stderr or r.stdout or "").strip()
+            if msg:
+                print(f"❌ 复制 {name} 到容器失败: {msg}", flush=True)
             return False
         copied.append(f"/tmp/{name}")
     chmod = subprocess.run(
         ["docker", "exec", "-u", "root", CONTAINER_NAME, "chmod", "0644", *copied],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True,
     )
+    if chmod.returncode != 0:
+        msg = (chmod.stderr or chmod.stdout or "").strip()
+        if msg:
+            print(f"❌ 设置容器驱动脚本权限失败: {msg}", flush=True)
     return chmod.returncode == 0
 
 
@@ -398,7 +441,7 @@ def translate_full(arxiv_id: str, output_dir: str,
         print(f"❌ {result['error']}", flush=True)
         return result
 
-    if keep_translation and not _restore_tex_to_container(arxiv_id):
+    if keep_translation and not _prepare_keep_translation(arxiv_id):
         result['error'] = f"找不到可复用的翻译 tex 备份: {arxiv_id}"
         print(f"❌ {result['error']}", flush=True)
         return result

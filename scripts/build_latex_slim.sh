@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_CONTAINER="${GPT_ACADEMIC_SOURCE_CONTAINER:-${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex}}"
+SOURCE_CONTAINER="${GPT_ACADEMIC_SOURCE_CONTAINER:-${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}}"
 IMAGE="${GPT_ACADEMIC_SLIM_IMAGE:-paper-trans-latex-slim:latest}"
 TMP_CONTAINER="${GPT_ACADEMIC_SLIM_BUILD_CONTAINER:-paper-trans-latex-slim-build-$$}"
 SOURCE_IMAGE="${GPT_ACADEMIC_SOURCE_IMAGE:-}"

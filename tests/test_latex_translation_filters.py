@@ -10,6 +10,7 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertTrue(filters.is_hard_protected_env("climode"))
         self.assertTrue(filters.is_hard_protected_env("trajactGUI"))
         self.assertTrue(filters.is_hard_protected_env("custom_prompt"))
+        self.assertTrue(filters.is_hard_protected_env("promptbox"))
         self.assertTrue(filters.is_hard_protected_env("BuildTranscript"))
         self.assertTrue(filters.is_soft_text_env("algorithmic"))
         self.assertFalse(filters.is_hard_protected_env("algorithmic"))
@@ -47,16 +48,19 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         text = (
             "正常中文段落。\n"
             "Please provide the section from the English academic paper that you would like me to translate into Chinese.\n"
+            "Below is a section from an English academic paper, translated into Chinese:\n"
             "请提供您需要翻译的英文学术论文部分内容。\n"
+            "请提供需要翻译的具体英文内容。\n"
             "后续中文段落。"
         )
 
         stripped, count = filters.strip_llm_translation_artifacts(text)
 
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 4)
         self.assertIn("正常中文段落", stripped)
         self.assertIn("后续中文段落", stripped)
         self.assertNotIn("Please provide", stripped)
+        self.assertNotIn("Below is", stripped)
         self.assertNotIn("请提供", stripped)
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup_docker_env.sh — 修复 gpt-academic-latex 容器的 LaTeX 编译环境
+# setup_docker_env.sh — 修复 gpt-academic-latex-slim 容器的 LaTeX 编译环境
 #
 # 解决问题：
 #   1. Noto Sans SemiBold 缺失（2603.16859 类论文使用 mac_automl 模板）
@@ -19,7 +19,7 @@
 #
 set -e
 
-CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex}"
+CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"
 
 echo "=== [setup_docker_env] 检查容器 $CONTAINER 是否运行 ==="
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then

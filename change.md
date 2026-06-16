@@ -2,6 +2,46 @@
 
 ---
 
+## v4.20 — 2026-06-16
+
+### retry-pdf slim 容器恢复与 LaTeX fallback 加固
+
+#### 2026-06-15 daily 三篇与 2026-W24 weekly 两篇恢复
+
+- **影响论文**：
+  - daily `2026-06-15`：`2606.13432`、`2606.12384`、`2606.06036`；
+  - weekly `2026-W24`：`2606.05405`、`2606.03988`。
+- **根因定位**：
+  - `translate_full.py` 的默认容器仍是旧 `gpt-academic-latex`，而机器上只保留 `gpt-academic-latex-slim`；
+  - 容器检查使用 `docker ps -f name=...`，会把 `gpt-academic-latex-slim` 当成旧容器的模糊匹配，导致检查通过但后续 `docker cp gpt-academic-latex:/...` 失败；
+  - retry 只判断“有翻译缓存”，但 `translate_full --keep-translation` 之前只接受宿主机成功 tex 备份，未能复用容器内现有 `merge_translate_zh.tex`；
+  - 缓存 tex 编译失败后外层没有自动降级到 no-cache 重译；
+  - 本轮暴露多类 LaTeX/LLM 残留问题：PDFTeX-only 模板、坏 `.aux`、缺失/不安全 citation key、FontAwesome 旧别名、XeLaTeX segfault、algorithm2e 关键字被翻译、表格单元格里混入 “Please provide/通用引言” 幻觉段落。
+- **修复**：
+  - 代码默认容器改为 `gpt-academic-latex-slim`，并用 `docker container inspect` 精确检查容器运行状态；
+  - 复制驱动脚本失败时输出 stderr，便于直接看到容器名/权限问题；
+  - `--keep-translation` 支持直接复用容器内 `merge_translate_zh.tex`，workfolder 不完整时仍可从源码缓存重建；
+  - `retry-pdf` 在缓存重编译失败后自动清缓存并 no-cache 重译全文；
+  - fallback 清理旧 PDF 和更多 LaTeX 中间文件，避免半截/旧 PDF 误通过；
+  - `.aux` 净化改为删除 fragile `\@writefile` 并将 `\newlabel` 压缩为安全二字段格式，保留 `\citation/\bibcite`；
+  - 预生成 `.bbl` 后直接 `\input{merge_translate_zh.bbl}`，缺 `\bibliography` 时可回退读取原始 `merge.tex`；
+  - 自动规范化不安全 citation key，例如 `hu2025reinforce++ -> hu2025reinforcepp`、`yeshwanth2023scannet++ -> yeshwanth2023scannetpp`；
+  - FontAwesome legacy alias 扩展到 `\faGlobe/\faGithub/\faTrophy`；
+  - 检测到 XeLaTeX segfault 时自动切换 LuaLaTeX 多轮重编译；
+  - 恢复 algorithm2e 的英文 `\Input` 等关键字别名；
+  - 扩展 LLM artifact 过滤，清理更多 “Below is/Please provide/请提供” 和伪造 ML 引言段落，避免污染表格或正文。
+- **结果**：
+  - `data/daily/2026-06-15/index.json` 中 `2606.13432`、`2606.12384`、`2606.06036` 均恢复为 `pdf_status=ok`；
+  - `data/weekly/2026-W24/index.json` 中 `2606.05405`、`2606.03988` 均恢复为 `pdf_status=ok`；
+  - 成功 PDF 已生成：`2606.13432` 6.07MB、`2606.12384` 5.29MB、`2606.06036` 5.45MB、`2606.05405` 22.79MB、`2606.03988` 16.15MB；
+  - 上述五篇旧失败诊断日志已清理。
+- **验证**：
+  - `python3 -m py_compile full_translate_driver.py latex_translation_filters.py translate_full.py run_papers.py web_server.py` 通过；
+  - `python3 -m unittest tests.test_latex_translation_filters -v` 通过；
+  - daily 与 weekly retry 均跑通，编译健康检查无 undefined command/citation/reference 残留。
+
+---
+
 ## v4.19 — 2026-06-15
 
 ### 翻译过滤策略抽象化
