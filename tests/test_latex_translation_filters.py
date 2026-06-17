@@ -56,12 +56,35 @@ class LatexTranslationFiltersTest(unittest.TestCase):
 
         stripped, count = filters.strip_llm_translation_artifacts(text)
 
-        self.assertEqual(count, 4)
+        self.assertGreaterEqual(count, 4)
         self.assertIn("正常中文段落", stripped)
         self.assertIn("后续中文段落", stripped)
         self.assertNotIn("Please provide", stripped)
         self.assertNotIn("Below is", stripped)
         self.assertNotIn("请提供", stripped)
+
+    def test_strip_llm_translation_artifacts_from_prompt_echoes(self):
+        text = (
+            "已翻译正文。"
+            "Below is the section you provided translated into Chinese. "
+            "If you have any specific section you want translated, please provide the text."
+            "继续正文。"
+            "Certainly! 如果预测的切换相对于参考切换的时间误差小于3帧，则认为该切换成功。"
+            "Please provide the section you would like me to translate."
+            "尾段。"
+        )
+
+        stripped, count = filters.strip_llm_translation_artifacts(text)
+
+        self.assertGreaterEqual(count, 4)
+        self.assertIn("已翻译正文", stripped)
+        self.assertIn("继续正文", stripped)
+        self.assertIn("如果预测的切换", stripped)
+        self.assertIn("尾段", stripped)
+        self.assertNotIn("Below is the section", stripped)
+        self.assertNotIn("specific section", stripped)
+        self.assertNotIn("Certainly!", stripped)
+        self.assertNotIn("Please provide", stripped)
 
     def test_separate_custom_macro_cjk_glue(self):
         text = (

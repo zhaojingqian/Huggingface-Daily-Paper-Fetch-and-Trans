@@ -2,6 +2,32 @@
 
 ---
 
+## v4.22 — 2026-06-17
+
+### LaTeX 翻译 chunk 回归收口
+
+#### 二次拆分后恢复上游短 chunk 保护
+
+- **背景**：前序 splitter 优化为了减少 preserve 区域漏翻译，对表格、算法和普通正文做了二次拆分；这能提升覆盖率，但也绕过了 gpt-academic 原始 `post_process` 对过短 transform 节点的保护。
+- **根因定位**：
+  - gpt-academic 原始链路先用 mask 标记 `PRESERVE/TRANSFORM`，随后 `post_process` 会把空白和短于 42 字符的 transform 节点降级为 preserve，并剥离前后空白；
+  - 当前项目的二次拆分发生在上游 `post_process` 之后，表格单元格、algorithmic 参数和短正文行可能被重新拆成过短 chunk；
+  - 这些碎片单独送入 `switch_prompt()` 后，模型更容易回答 prompt 本身，生成 “Below is.../Please provide.../请提供...” 等非原文残留；
+  - 旧 fallback 只在编译失败后的重编译阶段清理 artifact，若 LaTeX 恰好能编译，污染会随成功 PDF 发布。
+- **修复**：
+  - `full_translate_driver.py` 在二次拆分完成后新增最终收口：过短、命令占比高、空白/分隔符类 transform chunk 降级回 preserve；章节标题仍按单独规则允许翻译；
+  - 保留上游 `LatexPaperSplit` 的 mask 结果作为第一层，不改写原始保护策略，只在新增扩展节点上补回等价安全门；
+  - monkey-patch gpt-academic 的 `fix_content` 和 `latex_actions.fix_content` 引用，在每个翻译节点 merge 进 `merge_translate_zh.tex` 前清理非原文 LLM artifact；若清理后没有有效内容则回退原始 chunk；
+  - 扩展 `latex_translation_filters.py` 的 artifact 模式，覆盖本轮实际出现的 “Below is the section you provided translated into Chinese. If you have any specific section...” 等残留；
+  - 新增单元测试覆盖 prompt echo 清理。
+- **验证**：
+  - `python3 -m py_compile full_translate_driver.py latex_translation_filters.py translate_full.py run_papers.py run_repair.py` 通过；
+  - `python3 -m unittest tests.test_latex_translation_filters -v` 通过；
+  - 容器内 `/tmp/full_translate_driver.py` 与 `/tmp/latex_translation_filters.py` 语法检查通过；
+  - `python3 translate_full.py 2606.11176 -o /tmp/paper-trans-verify-2606.11176 --keep-translation --timeout 900` 成功，`cjk_pct=85.8%`，编译健康检查通过，PDF 34.09MB。
+
+---
+
 ## v4.21 — 2026-06-17
 
 ### 2026-06-16 daily PDF 失败修复

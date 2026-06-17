@@ -494,6 +494,64 @@ def _patch_latex_translation_splitter():
             node.range = [n_line - 2, n_line + n_l + 2]
             n_line += n_l
 
+    def _is_section_heading(text: str) -> bool:
+        return bool(_re.match(
+            r"^\\(?:section|subsection|subsubsection|paragraph|subparagraph|title)\*?\{",
+            text.strip(),
+        ))
+
+    def _semantic_enough_for_gpt(text: str) -> bool:
+        """
+        Re-apply the spirit of upstream post_process after our expansion.
+
+        Upstream demotes all tiny transform nodes before GPT sees them. The
+        expansion below can create new short table/algorithm/prose fragments,
+        so we need a second gate here; otherwise the model may answer the
+        prompt itself ("Below is...", "Please provide...") instead of
+        translating source text.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if _is_section_heading(stripped):
+            rough = _rough_text(stripped)
+            letters = len(_re.findall(r"[A-Za-z]", rough))
+            return letters >= 6
+        if not _text_has_translatable_prose(stripped, min_letters=18, min_words=3):
+            return False
+
+        rough = _rough_text(stripped)
+        letters = len(_re.findall(r"[A-Za-z]", rough))
+        words = _re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", rough)
+
+        if len(stripped) < 42:
+            return letters >= 24 and len(words) >= 4
+        if stripped.count("\\") >= 3 and letters < 32 and len(words) < 5:
+            return False
+        return True
+
+    def _finalize_expanded_nodes(nodes):
+        finalized = []
+        demoted = 0
+        for node in nodes:
+            if not node.preserve and not _semantic_enough_for_gpt(node.string):
+                node.preserve = True
+                demoted += 1
+
+            if node.preserve:
+                _append(finalized, node.string, True)
+                continue
+
+            leading_len = len(node.string) - len(node.string.lstrip())
+            trailing_len = len(node.string.rstrip()) if node.string.rstrip() else 0
+            leading = node.string[:leading_len]
+            core = node.string[leading_len:trailing_len]
+            trailing = node.string[trailing_len:]
+            _append(finalized, leading, True)
+            _append(finalized, core, False, merge=False)
+            _append(finalized, trailing, True)
+        return finalized, demoted
+
     def _patched_split(self, txt, project_folder, opts):
         res = _orig_split(self, txt, project_folder, opts)
         original_transform = sum(1 for node in self.nodes if not node.preserve)
@@ -515,6 +573,7 @@ def _patch_latex_translation_splitter():
             for part in parts:
                 _append(expanded, part.string, part.preserve)
 
+        expanded, demoted_short = _finalize_expanded_nodes(expanded)
         _recompute_ranges(expanded)
         self.nodes = expanded
         self.sp = [node.string for node in expanded if not node.preserve]
@@ -523,7 +582,8 @@ def _patch_latex_translation_splitter():
         added_chars = sum(len(node.string) for node in expanded if not node.preserve) - original_chars
         print(
             f"[driver] ✅ latex splitter expanded prose chunks: "
-            f"{original_transform} -> {len(self.sp)} (chars +{max(0, added_chars)})",
+            f"{original_transform} -> {len(self.sp)} "
+            f"(chars +{max(0, added_chars)}, short demoted={demoted_short})",
             flush=True,
         )
         if added > 0:
@@ -545,7 +605,38 @@ def _patch_latex_translation_splitter():
     print(f"[driver] ✅ LatexPaperSplit 已 patch（普通正文保守扩展翻译{dynamic_note}）", flush=True)
 
 
+def _patch_latex_fix_content_artifacts():
+    """Clean LLM prompt/refusal artifacts before translated nodes enter final TeX."""
+    from crazy_functions.latex_fns import latex_toolbox as _ltb
+    from crazy_functions.latex_fns import latex_actions as _la
+
+    if getattr(_ltb, "_paper_trans_fix_content_patch", False):
+        return
+
+    _orig_fix_content = _ltb.fix_content
+
+    def _patched_fix_content(final_tex, node_string):
+        fixed = _orig_fix_content(final_tex, node_string)
+        cleaned, total = _ltf.strip_llm_translation_artifacts(fixed)
+        if not total:
+            return fixed
+        if not cleaned.strip():
+            print(
+                "[driver] ⚠️  fix_content: 翻译结果仅剩非原文残留，回退原始 chunk",
+                flush=True,
+            )
+            return node_string
+        print(f"[driver] 🔧 fix_content: 清理 {total} 处非原文翻译残留", flush=True)
+        return cleaned
+
+    _ltb.fix_content = _patched_fix_content
+    _la.fix_content = _patched_fix_content
+    _ltb._paper_trans_fix_content_patch = True
+    print("[driver] ✅ fix_content 已 patch（merge 前清理 LLM 非原文残留）", flush=True)
+
+
 _patch_latex_translation_splitter()
+_patch_latex_fix_content_artifacts()
 
 from toolbox import get_conf, ChatBotWithCookies, default_user_name
 
