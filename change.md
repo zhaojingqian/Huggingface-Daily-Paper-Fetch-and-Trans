@@ -17,6 +17,7 @@
 - **修复**：
   - `full_translate_driver.py` 在二次拆分完成后新增最终收口：过短、命令占比高、空白/分隔符类 transform chunk 降级回 preserve；章节标题仍按单独规则允许翻译；
   - 保留上游 `LatexPaperSplit` 的 mask 结果作为第一层，不改写原始保护策略，只在新增扩展节点上补回等价安全门；
+  - 新增 splitter cache version marker，splitter 结构变化时自动丢弃旧 `temp.pkl`，避免旧翻译缓存和新节点结构错位 merge；
   - monkey-patch gpt-academic 的 `fix_content` 和 `latex_actions.fix_content` 引用，在每个翻译节点 merge 进 `merge_translate_zh.tex` 前清理非原文 LLM artifact；若清理后没有有效内容则回退原始 chunk；
   - 扩展 `latex_translation_filters.py` 的 artifact 模式，覆盖本轮实际出现的 “Below is the section you provided translated into Chinese. If you have any specific section...” 等残留；
   - 新增单元测试覆盖 prompt echo 清理。

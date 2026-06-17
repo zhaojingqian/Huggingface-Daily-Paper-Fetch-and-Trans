@@ -14,6 +14,7 @@ arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-06-17-v2"
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
@@ -494,6 +495,26 @@ def _patch_latex_translation_splitter():
             node.range = [n_line - 2, n_line + n_l + 2]
             n_line += n_l
 
+    def _invalidate_stale_split_cache(project_folder: str):
+        marker = os.path.join(project_folder, ".paper_trans_splitter_version")
+        temp_cache = os.path.join(project_folder, "temp.pkl")
+        old_version = ""
+        try:
+            if os.path.exists(marker):
+                with open(marker, encoding="utf-8", errors="replace") as f:
+                    old_version = f.read().strip()
+            if os.path.exists(temp_cache) and old_version != SPLITTER_CACHE_VERSION:
+                os.remove(temp_cache)
+                print(
+                    "[driver] 🧹 temp.pkl splitter cache version changed; "
+                    "removed stale translation cache",
+                    flush=True,
+                )
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(SPLITTER_CACHE_VERSION + "\n")
+        except Exception as e:
+            print(f"[driver] ⚠️  splitter cache version check failed: {e}", flush=True)
+
     def _is_section_heading(text: str) -> bool:
         return bool(_re.match(
             r"^\\(?:section|subsection|subsubsection|paragraph|subparagraph|title)\*?\{",
@@ -574,6 +595,7 @@ def _patch_latex_translation_splitter():
                 _append(expanded, part.string, part.preserve)
 
         expanded, demoted_short = _finalize_expanded_nodes(expanded)
+        _invalidate_stale_split_cache(project_folder)
         _recompute_ranges(expanded)
         self.nodes = expanded
         self.sp = [node.string for node in expanded if not node.preserve]
