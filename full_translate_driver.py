@@ -1031,51 +1031,10 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
     an empty group delimiter after simple custom macros when they are glued to a
     CJK character or ASCII letter.
     """
-    import re as _re
-
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
-    macro_names = set()
-    for m in _re.finditer(
-        r'\\(?:newcommand|renewcommand|providecommand)\s*\{\\([A-Za-z@]+)\}'
-        r'(?:\[(\d+)\])?',
-        text,
-    ):
-        arg_count = m.group(2)
-        if arg_count in (None, '0'):
-            macro_names.add(m.group(1))
-
-    if not macro_names:
-        return 0
-
-    definition_spans = []
-    for name in macro_names:
-        for m in _re.finditer(
-            r'\\(?:newcommand|renewcommand|providecommand)\s*\{\\'
-            + _re.escape(name) + r'\}',
-            text,
-        ):
-            definition_spans.append((m.start(), m.end()))
-
-    def _in_definition(pos):
-        return any(start <= pos < end for start, end in definition_spans)
-
-    names_pat = '|'.join(_re.escape(n) for n in sorted(macro_names, key=len, reverse=True))
-    pattern_slash_cjk = _re.compile(r'\\(' + names_pat + r')\\(?=[\u4e00-\u9fff])')
-    pattern_glued = _re.compile(r'\\(' + names_pat + r')(?![A-Za-z@{])(?=[\u4e00-\u9fffA-Za-z])')
-
-    total = 0
-
-    def _replace(m):
-        nonlocal total
-        if _in_definition(m.start()):
-            return m.group(0)
-        total += 1
-        return '\\' + m.group(1) + '{}'
-
-    new_text = pattern_slash_cjk.sub(_replace, text)
-    new_text = pattern_glued.sub(_replace, new_text)
+    new_text, total = _ltf.separate_custom_macro_cjk_glue(text)
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
@@ -1420,6 +1379,7 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
     aliases = {
         'faGlobe': ('globe', 'G'),
         'faGithub': ('github', 'GH'),
+        'faSearch': ('search', 'S'),
         'faTrophy': ('trophy', 'T'),
     }
     combined = text + sibling_text
@@ -1451,28 +1411,45 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
 
 
 def patch_pdftex_primitives_for_xelatex(trans_tex_path):
-    """Provide harmless fallbacks for pdfTeX primitives used by templates."""
+    """Guard pdfTeX primitive lines in the translated main tex."""
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
-    if r'\pdfinfo' not in text or r'\providecommand{\pdfinfo}' in text:
+    new_text, total = _ltf.guard_pdftex_primitive_lines(text)
+    if not total:
         return 0
 
-    insertion = (
-        r'% paper-trans fallback for pdfTeX primitives under XeLaTeX' '\n'
-        r'\providecommand{\pdfinfo}[1]{}'
-    )
-    first_pdfinfo = text.find(r'\pdfinfo')
-    if first_pdfinfo >= 0:
-        new_text = text[:first_pdfinfo] + insertion + '\n' + text[first_pdfinfo:]
-    else:
-        new_text, ok = _insert_before_begin_document(text, insertion)
-        if not ok:
-            return 0
     with open(trans_tex_path, 'w', encoding='utf-8') as f:
         f.write(new_text)
-    print("[driver] 🔧 patch_pdftex_primitives_for_xelatex: 补充 \\pdfinfo fallback", flush=True)
-    return 1
+    print(f"[driver] 🔧 patch_pdftex_primitives_for_xelatex: guard {total} 处 pdfTeX primitive", flush=True)
+    return total
+
+
+def patch_local_pdftex_primitives(workfolder):
+    """Guard pdfTeX primitive lines in local class/style/source files."""
+    total = 0
+    targets = []
+    for pattern in ('**/*.cls', '**/*.sty', '**/*.tex'):
+        targets.extend(glob.glob(os.path.join(workfolder, pattern), recursive=True))
+    for path in sorted(set(targets)):
+        if os.path.basename(path) == 'merge_translate_zh.tex':
+            continue
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+        if not any('\\' + name in text for name in _ltf.PDFTEX_PRIMITIVE_NAMES):
+            continue
+        new_text, count = _ltf.guard_pdftex_primitive_lines(text)
+        if not count:
+            continue
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        total += count
+    if total:
+        print(f"[driver] 🔧 patch_local_pdftex_primitives: guard {total} 处本地 pdfTeX primitive", flush=True)
+    return total
 
 
 def clean_latex_intermediates(workfolder):
@@ -1929,6 +1906,71 @@ def patch_local_nvidia_font_maps(workfolder):
     return total
 
 
+def patch_local_unavailable_t1_font_defaults(workfolder):
+    """Fallback local T1 font families to Latin Modern when TFM files are absent."""
+    import re as _re
+
+    total = 0
+    fallback_for_default = {
+        'sfdefault': 'lmss',
+        'rmdefault': 'lmr',
+        'ttdefault': 'lmtt',
+    }
+    shape_re = _re.compile(
+        r'\\DeclareFontShape\{T1\}\{([^{}]+)\}\{[^{}]+\}\{[^{}]+\}\{([^{}]+)\}\{[^{}]*\}'
+    )
+    for path in glob.glob(os.path.join(workfolder, '**', '*.cls'), recursive=True) + \
+            glob.glob(os.path.join(workfolder, '**', '*.sty'), recursive=True):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+
+        local_families = set()
+        for m in shape_re.finditer(text):
+            spec = m.group(2)
+            if '/' in spec or '.ttf' in spec.lower() or '.otf' in spec.lower():
+                local_families.add(m.group(1))
+        if not local_families:
+            continue
+
+        new_text = text
+        count = 0
+        for family in sorted(local_families, key=len, reverse=True):
+            for default_name, fallback in fallback_for_default.items():
+                pattern = _re.compile(
+                    r'(?m)^(?P<indent>\s*)\\renewcommand\{\\'
+                    + default_name
+                    + r'\}\{'
+                    + _re.escape(family)
+                    + r'\}\s*%?\s*$'
+                )
+                replacement = (
+                    r'\g<indent>\\renewcommand{\\'
+                    + default_name
+                    + r'}{'
+                    + fallback
+                    + r'}% paper-trans: fallback unavailable local T1 font family '
+                    + family
+                )
+                new_text, n = pattern.subn(replacement, new_text)
+                count += n
+
+            fontfamily_pattern = _re.compile(r'\\fontfamily\{' + _re.escape(family) + r'\}')
+            new_text, n = fontfamily_pattern.subn(r'\\fontfamily{lmss}', new_text)
+            count += n
+
+        if count:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            total += count
+
+    if total:
+        print(f"[driver] 🔧 patch_local_unavailable_t1_font_defaults: 回退 {total} 处本地 T1 字体默认值", flush=True)
+    return total
+
+
 def patch_local_pdftex_engine_guards(workfolder):
     """Disable local class/style guards that forbid XeLaTeX."""
     import re as _re
@@ -2053,11 +2095,13 @@ def patch_and_recompile(workfolder, arxiv_id_):
     fix_label_ref_emdash(trans_tex)
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
+    patch_local_pdftex_primitives(workfolder)
     patch_pdftex_primitives_for_xelatex(trans_tex)
     patch_enumitem_for_optional_lists(trans_tex)
     patch_microtype_for_xelatex(trans_tex)
     patch_local_microtype_loads(workfolder)
     patch_local_nvidia_font_maps(workfolder)
+    patch_local_unavailable_t1_font_defaults(workfolder)
     patch_local_pdftex_engine_guards(workfolder)
     patch_long_citation_lists(trans_tex)
     n = patch_verbatim_envs(trans_tex, orig_tex)

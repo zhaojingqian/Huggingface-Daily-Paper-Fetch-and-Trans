@@ -171,6 +171,18 @@ def copy_driver_to_container():
     return chmod.returncode == 0
 
 
+def _terminate_container_driver(arxiv_id: str):
+    """Best-effort cleanup for a timed-out docker exec driver process."""
+    pattern = f"/tmp/full_translate_driver.py {arxiv_id}"
+    for signal_name in ("-TERM", "-KILL"):
+        subprocess.run(
+            ["docker", "exec", "-u", "root", CONTAINER_NAME,
+             "pkill", signal_name, "-f", pattern],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)
+
+
 def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
                      keep_translation: bool = False):
     """
@@ -196,23 +208,49 @@ def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
     t_start   = time.time()
     t_beat    = t_start   # 上次心跳时间
     BEAT_INTERVAL = 30    # 秒
+    pending = b""
+
+    def _emit_line(line_b: bytes):
+        line = line_b.decode("utf-8", errors="replace").rstrip()
+        collected.append(line)
+        # 只打印有意义的行（驱动标记 + 结果）
+        if any(tag in line for tag in ("[driver]", "RESULT:", "✅", "❌", "⚠")):
+            elapsed = int(time.time() - t_start)
+            print(f"   [{elapsed:4d}s] {line}", flush=True)
+
+    if proc.stdout is None:
+        return -1, "", "无法读取容器输出"
+    fd = proc.stdout.fileno()
+    try:
+        os.set_blocking(fd, False)
+    except Exception:
+        pass
+
+    def _drain_stdout():
+        nonlocal pending
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            if not chunk:
+                break
+            pending += chunk
+            while True:
+                pos = pending.find(b"\n")
+                if pos < 0:
+                    break
+                line_b = pending[:pos]
+                pending = pending[pos + 1:]
+                _emit_line(line_b)
 
     try:
         while True:
             # 非阻塞检查进程是否结束
             retcode = proc.poll()
-
-            # 读取当前所有可用行（非阻塞）
-            while True:
-                line_b = proc.stdout.readline()
-                if not line_b:
-                    break
-                line = line_b.decode("utf-8", errors="replace").rstrip()
-                collected.append(line)
-                # 只打印有意义的行（驱动标记 + 结果）
-                if any(tag in line for tag in ("[driver]", "RESULT:", "✅", "❌", "⚠")):
-                    elapsed = int(time.time() - t_start)
-                    print(f"   [{elapsed:4d}s] {line}", flush=True)
+            _drain_stdout()
 
             # 心跳：距上次心跳超过 BEAT_INTERVAL 且进程还在运行
             now = time.time()
@@ -223,22 +261,22 @@ def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
 
             if retcode is not None:
                 # 进程已结束，读尽剩余输出
-                for line_b in proc.stdout:
-                    line = line_b.decode("utf-8", errors="replace").rstrip()
-                    collected.append(line)
-                    if any(tag in line for tag in ("[driver]", "RESULT:", "✅", "❌", "⚠")):
-                        elapsed = int(time.time() - t_start)
-                        print(f"   [{elapsed:4d}s] {line}", flush=True)
+                _drain_stdout()
+                if pending:
+                    _emit_line(pending)
+                    pending = b""
                 return retcode, "\n".join(collected), ""
 
             if time.time() - t_start > timeout:
                 proc.kill()
+                _terminate_container_driver(arxiv_id)
                 return -1, "\n".join(collected), f"超时 ({timeout}s)"
 
-            time.sleep(1)
+            time.sleep(0.5)
 
     except Exception as e:
         proc.kill()
+        _terminate_container_driver(arxiv_id)
         return -1, "\n".join(collected), str(e)
 
 

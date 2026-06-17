@@ -2,6 +2,36 @@
 
 ---
 
+## v4.21 — 2026-06-17
+
+### 2026-06-16 daily PDF 失败修复
+
+#### 通用 LaTeX fallback 与宿主机超时收口
+
+- **影响论文**：daily `2026-06-16` 的 `2606.14777`、`2606.11176`。
+- **根因定位**：
+  - `2606.14777` 的 `jingdong.cls` 在 XeLaTeX/LuaLaTeX 路径中直接执行 `\pdfoutput`、`\pdfmapline` 等 pdfTeX primitive，后续还把本地 T1 字体族设成 `\sfdefault`，导致 `xdvipdfmx` 找不到 `JINGDONGLangZhengTi2-Regular` 的 TFM；
+  - `2606.11176` 翻译后存在自定义零参数宏与中文/中文标点粘连，例如 `\methodshort\并非`、`\yespart标记`，并缺少 `\faSearch` fallback；
+  - 宿主机 `translate_full.py` 的流式读取实际使用阻塞 `readline()`，容器长时间无换行输出时外层 timeout 不能稳定收口。
+- **修复**：
+  - 将自定义零参数宏 CJK 粘连修复抽象到 `latex_translation_filters.py`，按已定义宏自动处理后接中文、中文标点或 ASCII 的场景；
+  - 将 pdfTeX primitive 行 guard 抽象到共享过滤模块，并在 fallback 中递归扫描本地 `.cls/.sty/.tex`；
+  - 新增本地不可用 T1 字体默认值回退：当 class/style 把本地路径字体族设为 `\sfdefault/\rmdefault/\ttdefault` 时，自动回退到 Latin Modern；
+  - FontAwesome legacy fallback 扩展到 `\faSearch`；
+  - `translate_full.py` 改为 `os.read` 非阻塞读取容器输出，timeout 后会尽力清理容器内同篇 driver 进程；
+  - 增加单元测试覆盖宏粘连和 pdfTeX primitive guard。
+- **结果**：
+  - `2606.11176` 复用翻译缓存重编译成功：`cjk_pct=85.8%`，编译健康检查通过，PDF 34.09MB；
+  - `2606.14777` 复用新 no-cache 翻译缓存重编译成功：`cjk_pct=84.9%`，编译健康检查通过，PDF 5.06MB；
+  - `data/daily/2026-06-16/index.json` 三篇均为 `pdf_status=ok`，两篇旧失败日志和失败现场 tex 已清理。
+- **验证**：
+  - `python3 -m py_compile full_translate_driver.py latex_translation_filters.py translate_full.py run_papers.py run_repair.py` 通过；
+  - `python3 -m unittest tests.test_latex_translation_filters -v` 通过；
+  - `python3 run_repair.py --retry-pdf --mode daily --key 2026-06-16` 成功恢复两篇失败 PDF；
+  - 容器内最新 `merge_translate_zh.log` 无 undefined command/citation/reference、missing number、fatal/emergency 残留。
+
+---
+
 ## v4.20 — 2026-06-16
 
 ### retry-pdf slim 容器恢复与 LaTeX fallback 加固

@@ -175,3 +175,110 @@ def strip_llm_translation_artifacts(text: str) -> Tuple[str, int]:
         new_text, count = pattern.subn("", new_text)
         total += count
     return new_text, total
+
+
+ZERO_ARG_COMMAND_DEF_RE = re.compile(
+    r"\\(?:newcommand|renewcommand|providecommand)\*?\s*"
+    r"(?:\{\\([A-Za-z@]+)\}|\\([A-Za-z@]+))"
+    r"(?:\[(\d+)\])?"
+)
+
+CJK_COMMAND_FOLLOW_RE = (
+    r"[\u3400-\u4dbf\u4e00-\u9fff"
+    r"\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001"
+    r"\uff08\uff09\u300a\u300b\u201c\u201d\u2018\u2019]"
+)
+
+
+def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
+    r"""Separate no-argument custom macros from glued CJK text/punctuation.
+
+    Translated TeX commonly turns ``\name\ 中文`` into ``\name\中文`` or
+    ``\name中文``. XeLaTeX can parse the glued part as an undefined command.
+    The fix is to terminate known zero-argument custom macros with ``{}``.
+    """
+    macro_names = set()
+    definition_spans = []
+    for m in ZERO_ARG_COMMAND_DEF_RE.finditer(text or ""):
+        arg_count = m.group(3)
+        if arg_count not in (None, "0"):
+            continue
+        name = m.group(1) or m.group(2)
+        if not name:
+            continue
+        macro_names.add(name)
+        definition_spans.append((m.start(), m.end()))
+
+    if not macro_names:
+        return text, 0
+
+    def in_definition(pos: int) -> bool:
+        return any(start <= pos < end for start, end in definition_spans)
+
+    names_pat = "|".join(re.escape(n) for n in sorted(macro_names, key=len, reverse=True))
+    slash_cjk_re = re.compile(r"\\(" + names_pat + r")\\(?=" + CJK_COMMAND_FOLLOW_RE + r")")
+    glued_re = re.compile(r"\\(" + names_pat + r")(?![A-Za-z@{])(?=" + CJK_COMMAND_FOLLOW_RE + r"|[A-Za-z])")
+
+    total = 0
+
+    def replace(m) -> str:
+        nonlocal total
+        if in_definition(m.start()):
+            return m.group(0)
+        total += 1
+        return "\\" + m.group(1) + "{}"
+
+    new_text = slash_cjk_re.sub(replace, text)
+    new_text = glued_re.sub(replace, new_text)
+    return new_text, total
+
+
+PDFTEX_PRIMITIVE_NAMES = (
+    "pdfoutput",
+    "pdfminorversion",
+    "pdfcompresslevel",
+    "pdfobjcompresslevel",
+    "pdfpagewidth",
+    "pdfpageheight",
+    "pdfhorigin",
+    "pdfvorigin",
+    "pdfmapline",
+    "pdfinfo",
+    "pdfcatalog",
+    "pdfobj",
+    "pdfximage",
+    "pdfrefximage",
+    "pdfannot",
+    "pdfsavepos",
+    "pdfliteral",
+    "pdfpageattr",
+)
+
+PDFTEX_PRIMITIVE_LINE_RE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)(?P<body>\\(?P<name>"
+    + "|".join(re.escape(name) for name in PDFTEX_PRIMITIVE_NAMES)
+    + r")\b[^\n]*)$"
+)
+
+
+def guard_pdftex_primitive_lines(text: str) -> Tuple[str, int]:
+    """Wrap pdfTeX-only primitive lines so XeLaTeX/LuaLaTeX can skip them."""
+    total = 0
+
+    def replace(m) -> str:
+        nonlocal total
+        line = m.group(0)
+        name = m.group("name")
+        if "\\ifdefined\\" + name in line:
+            return line
+        total += 1
+        return (
+            m.group("indent")
+            + "\\ifdefined\\"
+            + name
+            + m.group("body")
+            + "\\fi"
+        )
+
+    new_text = PDFTEX_PRIMITIVE_LINE_RE.sub(replace, text or "")
+    return new_text, total

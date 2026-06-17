@@ -158,6 +158,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 增加自定义宏中文粘连、误生成 `\textWord`、唯一前缀 label/ref 的自动修补。
 - [x] 增加旧式 fontawesome alias、XeLaTeX microtype、本地 `NVIDIASans` 字体映射和 BibTeX 中间文件恢复补丁，修复 2026-06-12 daily 两篇失败 PDF。
 - [x] 基于 gpt-academic 原始 splitter 增加 preserve 节点二次安全拆分，覆盖表格单元格和 algorithmic 说明文字，同时保留硬保护环境不翻译。
+- [x] 将自定义零参数宏/CJK 粘连、pdfTeX primitive guard、本地不可用 T1 字体默认值回退沉淀为通用 fallback，修复 2026-06-16 daily 两篇失败 PDF。
+- [x] 将 `translate_full.py` 宿主机输出读取改为非阻塞轮询，避免容器长时间无换行输出时外层 timeout 失效。
 - [x] 增加超长正文句子级拆分、CLI/GUI 轨迹环境硬保护、verbatim 环境恢复和缺 `.bib` 时复用既有 `.bbl`，修复 2026-06-14 daily `2606.09426` 失败 PDF。
 - [x] 抽象 `latex_translation_filters.py`，统一 splitter、质量门禁和 fallback 的环境筛选/过滤条件，并支持环境变量扩展。
 - [x] 修复 retry-pdf slim 默认容器、精确容器检查、容器内翻译缓存复用和缓存失败后的 no-cache fallback。

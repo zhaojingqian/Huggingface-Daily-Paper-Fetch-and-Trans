@@ -74,7 +74,7 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。
 
-全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义宏与中文粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、坏 `.aux`、旧式 FontAwesome 图标、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
+全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、坏 `.aux`、旧式 FontAwesome 图标、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
 
 splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、bibliography 等硬保护区域。
 
@@ -82,7 +82,9 @@ splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 ma
 
 过滤策略可通过环境变量扩展：`PAPER_TRANS_EXTRA_HARD_ENVS` 增加需要硬保护的环境名，`PAPER_TRANS_EXTRA_SOFT_ENVS` 增加可拆出自然语言继续翻译的环境名，`PAPER_TRANS_EXTRA_RESTORE_ENVS` 增加 fallback 中可从原文恢复的环境名，`PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS` 按行增加需要清理的模型残留正则。
 
-fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，从 tex 预生成 BibTeX 中间文件，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 字体映射时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
+fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
+
+宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间没有换行输出时，外层 timeout 仍会按时收口，并会尽力清理同篇 `full_translate_driver.py` 进程，避免 retry 阶段被悬挂的旧编译卡住。
 
 `logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
 

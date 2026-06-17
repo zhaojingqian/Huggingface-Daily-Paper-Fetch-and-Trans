@@ -63,6 +63,42 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertNotIn("Below is", stripped)
         self.assertNotIn("请提供", stripped)
 
+    def test_separate_custom_macro_cjk_glue(self):
+        text = (
+            r"\newcommand{\methodshort}{Data2Story}" "\n"
+            r"\newcommand{\method}{Data Journalist Agent}" "\n"
+            r"\newcommand{\yespart}{\ding{51}}" "\n"
+            r"\newcommand{\witharg}[1]{#1}" "\n"
+            r"\methodshort\并非默认使用纯文本。" "\n"
+            r"\methodshort\，这些示例被选取。" "\n"
+            r"\method\进行了评估。" "\n"
+            r"\yespart标记部分代码。" "\n"
+            r"\witharg中文不应改。"
+        )
+
+        fixed, count = filters.separate_custom_macro_cjk_glue(text)
+
+        self.assertEqual(count, 4)
+        self.assertIn(r"\methodshort{}并非", fixed)
+        self.assertIn(r"\methodshort{}，", fixed)
+        self.assertIn(r"\yespart{}标记", fixed)
+        self.assertIn(r"\witharg中文", fixed)
+
+    def test_guard_pdftex_primitive_lines(self):
+        text = (
+            r"\pdfoutput=1" "\n"
+            r"  \pdfmapline{+font < font.ttf < enc.enc}" "\n"
+            r"\ifdefined\pdfinfo\pdfinfo{/Title(Test)}\fi" "\n"
+            r"\section{正文}"
+        )
+
+        fixed, count = filters.guard_pdftex_primitive_lines(text)
+
+        self.assertEqual(count, 2)
+        self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
+        self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
+        self.assertEqual(fixed.count(r"\ifdefined\pdfinfo"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
