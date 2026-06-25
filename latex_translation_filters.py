@@ -213,6 +213,12 @@ CJK_COMMAND_FOLLOW_RE = (
     r"\uff08\uff09\u300a\u300b\u201c\u201d\u2018\u2019]"
 )
 
+CJK_CHAR_CLASS = CJK_COMMAND_FOLLOW_RE
+
+CJK_INTER_CHAR_SPACE_RE = re.compile(
+    r"(" + CJK_CHAR_CLASS + r") +(?=" + CJK_CHAR_CLASS + r")"
+)
+
 
 def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
     r"""Separate no-argument custom macros from glued CJK text/punctuation.
@@ -254,7 +260,40 @@ def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
 
     new_text = slash_cjk_re.sub(replace, text)
     new_text = glued_re.sub(replace, new_text)
+
+    brace_cjk_re = re.compile(
+        r"\\(" + names_pat + r")\{\}(?=" + CJK_COMMAND_FOLLOW_RE + r")"
+    )
+
+    def replace_brace(m) -> str:
+        nonlocal total
+        if in_definition(m.start()):
+            return m.group(0)
+        total += 1
+        return "\\" + m.group(1) + "{} "
+
+    new_text = brace_cjk_re.sub(replace_brace, new_text)
+    new_text, stripped = strip_redundant_macro_empty_groups(new_text, macro_names)
+    total += stripped
     return new_text, total
+
+
+def strip_redundant_macro_empty_groups(text: str, macro_names: Set[str]) -> Tuple[str, int]:
+    """Drop ``\\name{}`` before CJK text when ``\\name`` is zero-argument."""
+    if not macro_names:
+        return text, 0
+    names_pat = "|".join(re.escape(n) for n in sorted(macro_names, key=len, reverse=True))
+    pattern = re.compile(
+        r"\\(" + names_pat + r")\{\}(?=\s*"
+        + CJK_CHAR_CLASS
+        + r"|[，。！？；：、])"
+    )
+    return pattern.subn(lambda m: "\\" + m.group(1), text or "")
+
+
+def collapse_spaced_cjk_characters(text: str) -> Tuple[str, int]:
+    """Remove GPT-injected spaces between consecutive CJK characters/punctuation."""
+    return CJK_INTER_CHAR_SPACE_RE.subn(r"\1", text or "")
 
 
 PDFTEX_PRIMITIVE_NAMES = (
@@ -306,3 +345,60 @@ def guard_pdftex_primitive_lines(text: str) -> Tuple[str, int]:
 
     new_text = PDFTEX_PRIMITIVE_LINE_RE.sub(replace, text or "")
     return new_text, total
+
+
+CAPTION_MARKER = r"\caption{"
+STRUCTURAL_CMD_IN_CAPTION_RE = re.compile(
+    r"\\(section|subsection|subsubsection|paragraph|subparagraph)\*?(\s*)\{"
+)
+
+
+def _find_matching_brace(text: str, open_idx: int) -> int:
+    depth = 0
+    for idx in range(open_idx, len(text)):
+        ch = text[idx]
+        if ch == "{" and (idx == 0 or text[idx - 1] != "\\"):
+            depth += 1
+        elif ch == "}" and (idx == 0 or text[idx - 1] != "\\"):
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+
+def demote_structural_commands_in_captions(text: str) -> Tuple[str, int]:
+    """Replace ``\\section``-class commands inside ``\\caption{...}`` with ``\\textbf``."""
+    if not text:
+        return text, 0
+
+    count = 0
+    result: List[str] = []
+    i = 0
+    while i < len(text):
+        start = text.find(CAPTION_MARKER, i)
+        if start < 0:
+            result.append(text[i:])
+            break
+        result.append(text[i:start])
+        open_idx = start + len(r"\caption")
+        close_idx = _find_matching_brace(text, open_idx)
+        if close_idx < 0:
+            result.append(text[start:])
+            break
+        body = text[open_idx + 1:close_idx]
+        new_body = body
+        while True:
+            m = STRUCTURAL_CMD_IN_CAPTION_RE.search(new_body)
+            if not m:
+                break
+            arg_open = m.end() - 1
+            arg_close = _find_matching_brace(new_body, arg_open)
+            if arg_close < 0:
+                break
+            arg_content = new_body[arg_open + 1:arg_close]
+            replacement = "\\textbf{" + arg_content + "}"
+            new_body = new_body[:m.start()] + replacement + new_body[arg_close + 1:]
+            count += 1
+        result.append(CAPTION_MARKER + new_body + "}")
+        i = close_idx + 1
+    return "".join(result), count

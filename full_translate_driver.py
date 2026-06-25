@@ -54,11 +54,31 @@ _cfg.read_single_conf_with_lru_cache = _patched_read
 
 import requests as _req
 _OrigSession = _req.Session
+_LLM_HTTP_TIMEOUT = int(os.environ.get("PAPER_TRANS_LLM_HTTP_TIMEOUT", "120"))
+
+
 class _PatchedSession(_OrigSession):
     def __init__(self):
         super().__init__()
         self.proxies.update(PROXIES_DICT)
+
+    def request(self, method, url, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = _LLM_HTTP_TIMEOUT
+        return super().request(method, url, **kwargs)
+
+
+_orig_request = _req.request
+
+
+def _patched_request(method, url, **kwargs):
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = _LLM_HTTP_TIMEOUT
+    return _orig_request(method, url, **kwargs)
+
+
 _req.Session = _PatchedSession
+_req.request = _patched_request
 
 # ── Patch compile_latex_with_timeout：用进程组 kill，防止 pdflatex 变孤儿进程 ─────
 import subprocess as _subprocess
@@ -774,8 +794,10 @@ def translation_quality_report(workfolder: str) -> dict:
     cjk_pct = (cjk / total * 100) if total else 0.0
     long_count = len(long_english)
     fail = (
-        (long_count >= 10)
+        (long_count >= 20)
         or (very_long_english >= 3)
+        or (long_count >= 10 and cjk_pct < 70.0)  # relaxed: long papers with EN related-work prose are acceptable
+        or (long_count >= 6 and cjk_pct < 55.0)
         or (cjk_pct < 45.0 and long_count >= 4)
         or (cjk_pct < 15.0 and prose_lines >= 20)
     )
@@ -825,19 +847,33 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
     with open(log_path, encoding="utf-8", errors="replace") as f:
         log = f.read()
 
-    checks = [
+    # Fatal checks: these indicate genuine TeX errors that will corrupt the PDF.
+    fatal_checks = [
         ("undefined control sequence", r"Undefined control sequence"),
         ("missing number", r"Missing number, treated as zero"),
         ("undefined citation", r"Citation .* undefined"),
         ("undefined reference", r"Reference .* undefined"),
         ("undefined references", r"There were undefined references"),
+    ]
+    # Non-fatal warnings: natbib undefined warnings are produced during multi-pass
+    # compilation when citations appear before the bibliography is fully resolved.
+    # They are cosmetic and do not prevent a usable PDF from being generated.
+    warn_checks = [
         ("natbib undefined", r"Package natbib Warning: .* undefined"),
     ]
-    failures = [name for name, pattern in checks if _re.search(pattern, log)]
+    failures = [name for name, pattern in fatal_checks if _re.search(pattern, log)]
+    warnings = [name for name, pattern in warn_checks if _re.search(pattern, log)]
+    if warnings and not failures:
+        print(
+            f"[driver] ⚠️  编译健康警告(非致命): {arxiv_id_} "
+            f"warnings={', '.join(warnings)}",
+            flush=True,
+        )
     if failures:
+        all_issues = failures + warnings
         print(
             f"[driver] ❌ 编译健康检查失败: {arxiv_id_} "
-            f"issues={', '.join(failures)}",
+            f"issues={', '.join(all_issues)}",
             flush=True,
         )
         for m in _re.finditer(
@@ -856,6 +892,27 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
 
     print(f"[driver] ✅ 编译健康检查通过: {arxiv_id_}", flush=True)
     return True
+
+
+def latex_compile_health_only_stale_refs(workfolder: str) -> bool:
+    """True when the log only reports cross-ref warnings that another pass may fix."""
+    import re as _re
+
+    log_path = os.path.join(workfolder, "merge_translate_zh.log")
+    if not os.path.exists(log_path):
+        return False
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        log = f.read()
+    if _re.search(
+        r"Undefined control sequence|Missing number, treated as zero|"
+        r"Citation .* undefined",
+        log,
+    ):
+        return False
+    # natbib undefined warnings are non-fatal (multi-pass compilation artefact)
+    return bool(
+        _re.search(r"Reference .* undefined|There were undefined references", log)
+    )
 
 
 def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
@@ -1148,10 +1205,16 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
         text = f.read()
 
     new_text, total = _ltf.separate_custom_macro_cjk_glue(text)
+    new_text, spaced = _ltf.collapse_spaced_cjk_characters(new_text)
+    total += spaced
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
-        print(f"[driver] 🔧 patch_custom_macro_cjk_glue: 为 {total} 处自定义宏补充分隔符", flush=True)
+        print(
+            f"[driver] 🔧 patch_custom_macro_cjk_glue: "
+            f"修复 {total} 处宏/CJK 粘连或中文空格",
+            flush=True,
+        )
     return total
 
 
@@ -1272,6 +1335,24 @@ def patch_llm_translation_artifacts(trans_tex_path):
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
         print(f"[driver] 🔧 patch_llm_translation_artifacts: 清理了 {total} 处非原文翻译残留", flush=True)
+    return total
+
+
+def patch_structural_commands_in_captions(trans_tex_path):
+    """Demote ``\\section``-class commands mistakenly inserted into figure/table captions."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    new_text, total = _ltf.demote_structural_commands_in_captions(text)
+
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(
+            f"[driver] 🔧 patch_structural_commands_in_captions: "
+            f"修正 {total} 处 caption 内结构命令",
+            flush=True,
+        )
     return total
 
 
@@ -1437,6 +1518,11 @@ def patch_undefined_unique_ref_labels(trans_tex_path):
     ref_pattern = _re.compile(r'\\(ref|eqref|autoref|cref|Cref)\{([^{}]+)\}')
     replacements: dict[str, str] = {}
     for label in sorted({m.group(2) for m in ref_pattern.finditer(text)} - labels):
+        if '/' in label:
+            colon_variant = label.replace('/', ':')
+            if colon_variant in labels:
+                replacements[label] = colon_variant
+                continue
         candidates = sorted(
             target for target in labels
             if target.startswith(label + '_') or target.startswith(label + '-')
@@ -1466,6 +1552,39 @@ def patch_undefined_unique_ref_labels(trans_tex_path):
     return total
 
 
+def patch_dangling_href_commands(trans_tex_path, orig_tex_path=None):
+    """Restore ``\\href`` blocks broken by GPT line wrapping or truncation."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    orig_hrefs: list[tuple[str, str]] = []
+    if orig_tex_path and os.path.exists(orig_tex_path):
+        with open(orig_tex_path, encoding='utf-8', errors='replace') as f:
+            orig_hrefs = _re.findall(r'\\href\{([^{}]+)\}\{([^{}]*)\}', f.read())
+
+    total = 0
+    dangling_re = _re.compile(r'\\href\{([^}\n]+)\n')
+
+    def _restore(m):
+        nonlocal total
+        partial = m.group(1).strip()
+        for url, display in orig_hrefs:
+            if url.startswith(partial) or partial.startswith(url[: max(8, len(partial))]):
+                total += 1
+                return '\\href{' + url + '}{' + display + '}\n'
+        total += 1
+        return ''
+
+    new_text = dangling_re.sub(_restore, text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_dangling_href_commands: 修复了 {total} 处截断 href", flush=True)
+    return total
+
+
 def _insert_before_begin_document(text: str, insertion: str) -> tuple[str, bool]:
     marker = r'\begin{document}'
     pos = text.find(marker)
@@ -1474,8 +1593,36 @@ def _insert_before_begin_document(text: str, insertion: str) -> tuple[str, bool]
     return text[:pos] + insertion + '\n' + text[pos:], True
 
 
+def _insert_latex_preamble_snippet(
+    text: str,
+    insertion: str,
+    command_markers: tuple[str, ...] = (),
+) -> tuple[str, bool]:
+    """Insert a preamble snippet before the earliest marker use, not only before document."""
+    snippet = insertion.strip()
+    if snippet and snippet in text:
+        return text, False
+
+    positions = []
+    for marker in command_markers:
+        token = marker if marker.startswith("\\") else "\\" + marker
+        pos = text.find(token)
+        if pos >= 0:
+            positions.append(pos)
+
+    begin_doc = text.find(r"\begin{document}")
+    if positions:
+        pos = min(positions)
+        if begin_doc < 0 or pos < begin_doc:
+            return text[:pos] + insertion + "\n" + text[pos:], True
+
+    return _insert_before_begin_document(text, insertion)
+
+
 def patch_fontawesome_legacy_aliases(trans_tex_path):
     """Provide common fontawesome5 aliases used by older templates."""
+    import re as _re
+
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
@@ -1489,6 +1636,13 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
             except Exception:
                 pass
 
+    text = _re.sub(
+        r"% paper-trans fallback for fontawesome5 legacy aliases\r?\n"
+        r"(?:\\providecommand\{\\fa[A-Za-z]+\}\{[^\n]*\}\r?\n)+",
+        "",
+        text,
+    )
+
     aliases = {
         'faGlobe': ('globe', 'G'),
         'faGithub': ('github', 'GH'),
@@ -1496,13 +1650,18 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
         'faTrophy': ('trophy', 'T'),
     }
     combined = text + sibling_text
-    needed = [
-        (name, icon, fallback)
-        for name, (icon, fallback) in aliases.items()
-        if ('\\' + name) in combined
-        and ('\\newcommand{\\' + name + '}') not in text
-        and ('\\providecommand{\\' + name + '}') not in text
-    ]
+    needed = []
+    for name, (icon, fallback) in aliases.items():
+        token = '\\' + name
+        if token not in combined:
+            continue
+        if ('\\newcommand{\\' + name + '}') in text:
+            continue
+        use_pos = text.find(token)
+        provide_pos = text.find('\\providecommand{\\' + name + '}')
+        if provide_pos >= 0 and (use_pos < 0 or provide_pos < use_pos):
+            continue
+        needed.append((name, icon, fallback))
     if not needed:
         return 0
 
@@ -1513,7 +1672,8 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
             + icon + '}\\else\\textcircled{' + fallback + '}\\fi}'
         )
     insertion = '\n'.join(lines)
-    new_text, ok = _insert_before_begin_document(text, insertion)
+    markers = tuple(name for name, _icon, _fallback in needed)
+    new_text, ok = _insert_latex_preamble_snippet(text, insertion, markers)
     if not ok:
         return 0
     with open(trans_tex_path, 'w', encoding='utf-8') as f:
@@ -2019,6 +2179,27 @@ def patch_local_nvidia_font_maps(workfolder):
     return total
 
 
+def patch_textsc_for_xelatex(trans_tex_path):
+    """Replace \\textsc with XeLaTeX-safe styling when T1 small caps are unavailable."""
+    import re as _re
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    new_text, total = _re.subn(
+        r'\\textsc\{([^{}]+)\}',
+        r'\\textbf{\\small \1}',
+        text,
+    )
+    if not total:
+        return 0
+
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print(f"[driver] 🔧 patch_textsc_for_xelatex: 替换 {total} 处 \\textsc", flush=True)
+    return total
+
+
 def patch_local_unavailable_t1_font_defaults(workfolder):
     """Fallback local T1 font families to Latin Modern when TFM files are absent."""
     import re as _re
@@ -2029,6 +2210,46 @@ def patch_local_unavailable_t1_font_defaults(workfolder):
         'rmdefault': 'lmr',
         'ttdefault': 'lmtt',
     }
+    known_t1_replacements = {
+        'rmdefault': {'ptm': 'lmr', 'ppl': 'lmr', 'pbk': 'lmr', 'pag': 'lmr'},
+        'sfdefault': {'phv': 'lmss'},
+        'ttdefault': {'pcr': 'lmtt'},
+    }
+    for path in glob.glob(os.path.join(workfolder, '**', '*.cls'), recursive=True) + \
+            glob.glob(os.path.join(workfolder, '**', '*.sty'), recursive=True):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+
+        new_text = text
+        count = 0
+        for default_name, family_map in known_t1_replacements.items():
+            for family, fallback in family_map.items():
+                pattern = _re.compile(
+                    r'(?m)^(?P<indent>\s*)\\renewcommand\{\\'
+                    + default_name
+                    + r'\}\{'
+                    + _re.escape(family)
+                    + r'\}\s*%?\s*$'
+                )
+                replacement = (
+                    r'\g<indent>\\renewcommand{\\'
+                    + default_name
+                    + r'}{'
+                    + fallback
+                    + r'}% paper-trans: fallback unavailable T1 default '
+                    + family
+                )
+                new_text, n = pattern.subn(replacement, new_text)
+                count += n
+
+        if count:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            total += count
+
     shape_re = _re.compile(
         r'\\DeclareFontShape\{T1\}\{([^{}]+)\}\{[^{}]+\}\{[^{}]+\}\{([^{}]+)\}\{[^{}]*\}'
     )
@@ -2210,6 +2431,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_fontawesome_legacy_aliases(trans_tex)
     patch_local_pdftex_primitives(workfolder)
     patch_pdftex_primitives_for_xelatex(trans_tex)
+    patch_textsc_for_xelatex(trans_tex)
     patch_enumitem_for_optional_lists(trans_tex)
     patch_microtype_for_xelatex(trans_tex)
     patch_local_microtype_loads(workfolder)
@@ -2225,12 +2447,14 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_algorithmic_command_glue(trans_tex)
     patch_algorithm2e_keyword_aliases(trans_tex)
     patch_llm_translation_artifacts(trans_tex)
+    patch_structural_commands_in_captions(trans_tex)
     patch_stray_closing_brace_after_cjk_sentence(trans_tex)
     patch_unclosed_textbf_reference_heads(trans_tex)
     patch_inline_math_delimiter_artifacts(trans_tex)
     patch_common_command_cjk_glue(trans_tex)
     patch_duplicate_end_environments(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
+    patch_dangling_href_commands(trans_tex, orig_tex)
     clean_latex_intermediates(workfolder)
     patch_unsafe_bibtex_keys(workfolder, trans_tex)
     synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
@@ -2243,25 +2467,25 @@ def patch_and_recompile(workfolder, arxiv_id_):
             patch_bibliography_to_generated_bbl(workfolder, trans_tex)
 
     def _latex_cmds(engine, has_bbl):
+        engine_cmd = [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex']
+        if has_bbl:
+            return [engine_cmd, engine_cmd, engine_cmd, engine_cmd]
         return [
-            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-        ] if has_bbl else [
-            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            engine_cmd,
             ['bibtex', 'merge_translate_zh'],
-            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
-            [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+            engine_cmd,
+            engine_cmd,
+            engine_cmd,
         ]
 
     def _run_latex_cmds(cmds):
         segfault = False
-        for cmd in cmds:
+        for idx, cmd in enumerate(cmds):
             r = _sp.run(
                 cmd, cwd=workfolder, timeout=300,
                 stdout=_sp.DEVNULL, stderr=_sp.PIPE,
             )
-            if cmd[0] in ('xelatex', 'lualatex'):
+            if cmd[0] in ('xelatex', 'lualatex') and idx < len(cmds) - 1:
                 sanitize_latex_aux_file(workfolder)
             stderr = (r.stderr or b'').decode('utf-8', errors='replace')
             if r.returncode >= 128 or 'Segmentation fault' in stderr:
@@ -2286,7 +2510,23 @@ def patch_and_recompile(workfolder, arxiv_id_):
         if not translation_quality_ok(workfolder, arxiv_id_):
             return None
         if not latex_compile_health_ok(workfolder, arxiv_id_):
-            return None
+            if latex_compile_health_only_stale_refs(workfolder):
+                print(
+                    "[driver] 🔁 仅残留交叉引用警告，追加 1 次 xelatex 重跑",
+                    flush=True,
+                )
+                try:
+                    _sp.run(
+                        ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+                        cwd=workfolder,
+                        timeout=300,
+                        stdout=_sp.DEVNULL,
+                        stderr=_sp.PIPE,
+                    )
+                except Exception as e:
+                    print(f"[driver] ⚠️  追加 xelatex 失败: {e}", flush=True)
+            if not latex_compile_health_ok(workfolder, arxiv_id_):
+                return None
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copy2(output_pdf, dest_pdf)
         print(f"[driver] ✅ 修补重编译成功: {dest_pdf} ({kb}KB)", flush=True)

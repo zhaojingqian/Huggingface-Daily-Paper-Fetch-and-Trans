@@ -101,11 +101,31 @@ class LatexTranslationFiltersTest(unittest.TestCase):
 
         fixed, count = filters.separate_custom_macro_cjk_glue(text)
 
-        self.assertEqual(count, 4)
-        self.assertIn(r"\methodshort{}并非", fixed)
-        self.assertIn(r"\methodshort{}，", fixed)
-        self.assertIn(r"\yespart{}标记", fixed)
+        self.assertEqual(count, 12)
+        self.assertIn(r"\methodshort 并非", fixed)
+        self.assertIn(r"\methodshort ，", fixed)
+        self.assertIn(r"\yespart 标记", fixed)
         self.assertIn(r"\witharg中文", fixed)
+
+    def test_separate_custom_macro_empty_group_cjk_glue(self):
+        text = (
+            r"\newcommand{\Ours}{\OURS}" "\n"
+            r"\Ours{}通过空间对齐。"
+        )
+
+        fixed, count = filters.separate_custom_macro_cjk_glue(text)
+
+        self.assertEqual(count, 2)
+        self.assertIn(r"\Ours 通过", fixed)
+
+    def test_collapse_spaced_cjk_characters(self):
+        text = r"\item 我 们提出了\Ours{}，一种统一框架。"
+
+        fixed, count = filters.collapse_spaced_cjk_characters(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn("我们提出了", fixed)
+        self.assertNotIn("我 们", fixed)
 
     def test_guard_pdftex_primitive_lines(self):
         text = (
@@ -121,6 +141,19 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
         self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
         self.assertEqual(fixed.count(r"\ifdefined\pdfinfo"), 1)
+
+    def test_demote_structural_commands_in_captions(self):
+        text = (
+            r"\caption{\section{\bench{} 概述} \textit{\textbf{数据构建}} 正文。}" "\n"
+            r"\caption{\section*{无星号标题} 说明。}"
+        )
+
+        fixed, count = filters.demote_structural_commands_in_captions(text)
+
+        self.assertEqual(count, 2)
+        self.assertIn(r"\caption{\textbf{\bench{} 概述}", fixed)
+        self.assertNotIn(r"\caption{\section{", fixed)
+        self.assertIn(r"\caption{\textbf{无星号标题}", fixed)
 
 
 if __name__ == "__main__":
