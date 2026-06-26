@@ -101,7 +101,9 @@ def _restore_tex_to_container(arxiv_id: str) -> bool:
     """
     local_tex = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
     if not os.path.exists(local_tex) or os.path.getsize(local_tex) == 0:
-        return False
+        local_tex = os.path.join(TEX_FAILED_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
+        if not os.path.exists(local_tex) or os.path.getsize(local_tex) == 0:
+            return False
     workfolder = _container_workfolder(arxiv_id)
     # 确保容器内目标目录存在
     subprocess.run(
@@ -118,7 +120,7 @@ def _restore_tex_to_container(arxiv_id: str) -> bool:
         # docker cp writes files as root. The driver runs as gptuser and needs to
         # rewrite merge_translate_zh.tex during keep-translation repair passes.
         _ensure_workfolder_writable(arxiv_id)
-        print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex}", flush=True)
+        print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex} (来自 {os.path.basename(os.path.dirname(local_tex))})", flush=True)
     return ok
 
 
@@ -452,6 +454,19 @@ def _clear_failed_tex_backup(arxiv_id: str):
         return False
 
 
+def check_local_pdf_integrity(filepath: str) -> bool:
+    """Read the tail of the file to verify it ends with standard %%EOF marker."""
+    if not os.path.exists(filepath) or os.path.getsize(filepath) < 4096:
+        return False
+    try:
+        with open(filepath, 'rb') as f:
+            f.seek(-1024, os.SEEK_END)
+            tail = f.read()
+            return b'%%EOF' in tail
+    except Exception:
+        return False
+
+
 def translate_full(arxiv_id: str, output_dir: str,
                    no_cache: bool = False, timeout: int = 3600,
                    keep_translation: bool = False) -> dict:
@@ -516,7 +531,7 @@ def translate_full(arxiv_id: str, output_dir: str,
     if kind == "pdf":
         local_pdf = os.path.join(output_dir, f"{arxiv_id}_zh.pdf")
         if copy_from_container(container_path, local_pdf):
-            if os.path.exists(local_pdf) and os.path.getsize(local_pdf) > 4096:
+            if check_local_pdf_integrity(local_pdf):
                 result['success'] = True
                 result['pdf_path'] = local_pdf
                 size_mb = os.path.getsize(local_pdf) / 1024 / 1024
@@ -525,7 +540,7 @@ def translate_full(arxiv_id: str, output_dir: str,
                 _clear_error_log(arxiv_id)
                 _clear_failed_tex_backup(arxiv_id)
             else:
-                result['error'] = "PDF 复制成功但文件过小或为空"
+                result['error'] = "PDF 复制成功但文件损坏或为空（未找到 EOF 标记）"
                 print(f"❌ {result['error']}", flush=True)
                 _backup_tex_from_container(arxiv_id, failed=True)
         else:

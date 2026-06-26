@@ -31,6 +31,7 @@ else
       --restart unless-stopped \
       --memory="$MEMORY" \
       --memory-swap="$MEMORY_SWAP" \
+      --memory-swappiness=60 \
       -v "${CONFIG}:/gpt/config_private.py:ro" \
       "$IMAGE" >/dev/null
   fi

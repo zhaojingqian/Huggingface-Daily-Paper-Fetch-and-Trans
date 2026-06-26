@@ -350,6 +350,7 @@ def retry_pdf(mode=None, key=None):
     from translate_full import (
         CONTAINER_NAME,
         TEX_BACKUP_DIR,
+        TEX_FAILED_BACKUP_DIR,
         _restore_tex_to_container,
         translate_full,
     )
@@ -406,6 +407,9 @@ def retry_pdf(mode=None, key=None):
 
                 host_tex = os.path.join(TEX_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
                 has_host = os.path.exists(host_tex) and os.path.getsize(host_tex) > 0
+                if not has_host:
+                    host_tex_failed = os.path.join(TEX_FAILED_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
+                    has_host = os.path.exists(host_tex_failed) and os.path.getsize(host_tex_failed) > 0
 
                 if has_container:
                     has_cache = True

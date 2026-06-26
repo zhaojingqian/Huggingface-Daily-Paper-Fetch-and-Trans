@@ -86,7 +86,7 @@ fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontaweso
 
 宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间没有换行输出时，外层 timeout 仍会按时收口，并会尽力清理同篇 `full_translate_driver.py` 进程，避免 retry 阶段被悬挂的旧编译卡住。
 
-`logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。
+`logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。如果编译超大图片/重资源论文时发生 `xdvipdfmx` 进程异常退出或超时（可能由 OOM 强杀导致），需确认独立容器已启用 `--memory-swappiness=60` 以允许向 Swap 换页。
 
 ### Web 服务
 
@@ -326,7 +326,7 @@ GPT_ACADEMIC_SLIM_EXPORT_ARCHIVE=/tmp/paper-trans-fulltex-slim.tar.gz \
 # 显式使用历史 slim TeX 裁剪策略
 GPT_ACADEMIC_SLIM_TEX_PROFILE=slim ./scripts/build_latex_slim.sh
 
-# 启动独立容器 gpt-academic-latex-slim，并复用 config_private.py
+# 启动独立容器 gpt-academic-latex-slim，并复用 config_private.py (默认携带 --memory=1400m --memory-swap=3000m --memory-swappiness=60 参数)
 ./scripts/run_latex_slim.sh
 
 # 镜像已内置 setup 补丁时可跳过启动时 setup，减少磁盘和 apt cache 抖动

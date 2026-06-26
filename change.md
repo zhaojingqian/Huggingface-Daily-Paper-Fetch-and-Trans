@@ -2,6 +2,32 @@
 
 ---
 
+## v4.24 — 2026-06-26
+
+### PDF 编译 OOM 强杀与健康检查漏过修复
+
+#### 开启容器 Swappiness 与 sequential 编译架构优化
+
+- **影响论文**：daily `2026-06-24` 的 `2606.19930` (MobileForge) 和 daily `2026-06-25` 的 `2606.26058` (DomainShuttle)。
+- **根因定位**：
+  - **内存超限**：两篇论文含有高分辨率或超大图片（MobileForge 含有 32MB 图像，DomainShuttle 含有 11MB PNG 及多个 3MB PDF）。在 1.8GB RAM 物理内存受限的机器上，`xelatex` 编译至 DVI 并并发调用 `xdvipdfmx` 转换 PDF 时，两者并发运行引发系统级 host OOM 强杀进程。
+  - **Docker 限制**：旧 Docker 容器未显式设置 `memory-swappiness`。在 `--memory` 内存限制下，内核 cgroup 的 `memory.swappiness` 默认为 `0`，禁止使用宿主机交换空间（Swap），导致即使宿主机有 2.8GB 闲置 Swap，容器进程依然会被直接强杀。
+  - **健康检查绕过**：如果编译被强杀，生成的 PDF 往往是不完整的损坏文件。然而由于强杀导致编译日志 `merge_translate_zh.log` 同样被截断（如刚好卡在 80KB 处），日志中未写入最终的错误报告与引用缺失汇总。旧健康门禁仅在日志中查找特定错误特征，未检测日志是否完整，导致漏判，认为编译通过并把坏 PDF 复制给用户。
+- **修复**：
+  - **解除 Swap 限制**：在 `scripts/run_latex_slim.sh` 中为 `docker run` 命令添加 `--memory-swappiness=60` 参数，解封容器内存页在物理 RAM 不足时与宿主机 Swap 文件的正常换页操作。
+  - **编译拆分串行**：修改 `full_translate_driver.py` 中的 LaTeX/DVI 管道，采用串行两阶段执行（通过 `xelatex -no-pdf` 输出 `.xdv` 文件，等进程退出释放内存后，再调用 `xdvipdfmx -z 3` 转换 PDF，并设定压缩等级 `3` 限制 zlib 的内存开销），有效规避了两个内存大户并发占内存的现象。
+  - **超时参数放宽**：为照顾 Swap 高磁盘延迟换页，将所有 LaTeX/DVI/xdvipdfmx 编译命令执行超时从 300 秒合理放宽至 900 秒，避免被主进程提前中断。
+  - **两级健康门禁兜底**：
+    - 在驱动内通过 `latex_compile_health_ok` 首行校验编译日志中是否包含 `"Output written on ..."` 的正常写入标志，规避日志截断漏判。
+    - 在驱动内基于 `pypdf` 实现 `check_pdf_integrity` 完整性校验，确认生成的 PDF 真正可以加载且存在页面。
+    - 在宿主机端 `translate_full.py` 增加二进制后验，读取并确认从容器中复制回的本地 PDF 尾部 1024 字节内确实包含 `%%EOF` 标志（不全或损坏均判定为失败）。
+- **结果**：
+  - `2606.26058` 成功以串行编译在 72 秒内产出 28.85MB (20页) 正常 PDF。
+  - `2606.19930` 成功依靠 Swap 置换，历时 8 分钟编译出 39.51MB (34页) 正常 PDF，无 OOM 阻碍。
+  - 自动清理了宿主机端旧错误诊断与旧现场 tex。
+
+---
+
 ## v4.23 — 2026-06-25
 
 ### 2026-06-24 daily PDF 失败修复与健康门禁优化

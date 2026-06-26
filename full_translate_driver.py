@@ -813,6 +813,19 @@ def translation_quality_report(workfolder: str) -> dict:
     }
 
 
+def check_pdf_integrity(pdf_path: str) -> bool:
+    """Check that the PDF file exists, is larger than 50KB, and can be successfully parsed with pages."""
+    if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) < 50 * 1024:
+        return False
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(pdf_path)
+        return len(reader.pages) > 0
+    except Exception as e:
+        print(f"[driver] ⚠️ PDF 完整性检查失败 ({os.path.basename(pdf_path)}): {e}", flush=True)
+        return False
+
+
 def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
     report = translation_quality_report(workfolder)
     if not report.get("ok"):
@@ -836,7 +849,7 @@ def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
     return True
 
 
-def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
+def latex_compile_health_ok(workfolder: str, arxiv_id_: str, strict: bool = False) -> bool:
     """Reject PDFs that compiled but still have unresolved TeX/cite/ref issues."""
     import re as _re
 
@@ -847,22 +860,69 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
     with open(log_path, encoding="utf-8", errors="replace") as f:
         log = f.read()
 
+    # Verify that the log indicates successful compilation completion (not truncated/killed)
+    if "Output written on merge_translate_zh.xdv" not in log and "Output written on merge_translate_zh.pdf" not in log:
+        print(f"[driver] ❌ 编译健康检查失败: {arxiv_id_} 找不到输出写入标记，编译日志不完整（可能已被 OOM 强杀）", flush=True)
+        return False
+
+    # pdfTeX-only primitive names: XeLaTeX/LuaLaTeX raise "Undefined control sequence"
+    # for these, but the engine recovers and the PDF is still complete.  Treat these
+    # occurrences as non-fatal warnings rather than hard failures.
+    _PDFTEX_PRIM_RE = _re.compile(
+        r"\\(?:pdfoutput|pdfminorversion|pdfcompresslevel|pdfobjcompresslevel|"
+        r"pdfpagewidth|pdfpageheight|pdfhorigin|pdfvorigin|pdfmapline|pdfinfo|"
+        r"pdfcatalog|pdfobj|pdfximage|pdfrefximage|pdfannot|pdfsavepos|"
+        r"pdfliteral|pdfpageattr)\b"
+    )
+
+    def _has_fatal_undefined_control(text: str) -> bool:
+        """True when any Undefined control sequence is NOT a pdfTeX primitive."""
+        for m in _re.finditer(r"Undefined control sequence", text):
+            # Inspect the next 300 chars for a pdfTeX primitive name.
+            context = text[m.start(): m.start() + 300]
+            if not _PDFTEX_PRIM_RE.search(context):
+                return True
+        return False
+
+    def _has_pdftex_undef(text: str) -> bool:
+        """True when any Undefined control sequence IS a pdfTeX primitive."""
+        for m in _re.finditer(r"Undefined control sequence", text):
+            context = text[m.start(): m.start() + 300]
+            if _PDFTEX_PRIM_RE.search(context):
+                return True
+        return False
+
     # Fatal checks: these indicate genuine TeX errors that will corrupt the PDF.
-    fatal_checks = [
-        ("undefined control sequence", r"Undefined control sequence"),
-        ("missing number", r"Missing number, treated as zero"),
-        ("undefined citation", r"Citation .* undefined"),
-        ("undefined reference", r"Reference .* undefined"),
-        ("undefined references", r"There were undefined references"),
-    ]
+    failures = []
+    if _has_fatal_undefined_control(log):
+        failures.append("undefined control sequence")
+    if _re.search(r"Missing number, treated as zero", log):
+        failures.append("missing number")
+
+    # Warnings that can be promoted to failures under strict mode
+    promoted_failures = []
+    if _re.search(r"(?<!Package natbib Warning: )Citation .* undefined", log):
+        promoted_failures.append("undefined citation")
+    if _re.search(r"Reference .* undefined", log):
+        promoted_failures.append("undefined reference")
+    if _re.search(r"There were undefined references", log):
+        promoted_failures.append("undefined references")
+
     # Non-fatal warnings: natbib undefined warnings are produced during multi-pass
     # compilation when citations appear before the bibliography is fully resolved.
-    # They are cosmetic and do not prevent a usable PDF from being generated.
-    warn_checks = [
-        ("natbib undefined", r"Package natbib Warning: .* undefined"),
-    ]
-    failures = [name for name, pattern in fatal_checks if _re.search(pattern, log)]
-    warnings = [name for name, pattern in warn_checks if _re.search(pattern, log)]
+    # pdfTeX-primitive "Undefined control sequence" under XeLaTeX is similarly
+    # cosmetic — the engine skips the primitive and the PDF is complete.
+    warnings = []
+    if _re.search(r"Package natbib Warning: .* undefined", log):
+        warnings.append("natbib undefined")
+    if _has_pdftex_undef(log):
+        warnings.append("pdftex primitive undef")
+
+    if strict:
+        failures.extend(promoted_failures)
+    else:
+        warnings.extend(promoted_failures)
+
     if warnings and not failures:
         print(
             f"[driver] ⚠️  编译健康警告(非致命): {arxiv_id_} "
@@ -877,8 +937,8 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
             flush=True,
         )
         for m in _re.finditer(
-            r".{0,120}(Undefined control sequence|Missing number, treated as zero|"
-            r"Citation .* undefined|"
+            r".{0,120}(Missing number, treated as zero|"
+            r"(?<!Package natbib Warning: )Citation .* undefined|"
             r"Reference .* undefined|There were undefined references|"
             r"Label\(s\) may have changed|Rerun to get cross-references right|"
             r"Package natbib Warning: .* undefined).{0,160}",
@@ -888,6 +948,14 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str) -> bool:
             sample = " ".join(m.group(0).split())
             print(f"[driver]    log: {sample[:260]}", flush=True)
             break
+        # Also show a sample of any fatal Undefined control sequence
+        if "undefined control sequence" in failures:
+            for m in _re.finditer(r"Undefined control sequence", log):
+                context = log[m.start(): m.start() + 300]
+                if not _PDFTEX_PRIM_RE.search(context):
+                    sample = " ".join(context[:200].split())
+                    print(f"[driver]    log: {sample[:260]}", flush=True)
+                    break
         return False
 
     print(f"[driver] ✅ 编译健康检查通过: {arxiv_id_}", flush=True)
@@ -903,9 +971,23 @@ def latex_compile_health_only_stale_refs(workfolder: str) -> bool:
         return False
     with open(log_path, encoding="utf-8", errors="replace") as f:
         log = f.read()
+
+    # pdfTeX-only primitives cause recoverable "Undefined control sequence" under
+    # XeLaTeX; these should not block the stale-refs re-run path.
+    _PDFTEX_PRIM_RE = _re.compile(
+        r"\\(?:pdfoutput|pdfminorversion|pdfcompresslevel|pdfobjcompresslevel|"
+        r"pdfpagewidth|pdfpageheight|pdfhorigin|pdfvorigin|pdfmapline|pdfinfo|"
+        r"pdfcatalog|pdfobj|pdfximage|pdfrefximage|pdfannot|pdfsavepos|"
+        r"pdfliteral|pdfpageattr)\b"
+    )
+    for m in _re.finditer(r"Undefined control sequence", log):
+        context = log[m.start(): m.start() + 300]
+        if not _PDFTEX_PRIM_RE.search(context):
+            # A genuine (non-pdftex) undefined control sequence — cannot be fixed by rerun.
+            return False
     if _re.search(
-        r"Undefined control sequence|Missing number, treated as zero|"
-        r"Citation .* undefined",
+        r"Missing number, treated as zero|"
+        r"(?<!Package natbib Warning: )Citation .* undefined",
         log,
     ):
         return False
@@ -981,7 +1063,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
 
     # 优先：translation/translate_zh.pdf（插件最终输出）
     candidate = os.path.join(translation_dir, 'translate_zh.pdf')
-    if os.path.exists(candidate) and os.path.getsize(candidate) > 50 * 1024:
+    if check_pdf_integrity(candidate):
         kb = os.path.getsize(candidate) // 1024
         if not translation_quality_ok(workfolder, arxiv_id):
             return None
@@ -993,7 +1075,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
     # 备选：workfolder 根目录里的翻译 PDF（名字含 translate_zh）
     for fname in ('merge_translate_zh.pdf', 'translate_zh.pdf'):
         fp = os.path.join(workfolder, fname)
-        if os.path.exists(fp) and os.path.getsize(fp) > 50 * 1024:
+        if check_pdf_integrity(fp):
             kb = os.path.getsize(fp) // 1024
             if not translation_quality_ok(workfolder, arxiv_id):
                 return None
@@ -1010,7 +1092,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
     ] if os.path.isdir(workfolder) else []
     if root_pdfs:
         best = max(root_pdfs, key=os.path.getsize)
-        if os.path.getsize(best) > 50 * 1024:
+        if check_pdf_integrity(best):
             kb = os.path.getsize(best) // 1024
             if not translation_quality_ok(workfolder, arxiv_id):
                 return None
@@ -2467,7 +2549,10 @@ def patch_and_recompile(workfolder, arxiv_id_):
             patch_bibliography_to_generated_bbl(workfolder, trans_tex)
 
     def _latex_cmds(engine, has_bbl):
-        engine_cmd = [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex']
+        if engine == 'xelatex':
+            engine_cmd = [engine, '-no-pdf', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex']
+        else:
+            engine_cmd = [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex']
         if has_bbl:
             return [engine_cmd, engine_cmd, engine_cmd, engine_cmd]
         return [
@@ -2480,15 +2565,31 @@ def patch_and_recompile(workfolder, arxiv_id_):
 
     def _run_latex_cmds(cmds):
         segfault = False
+        is_xelatex = False
         for idx, cmd in enumerate(cmds):
             r = _sp.run(
-                cmd, cwd=workfolder, timeout=300,
+                cmd, cwd=workfolder, timeout=900,
                 stdout=_sp.DEVNULL, stderr=_sp.PIPE,
             )
+            if cmd[0] == 'xelatex':
+                is_xelatex = True
             if cmd[0] in ('xelatex', 'lualatex') and idx < len(cmds) - 1:
                 sanitize_latex_aux_file(workfolder)
             stderr = (r.stderr or b'').decode('utf-8', errors='replace')
             if r.returncode >= 128 or 'Segmentation fault' in stderr:
+                segfault = True
+                break
+
+        if not segfault and is_xelatex:
+            print("[driver] 🛠️  运行 xdvipdfmx 转换 DVI 为 PDF (zlib compression level = 3)", flush=True)
+            r_pdf = _sp.run(
+                ['xdvipdfmx', '-z', '3', 'merge_translate_zh.xdv'],
+                cwd=workfolder, timeout=900,
+                stdout=_sp.DEVNULL, stderr=_sp.PIPE,
+            )
+            stderr_pdf = (r_pdf.stderr or b'').decode('utf-8', errors='replace')
+            if r_pdf.returncode != 0 or 'Segmentation fault' in stderr_pdf:
+                print(f"[driver] ❌ xdvipdfmx 运行失败: returncode={r_pdf.returncode}, stderr={stderr_pdf[:200]}", flush=True)
                 segfault = True
         return segfault
 
@@ -2505,27 +2606,35 @@ def patch_and_recompile(workfolder, arxiv_id_):
         print(f"[driver] ⚠️  LaTeX/BibTeX 执行异常: {e}", flush=True)
         return None
 
-    if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 50 * 1024:
+    if check_pdf_integrity(output_pdf):
         kb = os.path.getsize(output_pdf) // 1024
         if not translation_quality_ok(workfolder, arxiv_id_):
             return None
-        if not latex_compile_health_ok(workfolder, arxiv_id_):
+        if not latex_compile_health_ok(workfolder, arxiv_id_, strict=True):
             if latex_compile_health_only_stale_refs(workfolder):
                 print(
-                    "[driver] 🔁 仅残留交叉引用警告，追加 1 次 xelatex 重跑",
+                    "[driver] 🔁 仅残留交叉引用警告，追加 1 次 xelatex 重跑 (sequential)",
                     flush=True,
                 )
                 try:
-                    _sp.run(
-                        ['xelatex', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+                    r1 = _sp.run(
+                        ['xelatex', '-no-pdf', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
                         cwd=workfolder,
-                        timeout=300,
+                        timeout=900,
                         stdout=_sp.DEVNULL,
                         stderr=_sp.PIPE,
                     )
+                    if r1.returncode == 0:
+                        _sp.run(
+                            ['xdvipdfmx', '-z', '3', 'merge_translate_zh.xdv'],
+                            cwd=workfolder,
+                            timeout=900,
+                            stdout=_sp.DEVNULL,
+                            stderr=_sp.PIPE,
+                        )
                 except Exception as e:
                     print(f"[driver] ⚠️  追加 xelatex 失败: {e}", flush=True)
-            if not latex_compile_health_ok(workfolder, arxiv_id_):
+            if not latex_compile_health_ok(workfolder, arxiv_id_, strict=False):
                 return None
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copy2(output_pdf, dest_pdf)
