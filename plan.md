@@ -140,6 +140,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 ### Phase B — 安全的单文件整理
 
+- [x] 收敛共享路径、paper store 和容器默认名常量到 `paperhub.paths`，保留各入口脚本原常量名。
+- [x] 抽出 `paperhub.paper_store`，统一 paper store JSON/PDF 读写，同时保留旧函数入口。
 - [ ] 将更多重复页面片段收敛为小 helper，但继续保持单文件部署。
 - [ ] 对 bookmarks 的 HTML/JS 输出补充更多合约测试。
 - [ ] 给 `/api/bookmarks`、`/api/search`、`/api/submit` 增加 POST/GET API 级测试。
@@ -169,6 +171,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 - [ ] 将常用 health check 命令整理成脚本。
 - [ ] 为 cron 运行结果增加轻量摘要日志。
+- [x] 修复 `run_repair.py --post` 对当前周期的跳过边界，确保首次 cron 触发后可补抓临时网络失败的 daily/weekly/monthly。
 - [ ] 对磁盘低水位、Docker 容器异常、PDF retry 长期失败增加告警入口。
 
 ### Phase E — Docker 镜像瘦身验证

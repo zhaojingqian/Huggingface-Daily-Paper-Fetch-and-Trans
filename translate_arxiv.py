@@ -15,6 +15,9 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+from paperhub import paper_store
+from paperhub.paths import PAPER_STORE_DIR
+
 # 读取 gpt-academic 配置
 GPT_ACADEMIC_CONFIG = "/root/workspace/gpt-academic/config_private.py"
 PROXY = "http://127.0.0.1:7890"
@@ -28,13 +31,11 @@ HEADERS = {
 }
 
 # Paper Store — 所有论文元数据/翻译的唯一存储（daily/weekly/monthly 共用）
-_BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
-PAPER_STORE_DIR = os.path.join(_BASE_DIR, "data", "papers")
 
 
 def _has_chinese(text):
     """检查字符串中是否包含中文字符"""
-    return bool(re.search(r'[\u4e00-\u9fff]', text or ""))
+    return paper_store.has_chinese(text)
 
 
 def _get_proxies(use_proxy):
@@ -83,27 +84,18 @@ def _fetch_with_retry(url, max_retries=4, timeout=30):
 
 # ── Paper Store 读写 ──────────────────────────────────────────────────────────
 def paper_store_path(arxiv_id):
-    os.makedirs(PAPER_STORE_DIR, exist_ok=True)
-    return os.path.join(PAPER_STORE_DIR, f"{arxiv_id}.json")
+    return paper_store.json_path(arxiv_id)
 
 
 def paper_store_read(arxiv_id):
     """读取 paper store；若不存在或 title_zh 为空则返回 None"""
-    try:
-        with open(paper_store_path(arxiv_id), encoding="utf-8") as f:
-            data = json.load(f)
-        if _has_chinese(data.get("title_zh", "")):
-            return data
-    except Exception:
-        pass
-    return None
+    return paper_store.read_translated(arxiv_id)
 
 
 def paper_store_write_raw(payload):
     """直接写入已构建好的 payload dict"""
     try:
-        with open(paper_store_path(payload["arxiv_id"]), "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        paper_store.write_raw(payload)
     except Exception as e:
         print(f"  ⚠️ paper store 写入失败: {e}", flush=True)
 

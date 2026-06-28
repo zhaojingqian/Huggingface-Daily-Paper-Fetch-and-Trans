@@ -7,49 +7,44 @@ import os, sys, json, time, fcntl, subprocess
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR        = os.path.join(BASE_DIR, "data")
-PAPER_STORE_DIR = os.path.join(DATA_DIR, "papers")   # 唯一数据源
-LOGS_DIR        = os.path.join(BASE_DIR, "logs")
-LOCK_DIR        = os.path.join(BASE_DIR, "locks")
+from paperhub import paper_store
+from paperhub.paths import (
+    ROOT_DIR as BASE_DIR,
+    DATA_DIR,
+    PAPER_STORE_DIR,
+    LOGS_DIR,
+    LOCK_DIR,
+    mode_dir,
+    mode_index_path,
+    mode_key_dir,
+    mode_papers_dir,
+)
+
 sys.path.insert(0, BASE_DIR)
 
 
 # ── Paper Store (统一存 JSON + PDF) ─────────────────────────────────────────
 def _paper_pdf_path(arxiv_id):
     """PDF 唯一存储路径"""
-    os.makedirs(PAPER_STORE_DIR, exist_ok=True)
-    return os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+    return paper_store.pdf_path(arxiv_id)
 
 
 def _pdf_store_hit(arxiv_id):
     """paper store 中有有效 PDF → 返回路径，否则 None"""
-    p = _paper_pdf_path(arxiv_id)
-    return p if os.path.exists(p) and os.path.getsize(p) > 10240 else None
+    return paper_store.pdf_hit(arxiv_id)
 
 
 def _pdf_store_save(arxiv_id, src_path):
     """成功生成的 PDF → 写入 paper store"""
-    import shutil
     try:
-        shutil.copy2(src_path, _paper_pdf_path(arxiv_id))
+        paper_store.save_pdf(arxiv_id, src_path)
     except Exception as e:
         print(f"  ⚠️ paper store PDF 写入失败: {e}", flush=True)
 
 
 def _paper_store_update_pdf_status(arxiv_id, status):
     """在 paper store JSON 里记录 pdf_status: ok / failed"""
-    from translate_arxiv import paper_store_path
-    try:
-        p = paper_store_path(arxiv_id)
-        if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                data = json.load(f)
-            data["pdf_status"] = status
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    paper_store.update_pdf_status(arxiv_id, status)
 
 
 
@@ -84,12 +79,12 @@ class RunLock:
 
 def setup_dirs(mode, key):
     """创建目录 data/<mode>/<key>/  和  data/papers/"""
-    base = os.path.join(DATA_DIR, mode, key)
+    base = mode_key_dir(mode, key)
     os.makedirs(base, exist_ok=True)
     os.makedirs(PAPER_STORE_DIR, exist_ok=True)
     os.makedirs(LOGS_DIR, exist_ok=True)
     # 兼容：旧版 papers/ 子目录仍创建，防止老代码报错
-    papers_subdir = os.path.join(base, "papers")
+    papers_subdir = mode_papers_dir(mode, key)
     os.makedirs(papers_subdir, exist_ok=True)
     return base, papers_subdir
 
@@ -360,13 +355,13 @@ def retry_pdf(mode=None, key=None):
     total_fail = 0
 
     for m in modes:
-        mode_dir = os.path.join(DATA_DIR, m)
-        if not os.path.isdir(mode_dir):
+        mode_path = mode_dir(m)
+        if not os.path.isdir(mode_path):
             continue
-        keys = [key] if key else sorted(os.listdir(mode_dir))
+        keys = [key] if key else sorted(os.listdir(mode_path))
 
         for k in keys:
-            idx_file = os.path.join(mode_dir, k, "index.json")
+            idx_file = mode_index_path(m, k)
             if not os.path.exists(idx_file):
                 continue
             try:
@@ -473,12 +468,12 @@ def repair(mode=None, key=None):
     total_fixed = 0
 
     for m in modes:
-        mode_dir = os.path.join(DATA_DIR, m)
-        if not os.path.isdir(mode_dir):
+        mode_path = mode_dir(m)
+        if not os.path.isdir(mode_path):
             continue
-        keys = [key] if key else sorted(os.listdir(mode_dir))
+        keys = [key] if key else sorted(os.listdir(mode_path))
         for k in keys:
-            idx_file = os.path.join(mode_dir, k, "index.json")
+            idx_file = mode_index_path(m, k)
             if not os.path.exists(idx_file):
                 continue
             try:

@@ -9,11 +9,22 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import requests
 
+from paperhub import paper_store
+from paperhub.paths import (
+    ROOT_DIR as BASE_DIR,
+    DATA_DIR,
+    PAPER_STORE_DIR,
+    BOOKMARKS_FILE,
+    MANUAL_DIR,
+    SUBMIT_JOBS_FILE,
+    gpt_academic_container,
+    mode_dir,
+    mode_index_path,
+    mode_key_dir,
+    mode_papers_dir,
+)
+
 PORT            = 18080
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR        = os.path.join(BASE_DIR, "data")
-PAPER_STORE_DIR = os.path.join(DATA_DIR, "papers")   # 唯一数据源
-BOOKMARKS_FILE  = os.path.join(DATA_DIR, "bookmarks.json")
 _bm_lock   = threading.Lock()
 
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
@@ -23,7 +34,7 @@ UMAMI_SCRIPT = (
     '<script defer src="https://cloud.umami.is/script.js" '
     'data-website-id="848a0bed-4004-423d-8f2b-52c9cbd39d93"></script>'
 )
-GPT_ACADEMIC_CONTAINER = os.environ.get("GPT_ACADEMIC_CONTAINER", "gpt-academic-latex-slim")
+GPT_ACADEMIC_CONTAINER = gpt_academic_container()
 
 PROXY = "http://127.0.0.1:7890"
 HTTP_HEADERS = {
@@ -53,8 +64,6 @@ def with_base_path(location):
 
 
 # ── 手动提交任务 ──────────────────────────────────────────────────────────────
-MANUAL_DIR       = os.path.join(DATA_DIR, "manual")
-SUBMIT_JOBS_FILE = os.path.join(MANUAL_DIR, "jobs.json")
 _submit_lock     = threading.Lock()
 _submit_queue    = []
 _submit_running  = False
@@ -157,7 +166,7 @@ def fetch_arxiv_meta(arxiv_id):
 
 
 def _upsert_manual_index(mode, key, paper_entry):
-    idx_dir  = os.path.join(MANUAL_DIR, key)
+    idx_dir  = mode_key_dir(mode, key)
     idx_file = os.path.join(idx_dir, "index.json")
     os.makedirs(idx_dir, exist_ok=True)
     try:
@@ -185,7 +194,7 @@ def _do_submit_job(arxiv_id):
     global _submit_running
     today = date.today().strftime("%Y-%m-%d")
     mode, key = "manual", today
-    papers_dir = os.path.join(MANUAL_DIR, key, "papers")
+    papers_dir = mode_papers_dir("manual", key)
     os.makedirs(papers_dir, exist_ok=True)
     try:
         _update_job(arxiv_id, status="fetching", msg="正在从 arXiv 获取元数据...")
@@ -218,15 +227,11 @@ def _do_submit_job(arxiv_id):
         _update_job(arxiv_id, title_zh=result.get("title_zh", ""),
                     status="full_pdf", msg="正在翻译全文 PDF（耗时较长）...")
         from translate_full import translate_full
-        import shutil as _shutil
         r = translate_full(arxiv_id=arxiv_id, output_dir=papers_dir,
                            no_cache=False, timeout=3600)
         if r.get("pdf_path"):
             # 将 PDF 统一归档到 paper store，与 daily/weekly/monthly 保持一致
-            src_pdf  = r["pdf_path"]
-            dst_pdf  = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
-            os.makedirs(PAPER_STORE_DIR, exist_ok=True)
-            _shutil.copy2(src_pdf, dst_pdf)
+            paper_store.save_pdf(arxiv_id, r["pdf_path"])
             paper_entry["pdf_zh"] = "papers/" + arxiv_id + "_zh.pdf"
             _upsert_manual_index(mode, key, paper_entry)
             _update_job(arxiv_id, status="done", msg="完成",
@@ -290,18 +295,12 @@ def save_bookmarks(data):
 # ── Paper Store 读取（唯一元数据源）────────────────────────────────────────
 def _read_paper_store(arxiv_id):
     """从 data/papers/{arxiv_id}.json 读取完整元数据；不存在返回 {}"""
-    p = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}.json")
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return paper_store.read_raw(arxiv_id)
 
 
 def _paper_pdf_exists(arxiv_id):
     """检查 paper store 里是否有有效 PDF"""
-    p = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
-    return os.path.exists(p) and os.path.getsize(p) > 10240
+    return paper_store.pdf_exists(arxiv_id)
 
 
 def _pdf_display_filename(arxiv_id, title):
@@ -441,7 +440,7 @@ def get_paper_entry(mode, key, arxiv_id):
 
 # ── 数据加载 ──────────────────────────────────────────────────────────────────
 def load_index(mode, key):
-    p = os.path.join(DATA_DIR, mode, key, "index.json")
+    p = mode_index_path(mode, key)
     if os.path.exists(p):
         try:
             with open(p, encoding="utf-8") as f:
@@ -452,11 +451,11 @@ def load_index(mode, key):
 
 def papers_dir(mode, key):
     """mode/key 下的 papers/ 子目录（可能为空，仅作路径占位）"""
-    return os.path.join(DATA_DIR, mode, key, "papers")
+    return mode_papers_dir(mode, key)
 
 def list_keys(mode):
     """按时间倒序列出某 mode 下所有已有 index.json 的 key"""
-    d = os.path.join(DATA_DIR, mode)
+    d = mode_dir(mode)
     if not os.path.exists(d):
         return []
     return sorted(
@@ -1044,7 +1043,7 @@ def _delete_paper(mode, key, arxiv_id):
     import glob as _glob
 
     # 1. 删 paper store 中的 PDF（JSON 不删，其他 mode 可能还在引用）
-    store_pdf = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+    store_pdf = paper_store.pdf_path(arxiv_id)
     if os.path.exists(store_pdf):
         try:
             os.remove(store_pdf)
@@ -1052,7 +1051,7 @@ def _delete_paper(mode, key, arxiv_id):
             pass
 
     # 2. 从 index.json 移除条目
-    idx_file = os.path.join(DATA_DIR, mode, key, "index.json")
+    idx_file = mode_index_path(mode, key)
     if os.path.exists(idx_file):
         try:
             with open(idx_file, encoding="utf-8") as f:
@@ -1633,7 +1632,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "pdf":
             arxiv_id = parts[1]
             if re.match(r'^\d{4}\.\d+$', arxiv_id):
-                fp = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+                fp = paper_store.pdf_path(arxiv_id)
                 if os.path.exists(fp):
                     meta = _read_paper_store(arxiv_id)
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
@@ -1666,7 +1665,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[0] == "view":
             arxiv_id = parts[1]
             if re.match(r'^\d{4}\.\d+$', arxiv_id):
-                fp = os.path.join(PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf")
+                fp = paper_store.pdf_path(arxiv_id)
                 if os.path.exists(fp):
                     meta = _read_paper_store(arxiv_id)
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
@@ -1707,7 +1706,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if html:
                     return self.send_html(html)
                 # Fallback: serve legacy HTML file
-                legacy = os.path.join(DATA_DIR, mode, key, "papers", f"{name}.html")
+                legacy = os.path.join(mode_papers_dir(mode, key), f"{name}.html")
                 if os.path.exists(legacy):
                     return self.send_file(legacy)
                 return self.send_404(f"{name} 未找到")
@@ -1781,7 +1780,7 @@ def build_submit_page():
         key_val = j.get("key", "")
         if not key_val:
             continue
-        pdir = os.path.join(MANUAL_DIR, key_val, "papers")
+        pdir = mode_papers_dir("manual", key_val)
         # 从 paper store 读完整元数据，slim index 作补充
         paper_entry = get_paper_entry("manual", key_val, aid)
         if not paper_entry.get("title") and not paper_entry.get("title_zh"):
@@ -1859,11 +1858,11 @@ def search_papers(query, limit=60):
     results_by_aid = {}
     modes = ["daily", "weekly", "monthly", "manual"]
     for mode in modes:
-        mode_dir = os.path.join(DATA_DIR, mode)
-        if not os.path.isdir(mode_dir):
+        mode_path = mode_dir(mode)
+        if not os.path.isdir(mode_path):
             continue
-        for key in sorted(os.listdir(mode_dir), reverse=True):
-            idx_file = os.path.join(mode_dir, key, "index.json")
+        for key in sorted(os.listdir(mode_path), reverse=True):
+            idx_file = mode_index_path(mode, key)
             if not os.path.isfile(idx_file):
                 continue
             try:

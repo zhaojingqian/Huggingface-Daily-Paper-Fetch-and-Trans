@@ -25,10 +25,10 @@ crontab 示例（当前配置）：
 import sys, os, argparse
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from paperhub.paths import ROOT_DIR as BASE_DIR, LOGS_DIR, mode_dir, mode_index_path
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
+sys.path.insert(0, BASE_DIR)
+
 LOG_FILE = os.path.join(LOGS_DIR, "repair.log")
 
 
@@ -57,6 +57,38 @@ def _recent_keys(mode, days):
     return sorted(keys)
 
 
+def _week_key(dt):
+    y, w, _ = dt.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _pending_refetch_key(mode, now=None):
+    """
+    Return the current key only when its scheduled first fetch has not run yet.
+
+    Once the scheduled trigger time has passed, the key must be eligible for
+    refetch so a transient network failure can be repaired the same day.
+    """
+    now = now or datetime.now()
+
+    if mode == "daily":
+        return now.strftime("%Y-%m-%d") if now.hour < 23 else None
+
+    if mode == "weekly":
+        # weekly cron runs Sunday 02:00 for the current ISO week.
+        if now.weekday() != 6 or now.hour < 2:
+            return _week_key(now)
+        return None
+
+    if mode == "monthly":
+        # monthly cron runs on the 28th at 02:00 for the current month.
+        if now.day < 28 or (now.day == 28 and now.hour < 2):
+            return now.strftime("%Y-%m")
+        return None
+
+    return None
+
+
 def _index_has_papers(index_path):
     """index.json 存在且 papers 非空则返回 True"""
     try:
@@ -73,22 +105,17 @@ def refetch_missing(mode="daily", days=3):
     扫描近 days 天内指定 mode 下缺少有效 index.json 的 key，重新执行完整抓取+翻译。
 
     各 mode 的 cron 触发时间不同，跳过"当前未到触发时间"的 key，避免误判：
-      daily   — 每天 23:00 触发，跳过今天
-      weekly  — 每周日 02:00 触发，跳过当前 ISO 周
-      monthly — 每月 28 日 02:00 触发，跳过当前月
+      daily   — 每天 23:00 触发，23:00 前跳过今天
+      weekly  — 每周日 02:00 触发，触发前跳过当前 ISO 周
+      monthly — 每月 28 日 02:00 触发，触发前跳过当前月
     """
-    from run_papers import run, DATA_DIR
-    from fetch_hf import current_week_key, current_month_key
+    from run_papers import run
 
     LIMITS = {"daily": 3, "weekly": 10, "monthly": 10}
     limit = LIMITS.get(mode, 10)
 
     now = datetime.now()
-    skip_key = {
-        "daily":   now.strftime("%Y-%m-%d"),
-        "weekly":  current_week_key(),
-        "monthly": now.strftime("%Y-%m"),
-    }.get(mode)
+    skip_key = _pending_refetch_key(mode, now)
 
     keys = [k for k in _recent_keys(mode, days) if k != skip_key]
     if not keys:
@@ -97,7 +124,7 @@ def refetch_missing(mode="daily", days=3):
 
     refetched = 0
     for key in keys:
-        index_path = os.path.join(DATA_DIR, mode, key, "index.json")
+        index_path = mode_index_path(mode, key)
         if _index_has_papers(index_path):
             _log(f"[refetch:{mode}] {key} — index.json 正常，跳过")
             continue
@@ -122,7 +149,7 @@ def retry_pdf_keys(mode, days, scan_all, key):
     根据参数确定要重试 PDF 的 key 列表，调用 run_papers.retry_pdf()。
     返回成功翻译的篇数。
     """
-    from run_papers import retry_pdf, DATA_DIR
+    from run_papers import retry_pdf
 
     if key:
         _log(f"[retry-pdf:{mode}] 指定 key={key}，开始重试...")
@@ -136,13 +163,13 @@ def retry_pdf_keys(mode, days, scan_all, key):
         _log(f"[retry-pdf:{mode}] 全量完成 — 成功 {n} 篇")
         return n
 
-    mode_dir = os.path.join(DATA_DIR, mode)
-    if not os.path.isdir(mode_dir):
+    mode_path = mode_dir(mode)
+    if not os.path.isdir(mode_path):
         _log(f"[retry-pdf:{mode}] 目录不存在，跳过")
         return 0
 
     recent = _recent_keys(mode, days)
-    existing = set(os.listdir(mode_dir))
+    existing = set(os.listdir(mode_path))
     targets = sorted(set(recent) & existing)
     if not targets:
         _log(f"[retry-pdf:{mode}] 近 {days} 天无数据，跳过")
@@ -182,7 +209,7 @@ def main():
         scope = f"key={args.key}" if args.key else ("all" if args.scan_all else f"days={args.days}")
         _log(f"开始 post (modes={modes}, {scope})")
 
-        from run_papers import repair, DATA_DIR
+        from run_papers import repair
         total_repair = 0
         for m in modes:
             if args.key:
@@ -190,10 +217,10 @@ def main():
             elif args.scan_all:
                 total_repair += repair(mode=m, key=None)
             else:
-                mode_dir = os.path.join(DATA_DIR, m)
-                if not os.path.isdir(mode_dir):
+                mode_path = mode_dir(m)
+                if not os.path.isdir(mode_path):
                     continue
-                targets = sorted(set(_recent_keys(m, args.days)) & set(os.listdir(mode_dir)))
+                targets = sorted(set(_recent_keys(m, args.days)) & set(os.listdir(mode_path)))
                 if not targets:
                     _log(f"[post:repair:{m}] 近 {args.days} 天无数据，跳过")
                     continue
@@ -235,7 +262,7 @@ def main():
     _log(f"开始 repair 扫描 (mode={args.mode or 'all'}, key={args.key or 'auto'}, "
          f"days={args.days if not args.scan_all else 'all'})")
 
-    from run_papers import repair, DATA_DIR
+    from run_papers import repair
 
     modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
     total = 0
@@ -251,11 +278,11 @@ def main():
             total += n
         else:
             # 仅扫描最近 N 天范围的 key
-            mode_dir = os.path.join(DATA_DIR, m)
-            if not os.path.isdir(mode_dir):
+            mode_path = mode_dir(m)
+            if not os.path.isdir(mode_path):
                 continue
             recent = _recent_keys(m, args.days)
-            existing = set(os.listdir(mode_dir))
+            existing = set(os.listdir(mode_path))
             targets = sorted(set(recent) & existing)
             if not targets:
                 _log(f"[{m}] 近 {args.days} 天无数据，跳过")

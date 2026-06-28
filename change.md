@@ -2,6 +2,54 @@
 
 ---
 
+## v4.26 — 2026-06-28
+
+### Weekly 当前周补抓边界修复
+
+#### W26 网络失败后的自动补抓恢复
+
+- **影响周期**：weekly `2026-W26`。
+- **根因定位**：
+  - `2026-06-28 02:00` 与 `02:30` 的 weekly cron 均已启动，但当时访问 `huggingface.co` 返回 `Network is unreachable`，导致 `run_weekly.py` 未能生成 `data/weekly/2026-W26/index.json`。
+  - 后续 `run_repair.py --post --mode weekly --days 14` 虽然扫描到了 `2026-W26`，但旧逻辑会无条件跳过当前 ISO 周；周日 02:00 触发时间已经过去后，当前周仍无法被自动补抓。
+- **修复**：
+  - 新增 `_pending_refetch_key()`，将跳过规则从“永远跳过当前周期”改为“仅在该周期首次 cron 触发时间未到时跳过”。
+  - weekly 在周日 02:00 后允许补抓当前 ISO 周；daily 在 23:00 后允许补抓当天；monthly 在 28 日 02:00 后允许补抓当月。
+  - `refetch_missing()` 继续避免提前误抓未到触发时间的周期，同时能修复触发后发生的临时网络失败。
+  - 新增 `tests/test_repair_refetch.py`，覆盖 weekly/daily/monthly 触发时间前后的跳过边界。
+- **结果**：
+  - 已补抓 `2026-W26` weekly Top 10，`data/weekly/2026-W26/index.json` 生成成功。
+  - 10 篇论文摘要与期内 HTML 均完成，10 个 `pdf_status` 均恢复为 `ok`。
+  - 新生成全文 PDF：`2606.19409_zh.pdf`、`2606.20945_zh.pdf`；其余 8 篇命中 paper store 既有 PDF。
+
+#### 验证
+
+- `python3 fetch_hf.py weekly 2026-W26 10` 可正常返回 10 篇。
+- `python3 run_weekly.py 2026-W26` 完整流程成功，最终 `成功=10 失败=0`。
+- `/root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v` 全部 33 个测试通过。
+
+---
+
+## v4.25 — 2026-06-27
+
+### 项目结构轻量收拢
+
+#### 共享路径常量与回归护栏
+
+- 新增 `paperhub.paths`，统一维护项目根目录、`data/`、`data/papers/`、`logs/`、`locks/`、手动提交目录、书签文件、tex 备份目录、mode index 路径和默认翻译容器名。
+- 新增 `paperhub.paper_store`，统一维护 paper store JSON raw read、translated-cache read、PDF 有效性阈值、PDF 入库和 `pdf_status` 更新。
+- `run_papers.py`、`run_repair.py`、`translate_arxiv.py`、`translate_full.py`、`web_server.py` 改为复用共享路径定义，但继续保留原有模块级常量名，避免影响外部脚本和测试引用。
+- 新增 `tests/test_paths.py` 和 `tests/test_paper_store.py`，锁定入口脚本常量、共享路径与 paper store 读写语义，防止后续重构中数据目录或缓存规则漂移。
+- 扩展 Web 合约测试，覆盖收藏 API 的 create/toggle/move/remove 流程，以及 `/api/submit`、`/api/bookmarks` 的错误响应契约。
+- 本次不改 Web 路由、不改 JSON 数据结构、不改 PDF 翻译流程、不改 Docker 调用语义。
+
+#### 验证
+
+- `/root/.pyenv/versions/3.10.13/bin/python3 -m py_compile ...` 通过。
+- `/root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v` 全部 29 个测试通过。
+
+---
+
 ## v4.24 — 2026-06-26
 
 ### PDF 编译 OOM 强杀与健康检查漏过修复

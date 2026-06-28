@@ -168,9 +168,15 @@ paper-trans/
 ├── full_translate_driver.py    # 容器内 gpt-academic 驱动和 LaTeX fallback
 ├── latex_translation_filters.py # LaTeX 环境保护、质量过滤和 LLM 残留清理策略
 ├── web_server.py               # 单文件 HTTP Web 服务
+├── paperhub/
+│   ├── paths.py                 # 共享路径、paper store、容器默认名常量
+│   └── paper_store.py           # 统一 paper store JSON/PDF 读写 helper
 ├── tests/
 │   ├── test_web_server_contract.py
-│   └── test_latex_translation_filters.py
+│   ├── test_latex_translation_filters.py
+│   ├── test_paper_store.py
+│   ├── test_paths.py
+│   └── test_repair_refetch.py
 ├── scripts/
 │   ├── setup_docker_env.sh
 │   ├── cleanup_docker_cache.sh
@@ -201,10 +207,12 @@ paper-trans/
 
 ```bash
 python3 -m py_compile \
+  paperhub/__init__.py paperhub/paths.py paperhub/paper_store.py \
   web_server.py translate_arxiv.py translate_full.py \
   full_translate_driver.py latex_translation_filters.py \
   run_papers.py run_repair.py \
-  tests/test_web_server_contract.py tests/test_latex_translation_filters.py
+  tests/test_web_server_contract.py tests/test_latex_translation_filters.py \
+  tests/test_paper_store.py tests/test_paths.py tests/test_repair_refetch.py
 ```
 
 ### 合约测试
@@ -223,6 +231,10 @@ python3 -m unittest discover -s tests -v
 - 详情页保留 `/view/<id>`、arXiv abs、arXiv PDF 链接。
 - `BASE_PATH=/paper` 下内部链接和 PDF iframe 前缀正确。
 - 搜索、提交、状态页关键 fetch/click 合约仍存在。
+- 收藏 API 的 create/toggle/move/remove 和常见 API 错误响应保持稳定。
+- 入口脚本继续使用同一套共享路径常量。
+- paper store 的 raw read、translated-cache read、PDF 阈值和 pdf_status 更新语义保持稳定。
+- `run_repair.py --refetch/--post` 对 daily/weekly/monthly 当前周期的跳过边界保持稳定：只在首次 cron 触发时间未到时跳过，触发后允许补抓临时网络失败的周期。
 
 ### 线上抽查
 
@@ -293,6 +305,8 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 0  4 28 * *  $PYTHON $PTDIR/run_repair.py --post       --mode monthly --days 60 >> $RLOG 2>&1
 0  7 28 * *  $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode monthly --days 60 >> $RLOG 2>&1
 ```
+
+`run_repair.py --post` 会先修复已有索引中的摘要，再补抓缺失或空 `index.json` 的周期。为避免提前抓取未到榜单生成时间的数据，当前周期只会在首次 cron 触发时间前被跳过：daily 为当天 23:00 前，weekly 为周日 02:00 前，monthly 为 28 日 02:00 前。触发时间之后如果遇到 Hugging Face 临时网络失败，后续 `--post` 会重新补抓该周期。
 
 ### full-TeX slim LaTeX 容器
 

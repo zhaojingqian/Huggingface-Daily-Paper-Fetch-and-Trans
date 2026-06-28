@@ -3,6 +3,7 @@ import json
 import os
 import socketserver
 import sys
+import tempfile
 import threading
 import unittest
 
@@ -50,6 +51,20 @@ class WebServerContractTest(unittest.TestCase):
         conn.close()
         return resp, body
 
+    def post_json(self, path, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request(
+            "POST",
+            path,
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        resp = conn.getresponse()
+        resp_body = resp.read()
+        conn.close()
+        return resp, resp_body
+
     def assert_content_type(self, resp, expected):
         self.assertIn(expected, resp.getheader("Content-Type") or "")
 
@@ -74,6 +89,89 @@ class WebServerContractTest(unittest.TestCase):
                 resp, _ = self.request(path)
                 self.assertEqual(resp.status, 200)
                 self.assert_content_type(resp, "application/json")
+
+    def test_bookmarks_api_mutations_keep_contract(self):
+        old_file = web_server.BOOKMARKS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            web_server.BOOKMARKS_FILE = os.path.join(tmp, "bookmarks.json")
+            try:
+                resp, body = self.post_json("/api/bookmarks", {
+                    "action": "create_list",
+                    "name": "Read Later",
+                    "arxiv_id": SAMPLE_VIEW_ID,
+                    "mode": SAMPLE_MODE,
+                    "key": SAMPLE_KEY,
+                })
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(resp.status, 200)
+                self.assertIn("read_later", payload["lists"])
+                self.assertEqual(payload["lists"]["read_later"]["papers"][0]["arxiv_id"], SAMPLE_VIEW_ID)
+
+                resp, body = self.post_json("/api/bookmarks", {
+                    "action": "toggle",
+                    "list_id": "read_later",
+                    "arxiv_id": SAMPLE_VIEW_ID,
+                    "mode": SAMPLE_MODE,
+                    "key": SAMPLE_KEY,
+                })
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(payload["lists"]["read_later"]["papers"], [])
+
+                resp, body = self.post_json("/api/bookmarks", {
+                    "action": "toggle",
+                    "list_id": "read_later",
+                    "arxiv_id": SAMPLE_VIEW_ID,
+                    "mode": SAMPLE_MODE,
+                    "key": SAMPLE_KEY,
+                })
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(len(payload["lists"]["read_later"]["papers"]), 1)
+
+                resp, _ = self.post_json("/api/bookmarks", {
+                    "action": "create_list",
+                    "name": "Second",
+                })
+                self.assertEqual(resp.status, 200)
+
+                resp, body = self.post_json("/api/bookmarks", {
+                    "action": "move",
+                    "from_list": "read_later",
+                    "to_list": "second",
+                    "arxiv_id": SAMPLE_VIEW_ID,
+                })
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(payload["lists"]["read_later"]["papers"], [])
+                self.assertEqual(payload["lists"]["second"]["papers"][0]["arxiv_id"], SAMPLE_VIEW_ID)
+
+                resp, body = self.post_json("/api/bookmarks", {
+                    "action": "remove",
+                    "list_id": "second",
+                    "arxiv_id": SAMPLE_VIEW_ID,
+                })
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(payload["lists"]["second"]["papers"], [])
+            finally:
+                web_server.BOOKMARKS_FILE = old_file
+
+    def test_api_error_contracts(self):
+        resp, body = self.request("/api/submit")
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp.status, 405)
+        self.assertEqual(payload["error"], "POST only")
+
+        resp, body = self.post_json("/api/submit", {"arxiv_id": "not-an-id"})
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp.status, 400)
+        self.assertIn("无效的 arXiv ID", payload["error"])
+
+        resp, body = self.post_json("/api/bookmarks", {"action": "unknown"})
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(payload["error"], "unknown action")
 
     def test_weekly_list_and_detail_keep_links(self):
         resp, body = self.request(f"/{SAMPLE_MODE}/{SAMPLE_KEY}")

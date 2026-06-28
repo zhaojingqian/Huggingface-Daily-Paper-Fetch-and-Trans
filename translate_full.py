@@ -17,9 +17,15 @@ import shutil
 import json
 from pathlib import Path
 
-DEFAULT_CONTAINER_NAME = "gpt-academic-latex-slim"
+from paperhub.paths import (
+    ROOT_DIR as BASE_DIR,
+    DEFAULT_GPT_ACADEMIC_CONTAINER,
+    TEX_BACKUP_DIR,
+    TEX_FAILED_BACKUP_DIR,
+)
+
+DEFAULT_CONTAINER_NAME = DEFAULT_GPT_ACADEMIC_CONTAINER
 CONTAINER_NAME  = os.environ.get("GPT_ACADEMIC_CONTAINER", DEFAULT_CONTAINER_NAME)
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
 DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
 DRIVER_SUPPORT_FILES = [
     DRIVER_SCRIPT,
@@ -28,9 +34,6 @@ DRIVER_SUPPORT_FILES = [
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
 # 宿主机侧 tex 备份目录（容器重启后可从这里恢复翻译缓存，避免重复调 GPT）
-TEX_BACKUP_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "data", "tex_backup")
-TEX_FAILED_BACKUP_DIR = os.path.join(BASE_DIR, "data", "tex_backup_failed")
 
 
 def _container_workfolder(arxiv_id: str) -> str:
