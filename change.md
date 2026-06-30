@@ -2,6 +2,33 @@
 
 ---
 
+## v4.27 — 2026-07-01
+
+### inline `\verb` 分隔符冲突 fallback 修复
+
+#### 2026-06-30 daily `2606.28733` 中文 PDF 恢复
+
+- **影响论文**：daily `2026-06-30` 的 `2606.28733` (Agentic Abstention)。
+- **根因定位**：
+  - 中文翻译缓存已经完整存在，失败发生在 LaTeX 编译阶段。
+  - `merge_translate_zh.tex` 中一处正则表达式使用 `\verb|...|` 包裹，但正则内容自身包含 `|`，导致 TeX 在内部 `|` 处提前结束 verbatim 参数。
+  - 后续正则里的 `\?`、`\!` 逃逸字符脱离 verbatim 后被 LaTeX 当成控制序列解析，触发 `Undefined control sequence`，健康门禁正确拦截了坏 PDF。
+- **修复**：
+  - 在 `latex_translation_filters.py` 中新增 `repair_inline_verb_delimiter_collisions()`，只识别同一行内可疑的 inline `\verb` 分隔符冲突，并改用当前内容中不存在的新分隔符。
+  - 在 `full_translate_driver.py` 的 fallback 重编译阶段接入该修复；正常首次编译成功的论文不会经过该路径，避免影响既有正常 PDF。
+  - 新增单元测试覆盖失败形态，并确认普通 `\verb|foo|` 与一行多个正常 `\verb` 不会被改写。
+- **结果**：
+  - 使用 `python3 translate_full.py 2606.28733 -o data/papers --keep-translation` 复用 `tex_backup_failed` 中的中文翻译缓存重编译成功，没有重新走全文翻译。
+  - 新 PDF 写入 `data/papers/2606.28733_zh.pdf`，大小约 1.83MB；旧失败诊断和失败现场 tex 已自动清理。
+  - `python3 run_repair.py --retry-pdf --mode daily --key 2026-06-30` 命中 paper store PDF 并同步 `data/daily/2026-06-30/index.json` 与 `data/papers/2606.28733.json`，该日 3 篇论文均为 `pdf_status=ok`。
+
+#### 验证
+
+- `python3 -m unittest tests/test_latex_translation_filters.py` 通过，12 个测试 OK。
+- `python3 -m py_compile latex_translation_filters.py full_translate_driver.py translate_full.py run_papers.py run_repair.py` 通过。
+
+---
+
 ## v4.26 — 2026-06-28
 
 ### Weekly 当前周补抓边界修复

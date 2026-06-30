@@ -402,3 +402,103 @@ def demote_structural_commands_in_captions(text: str) -> Tuple[str, int]:
         result.append(CAPTION_MARKER + new_body + "}")
         i = close_idx + 1
     return "".join(result), count
+
+
+INLINE_VERB_DELIMITER_CANDIDATES = ("@", "~", "/", ";", ":", "+", "=")
+INLINE_VERB_COMMAND_RE = re.compile(r"\\verb\*?")
+
+
+def _is_valid_inline_verb_delimiter(delim: str) -> bool:
+    return bool(delim) and not delim.isspace() and not delim.isalnum() and delim != "\\"
+
+
+def _choose_inline_verb_delimiter(content: str, current: str) -> Optional[str]:
+    for delim in INLINE_VERB_DELIMITER_CANDIDATES:
+        if delim != current and delim not in content:
+            return delim
+    return None
+
+
+def _looks_like_broken_inline_verb(content: str, original_delim: str) -> bool:
+    if original_delim not in content:
+        return False
+    if "\\verb" in content:
+        return False
+    code_like = bool(
+        re.search(r"\\[?.!$]", content)
+        or re.search(r"\br[\"']", content)
+        or any(token in content for token in ("(?", "[", "]", "^", "*", "+"))
+    )
+    # The common failure shape is a regex/code literal whose original delimiter
+    # appears inside the literal, making later escaped punctuation look like
+    # normal LaTeX control sequences after the premature close.
+    return code_like
+
+
+def repair_inline_verb_delimiter_collisions(text: str) -> Tuple[str, int]:
+    r"""Re-delimit inline ``\verb`` commands whose content contains the delimiter.
+
+    GPT can preserve a regex as ``\verb|...|`` while the regex itself contains
+    ``|``. TeX closes the verb at the first inner delimiter, and escaped
+    punctuation such as ``\?`` or ``\!`` then becomes an undefined command. This
+    repair only rewrites suspicious single-line inline verb commands and leaves
+    ordinary ``\verb|foo|`` or multiple independent verb commands untouched.
+    """
+    if not text:
+        return text, 0
+
+    total = 0
+    fixed_lines: List[str] = []
+
+    for line in text.splitlines(keepends=True):
+        newline = ""
+        body = line
+        if body.endswith("\n"):
+            newline = "\n"
+            body = body[:-1]
+
+        result = []
+        pos = 0
+        changed = False
+        while pos < len(body):
+            m = INLINE_VERB_COMMAND_RE.search(body, pos)
+            if not m:
+                result.append(body[pos:])
+                break
+
+            delim_idx = m.end()
+            if delim_idx >= len(body):
+                result.append(body[pos:])
+                break
+
+            delim = body[delim_idx]
+            if not _is_valid_inline_verb_delimiter(delim):
+                result.append(body[pos:delim_idx + 1])
+                pos = delim_idx + 1
+                continue
+
+            rest = body[delim_idx + 1:]
+            delim_positions = [dm.start() for dm in re.finditer(re.escape(delim), rest)]
+            if len(delim_positions) < 2:
+                result.append(body[pos:delim_idx + 1 + (delim_positions[0] + 1 if delim_positions else 0)])
+                pos = delim_idx + 1 + (delim_positions[0] + 1 if delim_positions else 0)
+                continue
+
+            last_delim = delim_positions[-1]
+            content = rest[:last_delim]
+            new_delim = _choose_inline_verb_delimiter(content, delim)
+            if new_delim and _looks_like_broken_inline_verb(content, delim):
+                result.append(body[pos:m.start()])
+                result.append(body[m.start():delim_idx])
+                result.append(new_delim + content + new_delim)
+                pos = delim_idx + 1 + last_delim + 1
+                total += 1
+                changed = True
+            else:
+                first_delim = delim_positions[0]
+                result.append(body[pos:delim_idx + 1 + first_delim + 1])
+                pos = delim_idx + 1 + first_delim + 1
+
+        fixed_lines.append(("".join(result) if changed else body) + newline)
+
+    return "".join(fixed_lines), total

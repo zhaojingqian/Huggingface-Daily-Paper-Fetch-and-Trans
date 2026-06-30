@@ -155,6 +155,27 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertNotIn(r"\caption{\section{", fixed)
         self.assertIn(r"\caption{\textbf{无星号标题}", fixed)
 
+    def test_repair_inline_verb_delimiter_collisions_for_regex(self):
+        text = (
+            r"使用正则表达式 \verb|r\"(?<=\.| 选择上下文 )[^\.\?\!]*\?$\"|。"
+        )
+
+        fixed, count = filters.repair_inline_verb_delimiter_collisions(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\verb@r\"(?<=\.| 选择上下文 )[^\.\?\!]*\?$\"@", fixed)
+        self.assertNotIn(r"\verb|r\"(?<=\.|", fixed)
+
+    def test_repair_inline_verb_delimiter_collisions_leaves_normal_verbs(self):
+        text = (
+            r"正常代码 \verb|foo| 中文说明 \verb|bar\?| 仍应保持。"
+        )
+
+        fixed, count = filters.repair_inline_verb_delimiter_collisions(text)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(fixed, text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,7 +74,7 @@ python3 run_repair.py --retry-pdf --mode daily --days 7
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。
 
-全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、坏 `.aux`、旧式 FontAwesome 图标、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
+全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、inline `\verb` 分隔符与正则内容冲突、坏 `.aux`、旧式 FontAwesome 图标、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
 
 splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。二次拆分后会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或空白/分隔符类 chunk 会降级回 preserve，避免模型收到坏 chunk 后生成 “Below is/Please provide/请提供” 这类非原文回答。splitter 版本变化时会自动丢弃旧 `temp.pkl`，避免旧翻译缓存与新节点结构错位。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、bibliography 等硬保护区域。
 
@@ -235,6 +235,7 @@ python3 -m unittest discover -s tests -v
 - 入口脚本继续使用同一套共享路径常量。
 - paper store 的 raw read、translated-cache read、PDF 阈值和 pdf_status 更新语义保持稳定。
 - `run_repair.py --refetch/--post` 对 daily/weekly/monthly 当前周期的跳过边界保持稳定：只在首次 cron 触发时间未到时跳过，触发后允许补抓临时网络失败的周期。
+- LaTeX fallback 对 inline `\verb` 分隔符冲突只修补可疑 regex/code 形态，不改普通 inline verb。
 
 ### 线上抽查
 

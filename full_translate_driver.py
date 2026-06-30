@@ -2489,6 +2489,17 @@ def patch_verbatim_envs(trans_tex_path, orig_tex_path):
     return total
 
 
+def patch_inline_verb_delimiter_collisions(trans_tex_path):
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    fixed, total = _ltf.repair_inline_verb_delimiter_collisions(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(fixed)
+        print(f"[driver] 🔧 patch_inline_verb_delimiter_collisions: 重定界 {total} 个 inline verb", flush=True)
+    return total
+
+
 def patch_and_recompile(workfolder, arxiv_id_):
     """
     当 gpt-academic 翻译完成但编译失败时：
@@ -2523,6 +2534,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_long_citation_lists(trans_tex)
     n = patch_verbatim_envs(trans_tex, orig_tex)
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
+    patch_inline_verb_delimiter_collisions(trans_tex)
     patch_unbalanced_groups_in_tcolorboxes(trans_tex)
     patch_custom_macro_cjk_glue(trans_tex)
     patch_stray_text_word_commands(trans_tex)
