@@ -30,6 +30,8 @@ class WebServerContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._base_path = web_server.BASE_PATH
+        cls._admin_token = os.environ.get("TOPIC_ADMIN_TOKEN")
+        os.environ["TOPIC_ADMIN_TOKEN"] = "test-token"
         web_server.BASE_PATH = ""
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), web_server.Handler)
         cls.port = cls.httpd.server_address[1]
@@ -42,6 +44,10 @@ class WebServerContractTest(unittest.TestCase):
         cls.httpd.server_close()
         cls.thread.join(timeout=5)
         web_server.BASE_PATH = cls._base_path
+        if cls._admin_token is None:
+            os.environ.pop("TOPIC_ADMIN_TOKEN", None)
+        else:
+            os.environ["TOPIC_ADMIN_TOKEN"] = cls._admin_token
 
     def request(self, path, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -51,14 +57,17 @@ class WebServerContractTest(unittest.TestCase):
         conn.close()
         return resp, body
 
-    def post_json(self, path, payload):
+    def post_json(self, path, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req_headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+        if headers:
+            req_headers.update(headers)
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         conn.request(
             "POST",
             path,
             body=body,
-            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+            headers=req_headers,
         )
         resp = conn.getresponse()
         resp_body = resp.read()
@@ -76,7 +85,7 @@ class WebServerContractTest(unittest.TestCase):
         return os.path.exists(os.path.join(web_server.PAPER_STORE_DIR, f"{arxiv_id}_zh.pdf"))
 
     def test_core_pages_return_html(self):
-        for path in ["/", "/daily", "/weekly", "/monthly", "/bookmarks", "/submit", "/search", "/status"]:
+        for path in ["/", "/daily", "/weekly", "/monthly", "/topic", "/bookmarks", "/submit", "/search", "/status"]:
             with self.subTest(path=path):
                 resp, body = self.request(path)
                 self.assertEqual(resp.status, 200)
@@ -164,6 +173,15 @@ class WebServerContractTest(unittest.TestCase):
         self.assertEqual(payload["error"], "POST only")
 
         resp, body = self.post_json("/api/submit", {"arxiv_id": "not-an-id"})
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp.status, 403)
+        self.assertEqual(payload["error"], "forbidden")
+
+        resp, body = self.post_json(
+            "/api/submit",
+            {"arxiv_id": "not-an-id"},
+            headers={"X-Topic-Admin-Token": "test-token"},
+        )
         payload = json.loads(body.decode("utf-8"))
         self.assertEqual(resp.status, 400)
         self.assertIn("无效的 arXiv ID", payload["error"])
@@ -272,6 +290,7 @@ class WebServerContractTest(unittest.TestCase):
         html = body.decode("utf-8", errors="replace")
         self.assertEqual(resp.status, 200)
         self.assertIn("'/api/submit'", html)
+        self.assertIn("X-Topic-Admin-Token", html)
         self.assertIn("onclick=\"submitForm()\"", html)
 
         resp, body = self.request("/status")
@@ -300,6 +319,12 @@ class WebServerContractTest(unittest.TestCase):
         self.assertEqual(payload["total"], 1)
         self.assertIn(f'href="/paper/detail/{SAMPLE_VIEW_ID}"', payload["html"])
         self.assertNotIn(f'href="/weekly/{SAMPLE_KEY}/papers/{SAMPLE_VIEW_ID}"', payload["html"])
+
+    def test_topic_api_requires_admin_token(self):
+        resp, body = self.post_json("/api/topic", {"action": "refresh", "slug": "opd"})
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(resp.status, 403)
+        self.assertEqual(payload["error"], "forbidden")
 
     def test_global_paper_detail_route(self):
         resp, body = self.request(f"/detail/{SAMPLE_VIEW_ID}")

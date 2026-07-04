@@ -9,7 +9,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import requests
 
-from paperhub import paper_store
+from paperhub import paper_store, topic_store
+from paperhub.env_config import admin_token
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DATA_DIR,
@@ -26,6 +27,8 @@ from paperhub.paths import (
 
 PORT            = 18080
 _bm_lock   = threading.Lock()
+_topic_lock = threading.Lock()
+_topic_jobs = {}
 
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
 # 通过环境变量注入：Environment=BASE_PATH=/paper
@@ -60,6 +63,60 @@ def with_base_path(location):
     if BASE_PATH and location.startswith("/") and not location.startswith(BASE_PATH + "/"):
         return BASE_PATH + location
     return location
+
+
+def _request_admin_token(headers, payload=None):
+    payload = payload or {}
+    return (
+        headers.get("X-Topic-Admin-Token", "")
+        or payload.get("admin_token", "")
+        or payload.get("token", "")
+    )
+
+
+def _admin_ok(headers, payload=None):
+    expected = admin_token()
+    if not expected:
+        return True
+    return _request_admin_token(headers, payload) == expected
+
+
+def enqueue_topic_run(slug, force=False, refresh_terms=False, no_full=False):
+    """Run a topic refresh in the background so the web request can return."""
+    slug = topic_store.slugify(slug)
+    with _topic_lock:
+        job = _topic_jobs.get(slug, {})
+        if job.get("status") == "running":
+            return False, "该主题正在刷新中"
+        _topic_jobs[slug] = {
+            "slug": slug,
+            "status": "running",
+            "msg": "正在刷新主题论文",
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _worker():
+        try:
+            from topic_engine import run_topic
+            result = run_topic(slug, do_full_translate=not no_full,
+                               force=force, refresh_terms=refresh_terms)
+            with _topic_lock:
+                _topic_jobs[slug].update({
+                    "status": "done",
+                    "msg": f"完成，{result.get('total', 0)} 篇",
+                    "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "key": result.get("key", ""),
+                })
+        except Exception as e:
+            with _topic_lock:
+                _topic_jobs[slug].update({
+                    "status": "error",
+                    "msg": str(e),
+                    "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True, "已开始刷新"
 
 
 
@@ -847,6 +904,7 @@ def page(title, body, active_tab="home"):
         ("home",      "📅 每日",   "/daily"),
         ("weekly",    "📚 每周",   "/weekly"),
         ("monthly",   "📆 每月",   "/monthly"),
+        ("topic",     "🧭 主题",   "/topic"),
         ("bookmarks", "⭐ 收藏",   "/bookmarks"),
         ("submit",    "➕ 手动",   "/submit"),
         ("search",    "🔍 搜索",   "/search"),
@@ -1207,6 +1265,218 @@ def build_detail_page(mode, key, arxiv_id):
     return page(title_zh or title, body, active_tab=active_tab)
 
 
+# ── 主题订阅页面 ──────────────────────────────────────────────────────────────
+def _topic_papers_dir(slug, key):
+    return os.path.join(topic_store.date_dir(slug, key), "papers")
+
+
+def _topic_enriched_papers(slug, key):
+    idx = topic_store.load_index(slug, key)
+    pdir = _topic_papers_dir(slug, key)
+    papers = []
+    for slim in idx.get("papers", []):
+        aid = slim.get("arxiv_id", "")
+        stored = _read_paper_store(aid)
+        entry = _merge_paper_entry(stored, slim)
+        entry.setdefault("arxiv_id", aid)
+        entry["_detail_href"] = f"/detail/{aid}"
+        entry["_hide_delete"] = True
+        score = slim.get("topic_score")
+        source = slim.get("source", "")
+        notes = []
+        if score is not None:
+            notes.append(f"score {score}")
+        if source:
+            notes.append(source)
+        if notes:
+            entry["_source_note"] = " · ".join(notes)
+        state = paper_pdf_state(entry, pdir, aid)
+        if state["has_pdf"]:
+            entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
+            entry.pop("pdf_zh_failed", None)
+        elif state["pdf_failed"]:
+            entry["pdf_zh_failed"] = True
+        papers.append(entry)
+    return papers, pdir, idx
+
+
+def _topic_job(slug):
+    with _topic_lock:
+        return dict(_topic_jobs.get(topic_store.slugify(slug), {}))
+
+
+def _topic_admin_js():
+    return """
+function topicToken() {
+  return localStorage.getItem('paperHubAdminToken') || '';
+}
+function saveTopicToken() {
+  const el = document.getElementById('topic-token');
+  if (el) localStorage.setItem('paperHubAdminToken', el.value.trim());
+}
+function fillTopicToken() {
+  const el = document.getElementById('topic-token');
+  if (el) el.value = topicToken();
+}
+async function topicPost(payload) {
+  const token = topicToken();
+  const r = await fetch((window.BP||'') + '/api/topic', {
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'X-Topic-Admin-Token': token
+    },
+    body: JSON.stringify(payload)
+  });
+  return await r.json();
+}
+"""
+
+
+def build_topic_overview():
+    topics = topic_store.list_topics()
+    rows = []
+    for profile in topics:
+        slug = profile.get("slug", "")
+        keys = topic_store.list_keys(slug)
+        latest = keys[0] if keys else ""
+        job = _topic_job(slug)
+        enabled = "启用" if profile.get("enabled", True) else "停用"
+        status = job.get("status", "")
+        msg = f" · {h_text(job.get('msg',''))}" if status else ""
+        rows.append(f"""<div class="list-card">
+  <div class="list-title">🧭 {h_text(profile.get('query') or slug)}</div>
+  <div class="list-meta">slug: <code>{h_text(slug)}</code> · {enabled}{msg}</div>
+  <div style="margin-top:10px" class="btns">
+    <a class="btn btn-detail" href="/topic/{h_attr(slug)}">查看</a>
+    {f'<a class="btn btn-detail" href="/topic/{h_attr(slug)}/{h_attr(latest)}">最新 {h_text(latest)}</a>' if latest else ''}
+    <button class="btn btn-arxiv" onclick="refreshTopic({js_str(slug)}, false)">刷新今天</button>
+  </div>
+</div>""")
+    cards = "".join(rows) if rows else '<div class="empty"><div class="empty-icon">🧭</div><p>还没有主题订阅</p></div>'
+    body = f"""<div style="max-width:980px;margin:0 auto;padding:20px 0">
+  <h2 style="color:#e2e8f0;margin-bottom:16px">🧭 主题订阅</h2>
+  <div style="background:#1e293b;border-radius:12px;padding:18px 20px;margin-bottom:20px">
+    <div style="display:grid;grid-template-columns:1fr 180px 120px;gap:10px;align-items:center">
+      <input id="topic-query" placeholder="输入主题词，例如 opd"
+        style="padding:10px 14px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
+      <input id="topic-token" placeholder="管理口令" type="password" oninput="saveTopicToken()"
+        style="padding:10px 14px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
+      <button class="btn btn-full-pdf" onclick="addTopic()">添加主题</button>
+    </div>
+    <div id="topic-msg" style="margin-top:10px;color:#94a3b8;font-size:13px"></div>
+  </div>
+  <div class="list-grid">{cards}</div>
+</div>
+<script>
+{_topic_admin_js()}
+fillTopicToken();
+async function addTopic() {{
+  saveTopicToken();
+  const q = document.getElementById('topic-query').value.trim();
+  const msg = document.getElementById('topic-msg');
+  if (!q) {{ msg.textContent='请输入主题词'; return; }}
+  msg.textContent='正在创建主题并生成检索词…';
+  const d = await topicPost({{action:'create', query:q}});
+  if (d.ok) {{
+    msg.textContent='已创建，后台开始刷新；页面稍后自动更新';
+    setTimeout(()=>location.href=(window.BP||'') + '/topic/' + d.topic.slug, 1000);
+  }} else {{
+    msg.textContent='失败：' + (d.error || d.msg || 'unknown');
+  }}
+}}
+async function refreshTopic(slug, force) {{
+  saveTopicToken();
+  const d = await topicPost({{action:'refresh', slug, force}});
+  if (d.ok) setTimeout(()=>location.reload(), 1000);
+  else alert(d.error || d.msg || '刷新失败');
+}}
+</script>"""
+    return page("主题订阅", body, active_tab="topic")
+
+
+def build_topic_detail(slug, key=None):
+    profile = topic_store.get_topic(slug)
+    if not profile:
+        return None
+    slug = profile["slug"]
+    keys = topic_store.list_keys(slug)
+    key = key or (keys[0] if keys else "")
+    papers, pdir, idx = _topic_enriched_papers(slug, key) if key else ([], _topic_papers_dir(slug, datetime.now().strftime("%Y-%m-%d")), {})
+    cards_html = "".join(paper_card(p, "topic", f"{slug}/{key}", pdir) for p in papers)
+    if not cards_html:
+        cards_html = '<div class="empty"><div class="empty-icon">📭</div><p>今天还没有命中足够新的论文</p></div>'
+    history = " ".join(
+        f'<a class="btn btn-detail" href="/topic/{h_attr(slug)}/{h_attr(k)}">{h_text(k)}</a>'
+        for k in keys[:12]
+    )
+    terms = profile.get("generated_terms", {})
+    must = "\n".join(terms.get("must", []))
+    should = "\n".join(terms.get("should", []))
+    negative = "\n".join(terms.get("negative", []))
+    job = _topic_job(slug)
+    job_msg = f"<span style='color:#94a3b8'> · {h_text(job.get('msg',''))}</span>" if job else ""
+    enabled_checked = "checked" if profile.get("enabled", True) else ""
+    body = f"""<div style="max-width:1100px;margin:0 auto;padding:20px 0">
+  <div style="display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px">
+    <div>
+      <h2 style="color:#e2e8f0;margin:0">🧭 {h_text(profile.get('query') or slug)}</h2>
+      <div style="color:#94a3b8;font-size:13px;margin-top:6px">slug: <code>{h_text(slug)}</code>{job_msg}</div>
+    </div>
+    <div class="btns">
+      <a class="btn btn-detail" href="/topic">返回主题</a>
+      <button class="btn btn-arxiv" onclick="refreshTopic(false)">刷新今天</button>
+      <button class="btn btn-pdf" onclick="refreshTopic(true)">强制重排</button>
+    </div>
+  </div>
+  <div style="background:#1e293b;border-radius:12px;padding:16px 18px;margin-bottom:18px">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+      <input id="topic-token" placeholder="管理口令" type="password" oninput="saveTopicToken()"
+        style="width:180px;padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
+      <label style="color:#cbd5e1;font-size:13px"><input id="topic-enabled" type="checkbox" {enabled_checked}> 启用每日刷新</label>
+      <button class="btn btn-detail" onclick="saveTopic()">保存设置</button>
+      <span id="topic-msg" style="color:#94a3b8;font-size:13px"></span>
+    </div>
+    <details>
+      <summary style="color:#e2e8f0;cursor:pointer">高级检索词</summary>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px">
+        <label style="color:#cbd5e1;font-size:13px">Must<br><textarea id="topic-must" rows="6" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:8px">{h_text(must)}</textarea></label>
+        <label style="color:#cbd5e1;font-size:13px">Should<br><textarea id="topic-should" rows="6" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:8px">{h_text(should)}</textarea></label>
+        <label style="color:#cbd5e1;font-size:13px">Negative<br><textarea id="topic-negative" rows="6" style="width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:8px">{h_text(negative)}</textarea></label>
+      </div>
+    </details>
+  </div>
+  <div style="margin-bottom:14px;color:#94a3b8;font-size:13px">当前日期：{h_text(key or '尚未生成')} &nbsp; 历史：{history}</div>
+  <div class="cards">{cards_html}</div>
+</div>
+<script>
+{_topic_admin_js()}
+fillTopicToken();
+function lines(id) {{
+  return document.getElementById(id).value.split('\\n').map(x=>x.trim()).filter(Boolean);
+}}
+async function saveTopic() {{
+  saveTopicToken();
+  const msg = document.getElementById('topic-msg');
+  msg.textContent='保存中…';
+  const d = await topicPost({{
+    action:'update',
+    slug:{js_str(slug)},
+    enabled:document.getElementById('topic-enabled').checked,
+    generated_terms:{{must:lines('topic-must'), should:lines('topic-should'), negative:lines('topic-negative')}}
+  }});
+  msg.textContent = d.ok ? '已保存' : ('失败：' + (d.error || d.msg || 'unknown'));
+}}
+async function refreshTopic(force) {{
+  saveTopicToken();
+  const d = await topicPost({{action:'refresh', slug:{js_str(slug)}, force}});
+  if (d.ok) setTimeout(()=>location.reload(), 1000);
+  else alert(d.error || d.msg || '刷新失败');
+}}
+</script>"""
+    return page(profile.get("query") or slug, body, active_tab="topic")
+
+
 # ── 收藏页面 ──────────────────────────────────────────────────────────────────
 def build_bookmarks_overview():
     """所有收藏列表的概览页"""
@@ -1466,6 +1736,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 req = json.loads(self.rfile.read(length).decode("utf-8"))
             except Exception:
                 self.send_json({"error": "bad json"}, 400); return
+            if not _admin_ok(self.headers, req):
+                self.send_json({"error": "forbidden"}, 403); return
             arxiv_id = req.get("arxiv_id", "").strip()
             arxiv_id = re.sub(r'\s+', '', arxiv_id).split("v")[0]
             if not re.match(r'^\d{4}\.\d{4,5}$', arxiv_id):
@@ -1474,6 +1746,63 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, msg = enqueue_submit(arxiv_id)
             self.send_json({"ok": ok, "msg": msg, "arxiv_id": arxiv_id})
             return
+
+        # ── /api/topic  主题订阅管理 ──────────────────────
+        if raw == "/api/topic":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception:
+                self.send_json({"error": "bad json"}, 400); return
+            if not _admin_ok(self.headers, req):
+                self.send_json({"error": "forbidden"}, 403); return
+            action = req.get("action", "")
+            try:
+                if action == "create":
+                    query = req.get("query", "").strip()
+                    if not query:
+                        self.send_json({"error": "query required"}, 400); return
+                    from topic_engine import ensure_topic
+                    profile = ensure_topic(query, refresh_terms=True)
+                    ok, msg = enqueue_topic_run(profile["slug"], force=False,
+                                                no_full=bool(req.get("no_full", False)))
+                    self.send_json({"ok": ok, "msg": msg, "topic": profile})
+                    return
+                if action == "update":
+                    slug = topic_store.slugify(req.get("slug", ""))
+                    profile = topic_store.get_topic(slug)
+                    if not profile:
+                        self.send_json({"error": "topic not found"}, 404); return
+                    if "enabled" in req:
+                        profile["enabled"] = bool(req.get("enabled"))
+                    if isinstance(req.get("generated_terms"), dict):
+                        profile["generated_terms"] = req["generated_terms"]
+                    if isinstance(req.get("weights"), dict):
+                        profile["weights"] = req["weights"]
+                    saved = topic_store.upsert_topic(profile)
+                    self.send_json({"ok": True, "topic": saved})
+                    return
+                if action == "refresh":
+                    slug = topic_store.slugify(req.get("slug", ""))
+                    if not topic_store.get_topic(slug):
+                        self.send_json({"error": "topic not found"}, 404); return
+                    ok, msg = enqueue_topic_run(
+                        slug,
+                        force=bool(req.get("force", False)),
+                        refresh_terms=bool(req.get("refresh_terms", False)),
+                        no_full=bool(req.get("no_full", False)),
+                    )
+                    self.send_json({"ok": ok, "msg": msg})
+                    return
+                if action == "enable":
+                    saved = topic_store.set_topic_enabled(req.get("slug", ""), bool(req.get("enabled", True)))
+                    if not saved:
+                        self.send_json({"error": "topic not found"}, 404); return
+                    self.send_json({"ok": True, "topic": saved})
+                    return
+                self.send_json({"error": "unknown action"}, 400); return
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500); return
 
         if raw != "/api/bookmarks":
             self.send_json({"error": "not found"}, 404)
@@ -1617,6 +1946,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # ── /api/bookmarks  JSON 接口 ─────────────────────
         if raw == "/api/bookmarks":
             return self.send_json(load_bookmarks())
+
+        # ── /api/topic/status  主题后台任务状态 ─────────────
+        if raw == "/api/topic/status":
+            with _topic_lock:
+                return self.send_json({"jobs": dict(_topic_jobs)})
+
+        # ── /topic  /topic/{slug}  /topic/{slug}/{date} ───
+        if parts and parts[0] == "topic":
+            if len(parts) == 1:
+                return self.send_html(build_topic_overview())
+            if len(parts) == 2:
+                html = build_topic_detail(parts[1])
+                if html:
+                    return self.send_html(html)
+                return self.send_404("主题不存在")
+            if len(parts) == 3:
+                html = build_topic_detail(parts[1], parts[2])
+                if html:
+                    return self.send_html(html)
+                return self.send_404("主题不存在")
 
         # ── /bookmarks  /bookmarks/{id}  收藏页 ──────────
         if parts and parts[0] == "bookmarks":
@@ -1804,9 +2153,13 @@ def build_submit_page():
     <p style="color:#94a3b8;margin:0 0 12px;font-size:14px">
       输入 arXiv ID（如 <code style="color:#93c5fd">2602.12345</code>），
       系统自动翻译摘要 + 全文 PDF。</p>
-    <div style="display:flex;gap:10px;align-items:center">
+    <div style="display:grid;grid-template-columns:1fr 180px 90px;gap:10px;align-items:center">
       <input id="aid-input" type="text" placeholder="2602.12345"
-        style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid #334155;
+        style="padding:10px 14px;border-radius:8px;border:1px solid #334155;
+               background:#0f172a;color:#e2e8f0;font-size:15px;outline:none"
+        onkeydown="if(event.key==='Enter')submitForm()">
+      <input id="submit-token" type="password" placeholder="管理口令" oninput="saveSubmitToken()"
+        style="padding:10px 14px;border-radius:8px;border:1px solid #334155;
                background:#0f172a;color:#e2e8f0;font-size:15px;outline:none"
         onkeydown="if(event.key==='Enter')submitForm()">
       <button onclick="submitForm()"
@@ -1825,14 +2178,23 @@ def build_submit_page():
   @keyframes spin{{to{{transform:rotate(360deg)}}}}
 </style>
 <script>
+function submitToken() {{
+  return localStorage.getItem('paperHubAdminToken') || '';
+}}
+function saveSubmitToken() {{
+  const el = document.getElementById('submit-token');
+  if (el) localStorage.setItem('paperHubAdminToken', el.value.trim());
+}}
+document.getElementById('submit-token').value = submitToken();
 async function submitForm() {{
+  saveSubmitToken();
   const aid = document.getElementById('aid-input').value.trim();
   if (!aid) return;
   const msgEl = document.getElementById('submit-msg');
   msgEl.textContent = '提交中...'; msgEl.style.color='#94a3b8';
   try {{
     const r = await fetch((window.BP||'')+'/api/submit',{{
-      method:'POST',headers:{{'Content-Type':'application/json'}},
+      method:'POST',headers:{{'Content-Type':'application/json','X-Topic-Admin-Token':submitToken()}},
       body:JSON.stringify({{arxiv_id:aid}})
     }});
     const d = await r.json();

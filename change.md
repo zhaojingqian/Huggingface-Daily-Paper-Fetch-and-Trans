@@ -2,6 +2,41 @@
 
 ---
 
+## v4.30 — 2026-07-04
+
+### 主题订阅 Top 3 检索与手动提交保护
+
+#### 新增能力
+
+- 新增 `/topic` tab，支持创建长期主题订阅，例如 `opd`；主题 profile 保存在 `data/topic/topics.json`，每日结果保存在 `data/topic/<slug>/<YYYY-MM-DD>/index.json`。
+- 新增 `run_topic.py` 和 `topic_engine.py`：
+  - 首次创建主题时使用 `.env` 中的 `TOPIC_LLM_*` 调用 v3api 生成 must / should / negative 检索词；
+  - arXiv 检索默认限定 `cs.AI`、`cs.LG`、`cs.CL`、`cs.CV`、`cs.RO`、`cs.IR`、`stat.ML`；
+  - HF Papers 近 7 天 upvote 作为热度信号；
+  - 默认权重为相关性 45%、新鲜度 30%、HF vote 25%；
+  - 同一 topic 默认排除已推送过的 arXiv ID，宁缺毋滥；全站允许不同 topic 重叠。
+- 主题 Top 3 复用统一 paper store：已有 `data/papers/<arxiv_id>.json` 或 `<arxiv_id>_zh.pdf` 时直接命中缓存，不重复摘要翻译或重复生成全文中文 PDF。
+
+#### Web 与安全
+
+- 新增 topic 管理 API，可创建 topic、编辑检索词、启停主题、刷新今天和强制重排。
+- 写操作使用 `.env` 中的 `TOPIC_ADMIN_TOKEN` 校验；手动提交 `/api/submit` 同样要求该 token，页面仍可公开访问。
+- `/search` 保持公开，只做本地已缓存论文搜索，不消耗 LLM/PDF 资源。
+
+#### 运维
+
+- `.gitignore` 增加 `.env`，本地 API key 和管理 token 不进 git。
+- README 增加 topic CLI、`.env` 变量、数据目录和 cron 示例：`30 1 * * * python3 run_topic.py --all`。
+
+#### 验证
+
+- `python3 -m py_compile paperhub/env_config.py paperhub/topic_store.py topic_engine.py run_topic.py web_server.py` 通过。
+- 新增 `tests/test_topic_engine.py`，覆盖 slug、相关性、负关键词、新鲜度和同 topic 去重。
+- `tests/test_web_server_contract.py` 覆盖 `/topic` 页面、手动提交 token、topic API token，同时确认 `/search` 保持原公开行为。
+- `python3 run_topic.py opd 2026-07-04 --force` 验证真实 topic 链路，Top 3 均命中 paper store PDF 缓存，未重复生成 PDF。
+
+---
+
 ## v4.29 — 2026-07-04
 
 ### 全量 PDF 失败状态补扫与恢复

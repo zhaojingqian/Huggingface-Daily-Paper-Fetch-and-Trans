@@ -16,6 +16,7 @@ LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 LOCK_DIR = os.path.join(ROOT_DIR, "locks")
 
 MANUAL_DIR = os.path.join(DATA_DIR, "manual")
+TOPIC_DIR = os.path.join(DATA_DIR, "topic")
 BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
 SUBMIT_JOBS_FILE = os.path.join(MANUAL_DIR, "jobs.json")
 
