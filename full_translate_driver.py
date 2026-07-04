@@ -1696,7 +1696,8 @@ def _insert_latex_preamble_snippet(
     if positions:
         pos = min(positions)
         if begin_doc < 0 or pos < begin_doc:
-            return text[:pos] + insertion + "\n" + text[pos:], True
+            line_start = text.rfind("\n", 0, pos) + 1
+            return text[:line_start] + insertion + "\n" + text[line_start:], True
 
     return _insert_before_begin_document(text, insertion)
 
@@ -1730,6 +1731,8 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
         'faGithub': ('github', 'GH'),
         'faSearch': ('search', 'S'),
         'faTrophy': ('trophy', 'T'),
+        'faDatabase': ('database', 'DB'),
+        'faEnvelopeO': ('envelope', '@'),
     }
     combined = text + sibling_text
     needed = []
@@ -1763,6 +1766,35 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
     names = ','.join('\\' + name for name, _icon, _fallback in needed)
     print(f"[driver] 🔧 patch_fontawesome_legacy_aliases: 补充 {names} fallback", flush=True)
     return len(needed)
+
+
+def patch_declare_unicode_character_fallback(trans_tex_path):
+    """Provide a no-op fallback for templates using inputenc-only Unicode declarations."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+
+    marker = r'\DeclareUnicodeCharacter'
+    if marker not in text:
+        return 0
+    fallback = (
+        r'% paper-trans fallback for XeLaTeX without inputenc DeclareUnicodeCharacter'
+        '\n'
+        r'\providecommand{\DeclareUnicodeCharacter}[2]{}'
+    )
+    if fallback in text or r'\providecommand{\DeclareUnicodeCharacter}' in text:
+        return 0
+
+    new_text, ok = _insert_latex_preamble_snippet(
+        text,
+        fallback,
+        command_markers=('DeclareUnicodeCharacter',),
+    )
+    if not ok:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print("[driver] 🔧 patch_declare_unicode_character_fallback: 补充 \\DeclareUnicodeCharacter fallback", flush=True)
+    return 1
 
 
 def patch_pdftex_primitives_for_xelatex(trans_tex_path):
@@ -2522,6 +2554,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     fix_label_ref_emdash(trans_tex)
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
+    patch_declare_unicode_character_fallback(trans_tex)
     patch_local_pdftex_primitives(workfolder)
     patch_pdftex_primitives_for_xelatex(trans_tex)
     patch_textsc_for_xelatex(trans_tex)

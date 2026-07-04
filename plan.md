@@ -152,6 +152,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [ ] 为 `run_papers.py` 的 slim index 写入和 pdf_status 同步增加纯函数测试。
 - [ ] 为 `translate_arxiv.py` 的 JSON 修复逻辑增加样例测试。
 - [x] 为 inline `\verb` 分隔符冲突沉淀 fallback fixture，修复 regex 内容包含原分隔符导致的 undefined control sequence。
+- [x] 扩展 FontAwesome legacy alias 与 `\DeclareUnicodeCharacter` fallback，并修复 preamble 参数内命令的 snippet 插入位置，恢复 2026-07-01 / 2026-07-03 daily 三篇失败 PDF。
 - [ ] 继续梳理 `full_translate_driver.py` 其他 fallback patch 的触发条件，沉淀为小型 fixtures。
 - [ ] 继续补充 PDF 失败诊断日志中的常见 LaTeX 错误分类。
 - [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。

@@ -2,6 +2,38 @@
 
 ---
 
+## v4.28 — 2026-07-04
+
+### 2026-07-01 / 2026-07-03 daily PDF 编译失败修复
+
+#### 失败定位
+
+- **2026-07-01 `2606.30626`**：daily 流程遗留 `locks/daily-2026-07-01.lock`，对应 PID 已不存在，导致该篇未继续产出 PDF。清理陈旧锁后复跑，真实失败点为旧模板在 `\author[...]` 中使用 `\faEnvelopeO`，现有 FontAwesome legacy alias 未覆盖该命令。
+- **2026-07-03 `2607.02440`**：失败发生在 LaTeX 编译阶段，正文中文翻译缓存完整；模板使用 `\faDatabase`，旧 alias 表未覆盖。
+- **2026-07-03 `2607.02255`**：失败发生在 LaTeX 编译阶段，翻译 tex 中存在 `\DeclareUnicodeCharacter{...}`，但当前 XeLaTeX/fallback 环境没有对应命令定义。
+
+#### 通用修复
+
+- 扩展 `patch_fontawesome_legacy_aliases()`，新增 `\faDatabase` 与 `\faEnvelopeO` fallback；后续同类旧式 FontAwesome 命令会在 fallback 重编译阶段自动补齐。
+- 修复 LaTeX fallback snippet 插入策略：命令出现在 preamble 参数内部时，改为插到“最早使用所在行之前”，避免把 fallback 块插进 `\author[...]`、`\text{...}` 等参数中造成新的编译错误。
+- 新增 `patch_declare_unicode_character_fallback()`，在 fallback 重编译阶段为缺失的 `\DeclareUnicodeCharacter` 补 no-op 兼容，覆盖 inputenc 风格源码迁移到 XeLaTeX 时的常见失败。
+
+#### 恢复结果
+
+- 使用 `--keep-translation` 复用已保留的中文 tex 缓存重编译成功，未重新消耗全文翻译：
+  - `2606.30626_zh.pdf` 约 2.00MB；
+  - `2607.02440_zh.pdf` 约 1.20MB；
+  - `2607.02255_zh.pdf` 约 6.99MB。
+- `python3 run_repair.py --retry-pdf --mode daily --key 2026-07-01` 和 `python3 run_repair.py --retry-pdf --mode daily --key 2026-07-03` 已同步索引，两个日期的 daily 论文均为 `pdf_status=ok`。
+- 三篇旧失败诊断日志和 `data/tex_backup_failed/` 失败现场 tex 已在成功后自动清理；成功版中文 tex 已备份到 `data/tex_backup/`。
+
+#### 验证
+
+- `python3 -m py_compile full_translate_driver.py translate_full.py run_papers.py` 通过。
+- `python3 translate_full.py <id> -o data/papers --keep-translation` 分别验证三篇失败论文重编译通过。
+
+---
+
 ## v4.27 — 2026-07-01
 
 ### inline `\verb` 分隔符冲突 fallback 修复
