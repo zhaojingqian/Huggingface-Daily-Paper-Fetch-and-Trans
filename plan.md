@@ -147,6 +147,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [ ] 给 `/api/bookmarks`、`/api/search`、`/api/submit` 增加 POST/GET API 级测试。
 - [ ] 对 `BASE_PATH` 字符串替换策略做快照测试，防止误改外链。
 - [x] 新增主题订阅 tab、topic profile、检索词编辑、token 保护和 `run_topic.py --all` 调度入口，同时保持搜索公开、手动提交写操作受保护。
+- [x] 优化主题订阅检索词 prompt：默认按 AI/ML/CS 解释用户输入，要求多元 should 词，并过滤和 negative 冲突的无关召回词。
 
 ### Phase C — 翻译链路稳定性
 

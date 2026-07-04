@@ -20,6 +20,12 @@ from paperhub.paths import PAPER_STORE_DIR
 PROXY = "http://127.0.0.1:7890"
 ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
 TOPIC_MODEL_DEFAULT = "claude-opus-4-8-thinking"
+TOPIC_SYSTEM_PROMPT = (
+    "你是 AI/ML/CS 论文检索词规划专家。用户输入一定是 AI、机器学习或计算机科学论文主题，"
+    "即使是缩写也必须优先按这些研究方向解释。你只输出可解析 JSON。"
+)
+ALLOWED_TOPIC_CATEGORIES = "cs.AI, cs.LG, cs.CL, cs.CV, cs.RO, cs.IR, stat.ML"
+MAX_ARXIV_QUERY_TERMS = 16
 KNOWN_TOPIC_HINTS = {
     "opd": {
         "must": ["OPD", "on-policy distillation"],
@@ -27,12 +33,24 @@ KNOWN_TOPIC_HINTS = {
             "policy distillation",
             "online policy distillation",
             "dual on-policy distillation",
+            "on-policy reinforcement learning",
             "student policy",
             "teacher policy",
             "reinforcement learning distillation",
+            "policy optimization distillation",
+            "distilling reasoning policies",
+            "language agent policy distillation",
+            "imitation learning distillation",
         ],
         "negative": [
             "openable part detection",
+            "openable part",
+            "articulated object",
+            "articulated object part detection",
+            "openable part motion prediction",
+            "3D part segmentation",
+            "articulation parameter estimation",
+            "motion axis prediction",
             "optical path difference",
             "outpatient department",
             "obsessive personality disorder",
@@ -117,41 +135,102 @@ def _call_topic_llm(messages, max_tokens=1200):
     raise RuntimeError(f"topic LLM failed: {last_exc}")
 
 
+def build_terms_prompt(query, hint=None):
+    q = (query or "").strip()
+    hint_text = ""
+    if hint:
+        preferred = _dedupe_terms(hint.get("must", []) + hint.get("should", []), 18)
+        excluded = _dedupe_terms(hint.get("negative", []), 12)
+        hint_text = f"""
+
+本地语义偏好：
+- preferred_terms: {json.dumps(preferred, ensure_ascii=False)}
+- excluded_terms: {json.dumps(excluded, ensure_ascii=False)}
+- 如果模型认为缩写还有其他 AI/ML/CS 含义，只有在明显贴近 preferred_terms 时才放入 should；否则放入 negative 或忽略。"""
+    return f"""为长期 AI/ML/CS 论文订阅生成英文检索词。用户输入一定属于 AI、机器学习、深度学习、NLP、CV、机器人、信息检索或统计机器学习方向；不要把缩写扩展到医学、光学、电力、行政、商业、心理学等非 AI/ML/CS 含义。
+
+订阅主题: {q}
+检索范围: arXiv / Hugging Face Papers
+允许类别: {ALLOWED_TOPIC_CATEGORIES}
+{hint_text}
+
+生成规则：
+1. 如果主题是缩写，优先选择 AI/ML/CS 论文中最可能的全称和研究方向；非 AI/ML/CS 常见含义只能放入 negative。
+2. must 放 1-3 个最高精度短语，包括原始缩写和最可能的规范英文全称；不要放过宽词。
+3. should 放 8-16 个多元检索短语，覆盖同义词、全称变体、方法名、任务名、应用子方向、上游/下游相邻概念和 arXiv 标题常见写法。
+4. should 要多样但仍强相关；避免只输出同一短语的大小写/单复数变化，也避免 AI、machine learning、deep learning、LLM、neural network 这类泛词，除非它们就是用户主题本身。
+5. negative 放 0-10 个容易误召回的无关含义；不要把合理的 AI/ML/CS 相邻方向放进 negative。
+
+只返回 JSON，不要解释，格式必须为：
+{{
+  "must": ["1-3 个强相关英文检索短语"],
+  "should": ["8-16 个强相关且多元的英文检索短语"],
+  "negative": ["0-10 个无关含义或排除短语"]
+}}"""
+
+
+def _dedupe_terms(values, limit=None):
+    out = []
+    seen = set()
+    for item in values or []:
+        value = re.sub(r"\s+", " ", str(item).strip())
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def _term_conflicts_with_negative(term, negative_terms):
+    lower = (term or "").lower()
+    if not lower:
+        return False
+    for neg in negative_terms or []:
+        neg_lower = (neg or "").lower().strip()
+        if not neg_lower:
+            continue
+        if lower == neg_lower or neg_lower in lower:
+            return True
+        if " " in lower and len(lower) > 5 and lower in neg_lower:
+            return True
+    return False
+
+
 def generate_terms(query):
     """Generate topic expansion terms with a deterministic fallback."""
     q = (query or "").strip()
     fallback = topic_store.default_terms(q)
     if not q:
         return fallback
-    prompt = f"""为 AI/CS/ML 论文检索扩展主题词。输入主题可能是缩写。
-
-主题: {q}
-
-只返回 JSON，不要解释：
-{{
-  "must": ["强相关且应优先匹配的英文术语，1-3个"],
-  "should": ["同义词、全称、相关方法/任务英文术语，4-10个"],
-  "negative": ["该缩写的常见无关含义或需要排除的英文术语，0-8个"]
-}}"""
+    known_hint = KNOWN_TOPIC_HINTS.get(q.lower())
+    prompt = build_terms_prompt(q, known_hint)
     messages = [
-        {"role": "system", "content": "你是 AI/ML 论文检索专家，只输出可解析 JSON。"},
+        {"role": "system", "content": TOPIC_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
     def _merge_known_hints(terms):
-        hint = KNOWN_TOPIC_HINTS.get(q.lower())
+        hint = known_hint
         if not hint:
-            return terms
+            negative = _dedupe_terms(terms.get("negative", []), 10)
+            must = [x for x in _dedupe_terms(terms.get("must", []), 3)
+                    if not _term_conflicts_with_negative(x, negative)]
+            should = [x for x in _dedupe_terms(terms.get("should", []), 16)
+                      if not _term_conflicts_with_negative(x, negative)]
+            return {"must": must, "should": should, "negative": negative}
         merged = {}
-        negative_lowers = {x.lower() for x in hint.get("negative", [])}
+        negative = _dedupe_terms(hint.get("negative", []) + terms.get("negative", []), 10)
         for field in ("must", "should", "negative"):
             values = []
             for item in hint.get(field, []) + terms.get(field, []):
-                lower = item.lower() if item else ""
-                if field in ("must", "should") and lower in negative_lowers:
+                if field in ("must", "should") and _term_conflicts_with_negative(item, negative):
                     continue
-                if item and lower not in {x.lower() for x in values}:
+                if item and item.lower() not in {x.lower() for x in values}:
                     values.append(item)
-            merged[field] = values
+            limit = 3 if field == "must" else 16 if field == "should" else 10
+            merged[field] = _dedupe_terms(values, limit)
         return merged
 
     try:
@@ -245,7 +324,7 @@ def fetch_arxiv_candidates(profile, days=30, max_results=80):
         query_terms = [_quote_term(profile.get("query", ""))]
 
     cat_query = " OR ".join(f"cat:{c}" for c in profile.get("categories", topic_store.DEFAULT_CATEGORIES))
-    term_query = " OR ".join(query_terms[:10])
+    term_query = " OR ".join(query_terms[:MAX_ARXIV_QUERY_TERMS])
     search_query = f"({cat_query}) AND ({term_query})"
     url = (
         "https://export.arxiv.org/api/query?search_query="

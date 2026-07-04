@@ -4,6 +4,19 @@
 
 ## v4.30 — 2026-07-04
 
+### 主题订阅检索词生成优化
+
+- 优化 `topic_engine.py` 的 LLM prompt：明确用户输入一定按 AI/ML/CS 论文主题解释，限定 arXiv 类别方向，并要求 `should` 覆盖同义词、方法名、任务名、应用子方向、上下游相邻概念和 arXiv 标题常见写法。
+- 将非 AI/ML/CS 的缩写含义显式放入 `negative`，并要求避免 `AI`、`machine learning`、`deep learning` 等泛词污染召回。
+- 加强生成后清洗：must / should / negative 统一去重限量，must/should 中和 negative 冲突的短语会被过滤；已知主题的本地语义偏好会注入 prompt，OPD hint 扩展为更偏 on-policy distillation / policy distillation / RL policy 的多元检索词。
+- arXiv 查询词上限从 10 提高到 16，避免多元检索词只生成不参与召回。
+- `tests/test_topic_engine.py` 新增 prompt 约束、OPD 负向短语过滤、生成词去重和 negative 冲突过滤测试。
+
+#### 验证
+
+- `python3 -m py_compile topic_engine.py run_topic.py web_server.py paperhub/topic_store.py` 通过。
+- `python3 -m unittest tests.test_topic_engine` 通过。
+
 ### 主题订阅 Top 3 检索与手动提交保护
 
 #### 新增能力

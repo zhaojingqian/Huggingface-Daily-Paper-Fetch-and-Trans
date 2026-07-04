@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from paperhub import topic_store
-from topic_engine import freshness_score, generate_terms, rank_candidates, relevance_score
+from topic_engine import build_terms_prompt, freshness_score, generate_terms, rank_candidates, relevance_score
 
 
 class TopicEngineTest(unittest.TestCase):
@@ -80,11 +80,53 @@ class TopicEngineTest(unittest.TestCase):
         self.assertIn("2607.00001", [p["arxiv_id"] for p in forced])
 
     def test_known_opd_hint_is_merged_with_llm_terms(self):
-        with patch("topic_engine._call_topic_llm", return_value='{"must":["openable part detection"],"should":[],"negative":[]}'):
+        raw = (
+            '{"must":["openable part detection"],'
+            '"should":["openable part detection for robotics","articulated object part detection",'
+            '"openable part motion prediction","policy optimization distillation"],'
+            '"negative":[]}'
+        )
+        with patch("topic_engine._call_topic_llm", return_value=raw):
             terms = generate_terms("opd")
         self.assertIn("on-policy distillation", terms["must"])
         self.assertNotIn("openable part detection", terms["must"])
+        self.assertFalse(any("openable part detection" in x.lower() for x in terms["should"]))
+        self.assertFalse(any("articulated object" in x.lower() for x in terms["should"]))
+        self.assertFalse(any("openable part motion" in x.lower() for x in terms["should"]))
         self.assertIn("openable part detection", terms["negative"])
+        self.assertIn("language agent policy distillation", terms["should"])
+
+    def test_terms_prompt_constrains_llm_to_ai_ml_cs_and_diverse_terms(self):
+        prompt = build_terms_prompt("opd")
+        self.assertIn("用户输入一定属于 AI", prompt)
+        self.assertIn("cs.AI", prompt)
+        self.assertIn("stat.ML", prompt)
+        self.assertIn("医学、光学、电力、行政、商业、心理学", prompt)
+        self.assertIn("8-16 个多元检索短语", prompt)
+        self.assertIn("避免只输出同一短语", prompt)
+
+    def test_terms_prompt_can_include_local_topic_hint(self):
+        prompt = build_terms_prompt(
+            "opd",
+            {"must": ["on-policy distillation"], "should": ["policy distillation"], "negative": ["openable part"]},
+        )
+        self.assertIn("本地语义偏好", prompt)
+        self.assertIn("preferred_terms", prompt)
+        self.assertIn("on-policy distillation", prompt)
+        self.assertIn("openable part", prompt)
+
+    def test_generated_terms_remove_self_declared_negative_conflicts(self):
+        raw = (
+            '{"must":["abc","medical abc"],'
+            '"should":["medical abc detection","abc planning","abc planning"],'
+            '"negative":["medical abc"]}'
+        )
+        with patch("topic_engine._call_topic_llm", return_value=raw):
+            terms = generate_terms("abc")
+        self.assertIn("abc", terms["must"])
+        self.assertNotIn("medical abc", terms["must"])
+        self.assertNotIn("medical abc detection", terms["should"])
+        self.assertEqual(terms["should"], ["abc planning"])
 
 
 if __name__ == "__main__":

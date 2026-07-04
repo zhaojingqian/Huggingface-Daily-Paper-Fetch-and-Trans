@@ -59,7 +59,7 @@ python3 run_topic.py --all
 python3 translate_full.py 2605.21573 -o data/papers
 ```
 
-主题订阅使用 `.env` 中的 `TOPIC_LLM_API_KEY`、`TOPIC_LLM_BASE_URL`、`TOPIC_LLM_MODEL` 生成检索词，`TOPIC_ADMIN_TOKEN` 用于保护主题管理和手动提交动作；`.env` 已被 git ignore，不能提交密钥。主题检索默认限定 `cs.AI`、`cs.LG`、`cs.CL`、`cs.CV`、`cs.RO`、`cs.IR`、`stat.ML`，排序权重为相关性 45%、新鲜度 30%、HF vote 25%。同一 topic 已推送过的 arXiv ID 默认不重复推；paper store 会全站复用中文摘要和全文 PDF 缓存，避免重复翻译或重复生成 PDF。
+主题订阅使用 `.env` 中的 `TOPIC_LLM_API_KEY`、`TOPIC_LLM_BASE_URL`、`TOPIC_LLM_MODEL` 生成检索词，`TOPIC_ADMIN_TOKEN` 用于保护主题管理和手动提交动作；`.env` 已被 git ignore，不能提交密钥。主题检索默认限定 `cs.AI`、`cs.LG`、`cs.CL`、`cs.CV`、`cs.RO`、`cs.IR`、`stat.ML`，排序权重为相关性 45%、新鲜度 30%、HF vote 25%。检索词生成默认把用户输入解释为 AI/ML/CS 论文主题，要求 must 高精度、should 多元覆盖同义词/方法/任务/相邻概念，非 AI/ML/CS 常见含义进入 negative；代码侧还会去重、限制数量并过滤和 negative 冲突的召回词。同一 topic 已推送过的 arXiv ID 默认不重复推；paper store 会全站复用中文摘要和全文 PDF 缓存，避免重复翻译或重复生成 PDF。
 
 ### 修复与重试
 
