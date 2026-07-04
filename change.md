@@ -2,6 +2,28 @@
 
 ---
 
+## v4.29 — 2026-07-04
+
+### 全量 PDF 失败状态补扫与恢复
+
+#### 扫描范围
+
+- 全量扫描 `data/*/*/index.json`，检查 `pdf_status=failed` 以及 `pdf_status=ok` 但 paper store 缺少 `<arxiv_id>_zh.pdf` 的条目。
+- 同步检查 `logs/pdf_errors/` 和 `data/tex_backup_failed/`，区分真实缺失 PDF 与已恢复后的陈旧诊断。
+
+#### 修复结果
+
+- **`2606.11324`**：`monthly/2026-06` 中仍为 `pdf_status=failed`，且 paper store 缺 PDF。复用 `data/tex_backup_failed/2606.11324_merge_translate_zh.tex` 重编译；在 v4.28 行级 snippet 插入修复基础上，继续补齐 `\faEnvelope`、`\faGem` FontAwesome legacy alias，最终健康检查通过并生成 `data/papers/2606.11324_zh.pdf`，约 26.40MB。
+- **`2605.10344`**：不在当前索引失败项中，但有历史失败日志且 paper store 缺 PDF。复用 `data/tex_backup/2605.10344_merge_translate_zh.tex`，从源码缓存重建 workfolder 后直编译成功，生成 `data/papers/2605.10344_zh.pdf`，约 3.66MB。
+- 清理了所有“PDF 已存在但失败日志仍残留”的陈旧 `logs/pdf_errors/*.log`，以及 `2606.24597` 已恢复后残留的 `data/tex_backup_failed/*`，避免后续误判。
+
+#### 验证
+
+- `python3 run_repair.py --retry-pdf --mode monthly --key 2026-06` 已同步 `2606.11324` 为 `pdf_status=ok`。
+- 全量复扫结果：索引失败 0、失败日志 0、失败现场 tex 0。
+
+---
+
 ## v4.28 — 2026-07-04
 
 ### 2026-07-01 / 2026-07-03 daily PDF 编译失败修复

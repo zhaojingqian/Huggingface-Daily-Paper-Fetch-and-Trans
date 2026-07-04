@@ -1732,7 +1732,9 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
         'faSearch': ('search', 'S'),
         'faTrophy': ('trophy', 'T'),
         'faDatabase': ('database', 'DB'),
+        'faEnvelope': ('envelope', '@'),
         'faEnvelopeO': ('envelope', '@'),
+        'faGem': ('gem', '*'),
     }
     combined = text + sibling_text
     needed = []

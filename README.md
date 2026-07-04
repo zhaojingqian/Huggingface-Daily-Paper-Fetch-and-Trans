@@ -82,7 +82,7 @@ splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 ma
 
 过滤策略可通过环境变量扩展：`PAPER_TRANS_EXTRA_HARD_ENVS` 增加需要硬保护的环境名，`PAPER_TRANS_EXTRA_SOFT_ENVS` 增加可拆出自然语言继续翻译的环境名，`PAPER_TRANS_EXTRA_RESTORE_ENVS` 增加 fallback 中可从原文恢复的环境名，`PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS` 按行增加需要清理的模型残留正则。
 
-fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO` 等旧命令），禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc 场景常见的 `\DeclareUnicodeCharacter` no-op 兼容，从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
+fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO`、`\faEnvelope`、`\faGem` 等旧命令），禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc 场景常见的 `\DeclareUnicodeCharacter` no-op 兼容，从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
 
 宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间没有换行输出时，外层 timeout 仍会按时收口，并会尽力清理同篇 `full_translate_driver.py` 进程，避免 retry 阶段被悬挂的旧编译卡住。
 
