@@ -1,11 +1,35 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from paperhub import topic_store
-from topic_engine import build_terms_prompt, freshness_score, generate_terms, rank_candidates, relevance_score
+from topic_engine import (
+    build_terms_prompt,
+    freshness_score,
+    generate_terms,
+    rank_candidates,
+    relevance_score,
+    repair_topic,
+    retry_topic_pdf,
+    topic_repair_targets,
+)
 
 
 class TopicEngineTest(unittest.TestCase):
+    def with_temp_topics(self):
+        return tempfile.TemporaryDirectory()
+
+    def set_temp_topic_dir(self, tmp):
+        self._old_topic_dir = topic_store.TOPIC_DIR
+        self._old_topics_file = topic_store.TOPICS_FILE
+        topic_store.TOPIC_DIR = tmp
+        topic_store.TOPICS_FILE = os.path.join(tmp, "topics.json")
+
+    def restore_topic_dir(self):
+        topic_store.TOPIC_DIR = self._old_topic_dir
+        topic_store.TOPICS_FILE = self._old_topics_file
+
     def profile(self):
         return {
             "slug": "opd",
@@ -135,6 +159,66 @@ class TopicEngineTest(unittest.TestCase):
         self.assertNotIn("medical abc", terms["must"])
         self.assertNotIn("medical abc detection", terms["should"])
         self.assertEqual(terms["should"], ["abc planning"])
+
+    def test_topic_repair_targets_accept_slug_date_key(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                topic_store.save_index("opd", "2026-07-05", [{"arxiv_id": "2607.00001", "rank": 1}])
+                targets = topic_repair_targets(key="opd/2026-07-05", scan_all=True)
+                self.assertEqual([(p["slug"], k) for p, k in targets], [("opd", "2026-07-05")])
+            finally:
+                self.restore_topic_dir()
+
+    def test_topic_repair_targets_days_zero_scans_nothing(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                topic_store.save_index("opd", "2026-07-05", [{"arxiv_id": "2607.00001", "rank": 1}])
+                self.assertEqual(topic_repair_targets(days=0, scan_all=False), [])
+            finally:
+                self.restore_topic_dir()
+
+    def test_retry_topic_pdf_reuses_shared_retry_helper_and_writes_index(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                topic_store.save_index(
+                    "opd",
+                    "2026-07-05",
+                    [{"arxiv_id": "2607.00001", "rank": 1, "pdf_zh_failed": True}],
+                )
+
+                def fake_retry(papers, label):
+                    self.assertIn("opd/2026-07-05", label)
+                    papers[0]["pdf_status"] = "ok"
+                    return {"ok": 1, "failed": 0, "changed": True}
+
+                with patch("run_papers.retry_failed_pdf_entries", side_effect=fake_retry):
+                    self.assertEqual(retry_topic_pdf(topic="opd", key="2026-07-05"), 1)
+                idx = topic_store.load_index("opd", "2026-07-05")
+                self.assertEqual(idx["papers"][0]["pdf_status"], "ok")
+            finally:
+                self.restore_topic_dir()
+
+    def test_repair_topic_retries_missing_summary_translation(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                topic_store.save_index("opd", "2026-07-05", [{"arxiv_id": "2607.00001", "rank": 1}])
+                translated = {"title_zh": "中文标题", "summary_zh": "中文总结"}
+                with patch("topic_engine.paper_store.read_raw", return_value={}), \
+                     patch("translate_arxiv.load_api_config", return_value={}), \
+                     patch("translate_arxiv.translate_and_save", return_value=translated) as translate:
+                    self.assertEqual(repair_topic(topic="opd", key="2026-07-05"), 1)
+                translate.assert_called_once()
+                self.assertEqual(translate.call_args[1]["week_str"], "topic/opd")
+            finally:
+                self.restore_topic_dir()
 
 
 if __name__ == "__main__":

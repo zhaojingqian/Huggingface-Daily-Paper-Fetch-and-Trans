@@ -4,6 +4,14 @@
 
 ## v4.30 — 2026-07-04
 
+### 主题订阅翻译失败修复
+
+- `run_repair.py` 支持 `--mode topic` 和 `--topic <slug>`，可按全部 topic、单个 topic、近 N 天或 `slug/YYYY-MM-DD` 指定 key 扫描修复。
+- topic 摘要/标题缺失时复用 daily 的摘要 repair 语义，重新调用 `translate_arxiv.translate_and_save` 写入统一 paper store，topic slim index 不重复保存大字段。
+- topic `pdf_status=failed` 重试复用从 `run_papers.py` 抽出的 `retry_failed_pdf_entries()`：优先 paper store PDF 命中，其次复用容器/宿主机翻译 tex 缓存重编译，失败后再 no-cache 全文重译。
+- `run_repair.py --post` 和 `run_repair.py --retry-pdf` 默认扫描范围扩展到 topic；`--refetch` 仍仅适用于 daily/weekly/monthly，topic 新结果继续由 `run_topic.py --all` 生成。
+- 新增测试覆盖 topic repair target、摘要修复调用和 PDF retry 状态回写。
+
 ### 主题订阅备注名
 
 - topic profile 新增可选 `display_name` 字段，用作用户自定义备注名；为空时继续回退到原始 query。

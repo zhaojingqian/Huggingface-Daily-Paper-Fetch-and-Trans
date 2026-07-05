@@ -561,3 +561,119 @@ def run_all_topics(key=None, limit=3, do_full_translate=True, force=False):
         results.append(run_topic(profile["slug"], key=key, limit=limit,
                                  do_full_translate=do_full_translate, force=force))
     return results
+
+
+def _recent_date_keys(days):
+    today = datetime.now().date()
+    return sorted((today - timedelta(days=d)).strftime("%Y-%m-%d") for d in range(days))
+
+
+def topic_repair_targets(topic=None, key=None, days=None, scan_all=False):
+    """Return (profile, key) pairs for topic repair/retry scans."""
+    topic_slug = topic_store.slugify(topic) if topic else ""
+    target_key = key
+    if target_key and "/" in target_key:
+        topic_part, key_part = target_key.split("/", 1)
+        if not topic_slug:
+            topic_slug = topic_store.slugify(topic_part)
+        target_key = key_part
+
+    if topic_slug:
+        profile = topic_store.get_topic(topic_slug)
+        profiles = [profile] if profile else []
+    else:
+        profiles = topic_store.list_topics()
+
+    recent = set(_recent_date_keys(days)) if days is not None and not scan_all and not target_key else None
+    targets = []
+    for profile in profiles:
+        slug = profile.get("slug", "")
+        keys = [target_key] if target_key else topic_store.list_keys(slug)
+        for k in keys:
+            if not k:
+                continue
+            if recent is not None and k not in recent:
+                continue
+            if not os.path.exists(topic_store.index_path(slug, k)):
+                continue
+            targets.append((profile, k))
+    return targets
+
+
+def _write_topic_index(slug, key, idx):
+    path = topic_store.index_path(slug, key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=2)
+
+
+def repair_topic(topic=None, key=None, days=None, scan_all=False):
+    """
+    Repair topic summary translations whose paper store entry lacks title_zh/summary_zh.
+
+    This mirrors run_papers.repair(): metadata/translation are written to the
+    shared paper store, while topic slim indexes stay unchanged.
+    """
+    from translate_arxiv import load_api_config, translate_and_save
+
+    config = load_api_config()
+    total_fixed = 0
+    targets = topic_repair_targets(topic=topic, key=key, days=days, scan_all=scan_all)
+    for profile, k in targets:
+        slug = profile.get("slug", "")
+        idx = topic_store.load_index(slug, k)
+        changed = False
+        for slim in idx.get("papers", []):
+            aid = slim.get("arxiv_id", "")
+            if not aid:
+                continue
+            stored = paper_store.read_raw(aid)
+            if stored.get("title_zh") and stored.get("summary_zh"):
+                continue
+            print(f"[repair-topic] {slug}/{k} — 重新翻译: {aid}", flush=True)
+            try:
+                result = translate_and_save(
+                    arxiv_id=aid,
+                    output_dir=PAPER_STORE_DIR,
+                    rank=slim.get("rank", 1),
+                    week_str=f"topic/{slug}",
+                    config=config,
+                )
+                if result.get("title_zh") and result.get("summary_zh"):
+                    total_fixed += 1
+                    changed = True
+                    print(f"[repair-topic] ✅ {result['title_zh'][:60]}", flush=True)
+                else:
+                    print(f"[repair-topic] ❌ 仍无完整中文翻译: {aid}", flush=True)
+            except Exception as e:
+                print(f"[repair-topic] ❌ {aid}: {e}", flush=True)
+        if changed:
+            print(f"[repair-topic] 💾 paper store 已更新，topic index 无需改变: {slug}/{k}", flush=True)
+    print(f"[repair-topic] 完成，共修复 {total_fixed} 篇", flush=True)
+    return total_fixed
+
+
+def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False):
+    """Retry topic pdf_status=failed entries using the same retry logic as daily."""
+    from run_papers import retry_failed_pdf_entries
+
+    total_ok = 0
+    total_fail = 0
+    targets = topic_repair_targets(topic=topic, key=key, days=days, scan_all=scan_all)
+    for profile, k in targets:
+        slug = profile.get("slug", "")
+        idx = topic_store.load_index(slug, k)
+        papers = idx.get("papers", [])
+        failed = [p for p in papers if p.get("pdf_status") == "failed"]
+        if not failed:
+            continue
+        print(f"[retry-topic-pdf] {slug}/{k} — {len(failed)} 篇待重试", flush=True)
+        result = retry_failed_pdf_entries(papers, label=f"[retry-topic-pdf] {slug}/{k}")
+        total_ok += result["ok"]
+        total_fail += result["failed"]
+        if result["changed"]:
+            idx["papers"] = papers
+            _write_topic_index(slug, k, idx)
+    print(f"[retry-topic-pdf] 完成: 成功={total_ok} 仍失败={total_fail}", flush=True)
+    return total_ok

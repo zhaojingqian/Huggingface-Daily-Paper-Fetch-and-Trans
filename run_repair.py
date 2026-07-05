@@ -9,8 +9,9 @@ Paper Trans — 翻译修复扫描器
   --retry-pdf  PDF 重试：对 pdf_status=failed 的条目重新翻译全文 PDF
 
 通用参数（所有模式均支持）：
-  --mode  daily|weekly|monthly   仅处理指定 mode（默认全部）
-  --key   2026-W12               仅处理指定 key
+  --mode  daily|weekly|monthly|topic   仅处理指定 mode（默认全部）
+  --key   2026-W12 或 opd/2026-07-05   仅处理指定 key
+  --topic opd                         仅处理指定 topic（仅 --mode topic）
   --days  N                      扫描最近 N 天范围（默认 30）
   --all                          扫描全部历史（忽略 --days）
 
@@ -21,6 +22,7 @@ crontab 示例（当前配置）：
   每周日 07:00 --retry-pdf --mode weekly  --days 14
   每月28日04:00 --post     --mode monthly --days 60
   每月28日07:00 --retry-pdf --mode monthly --days 60
+  每天 06:30   --retry-pdf --mode topic   --days 7
 """
 import sys, os, argparse
 from datetime import datetime, timedelta
@@ -30,6 +32,8 @@ from paperhub.paths import ROOT_DIR as BASE_DIR, LOGS_DIR, mode_dir, mode_index_
 sys.path.insert(0, BASE_DIR)
 
 LOG_FILE = os.path.join(LOGS_DIR, "repair.log")
+CONTENT_MODES = ["daily", "weekly", "monthly", "topic"]
+REFETCH_MODES = ["daily", "weekly", "monthly"]
 
 
 def _log(msg):
@@ -184,11 +188,66 @@ def retry_pdf_keys(mode, days, scan_all, key):
     return total
 
 
+def repair_topic_keys(topic, days, scan_all, key):
+    """根据参数确定 topic 摘要修复范围，调用 topic_engine.repair_topic()。"""
+    from topic_engine import repair_topic, topic_repair_targets
+
+    label = f"topic={topic or 'all'}"
+    if key:
+        _log(f"[repair:topic] 指定 key={key} ({label})，开始修复...")
+        n = repair_topic(topic=topic, key=key, scan_all=True)
+        _log(f"[repair:topic] {key} — 修复 {n} 篇")
+        return n
+
+    if scan_all:
+        _log(f"[repair:topic] 全量扫描 ({label})，开始修复...")
+        n = repair_topic(topic=topic, scan_all=True)
+        _log(f"[repair:topic] 全量完成 — 修复 {n} 篇")
+        return n
+
+    targets = topic_repair_targets(topic=topic, days=days, scan_all=False)
+    if not targets:
+        _log(f"[repair:topic] 近 {days} 天无数据，跳过")
+        return 0
+    _log(f"[repair:topic] 扫描 {len(targets)} 个 topic/date")
+    n = repair_topic(topic=topic, days=days, scan_all=False)
+    _log(f"[repair:topic] 完成 — 修复 {n} 篇")
+    return n
+
+
+def retry_topic_pdf_keys(topic, days, scan_all, key):
+    """根据参数确定 topic PDF 重试范围，调用 topic_engine.retry_topic_pdf()。"""
+    from topic_engine import retry_topic_pdf, topic_repair_targets
+
+    label = f"topic={topic or 'all'}"
+    if key:
+        _log(f"[retry-pdf:topic] 指定 key={key} ({label})，开始重试...")
+        n = retry_topic_pdf(topic=topic, key=key, scan_all=True)
+        _log(f"[retry-pdf:topic] {key} — 成功 {n} 篇")
+        return n
+
+    if scan_all:
+        _log(f"[retry-pdf:topic] 全量扫描 ({label})，开始重试...")
+        n = retry_topic_pdf(topic=topic, scan_all=True)
+        _log(f"[retry-pdf:topic] 全量完成 — 成功 {n} 篇")
+        return n
+
+    targets = topic_repair_targets(topic=topic, days=days, scan_all=False)
+    if not targets:
+        _log(f"[retry-pdf:topic] 近 {days} 天无数据，跳过")
+        return 0
+    _log(f"[retry-pdf:topic] 扫描 {len(targets)} 个 topic/date")
+    n = retry_topic_pdf(topic=topic, days=days, scan_all=False)
+    _log(f"[retry-pdf:topic] 完成 — 成功 {n} 篇")
+    return n
+
+
 def main():
     parser = argparse.ArgumentParser(description="Paper Trans 翻译修复扫描器")
-    parser.add_argument("--mode", choices=["daily", "weekly", "monthly"],
+    parser.add_argument("--mode", choices=CONTENT_MODES,
                         help="仅扫描指定 mode（默认全部）")
     parser.add_argument("--key", help="仅修复指定 key（如 2026-02-28 / 2026-W09）")
+    parser.add_argument("--topic", help="仅修复指定 topic slug（仅 --mode topic）")
     parser.add_argument("--days", type=int, default=30,
                         help="扫描最近 N 天范围内的数据（默认 30）")
     parser.add_argument("--all", dest="scan_all", action="store_true",
@@ -205,13 +264,16 @@ def main():
 
     # ── 组合模式：补翻译 → 补索引 ────────────────────────────────────────────
     if args.post:
-        modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
+        modes = [args.mode] if args.mode else CONTENT_MODES
         scope = f"key={args.key}" if args.key else ("all" if args.scan_all else f"days={args.days}")
         _log(f"开始 post (modes={modes}, {scope})")
 
         from run_papers import repair
         total_repair = 0
         for m in modes:
+            if m == "topic":
+                total_repair += repair_topic_keys(args.topic, args.days, args.scan_all, args.key)
+                continue
             if args.key:
                 total_repair += repair(mode=m, key=args.key)
             elif args.scan_all:
@@ -229,7 +291,7 @@ def main():
                     total_repair += repair(mode=m, key=k)
 
         total_refetch = 0
-        for m in modes:
+        for m in [m for m in modes if m in REFETCH_MODES]:
             total_refetch += refetch_missing(mode=m, days=args.days if not args.scan_all else 9999)
 
         _log(f"post 完成 — 修复摘要 {total_repair} 篇，补抓索引 {total_refetch} 个 key")
@@ -238,19 +300,23 @@ def main():
 
     # ── PDF 重试模式 ─────────────────────────────────────────────────────────
     if args.retry_pdf:
-        modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
+        modes = [args.mode] if args.mode else CONTENT_MODES
         _log(f"开始 retry-pdf (modes={modes}, key={args.key or 'auto'}, "
              f"days={args.days if not args.scan_all else 'all'})")
         total = 0
         for m in modes:
-            total += retry_pdf_keys(m, args.days, args.scan_all, args.key)
+            if m == "topic":
+                total += retry_topic_pdf_keys(args.topic, args.days, args.scan_all, args.key)
+            else:
+                total += retry_pdf_keys(m, args.days, args.scan_all, args.key)
         _log(f"retry-pdf 完成，共成功 {total} 篇")
         _log("=" * 50)
         sys.exit(0)
 
     # ── 补抓模式：专门处理 fetch 完全失败的 key ───────────────────────────────
     if args.refetch:
-        modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
+        modes = [args.mode] if args.mode else REFETCH_MODES
+        modes = [m for m in modes if m in REFETCH_MODES]
         _log(f"开始 refetch 补抓 (modes={modes}, days={args.days})")
         total_refetched = 0
         for m in modes:
@@ -264,10 +330,13 @@ def main():
 
     from run_papers import repair
 
-    modes = [args.mode] if args.mode else ["daily", "weekly", "monthly"]
+    modes = [args.mode] if args.mode else CONTENT_MODES
     total = 0
 
     for m in modes:
+        if m == "topic":
+            total += repair_topic_keys(args.topic, args.days, args.scan_all, args.key)
+            continue
         if args.key:
             # 指定 key：直接修复
             n = repair(mode=m, key=args.key)

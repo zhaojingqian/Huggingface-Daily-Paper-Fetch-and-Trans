@@ -335,12 +335,12 @@ def _run_locked(mode, key, limit, do_full_translate):
     return fail == 0
 
 
-def retry_pdf(mode=None, key=None):
+def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
     """
-    扫描 pdf_status=failed 的条目，重新尝试全文 PDF 翻译，成功后更新 paper store 与 slim index。
-    mode=None 时扫描全部 (daily/weekly/monthly)。
-    key=None  时扫描该 mode 下所有 key。
-    返回成功翻译的篇数。
+    对一组 slim index paper entries 中 pdf_status=failed 的条目重试全文 PDF。
+
+    优先复用 paper store PDF；其次复用容器/宿主机里的翻译 tex 缓存只重跑编译；
+    缓存重编译失败时再清缓存重新全文翻译。调用方负责把 papers 写回对应 index。
     """
     from translate_full import (
         CONTAINER_NAME,
@@ -350,6 +350,87 @@ def retry_pdf(mode=None, key=None):
         translate_full,
     )
 
+    failed = [p for p in papers if p.get("pdf_status") == "failed"]
+    total_ok = 0
+    total_fail = 0
+    changed = False
+
+    for slim in failed:
+        aid = slim.get("arxiv_id", "")
+        if not aid:
+            continue
+
+        # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态
+        if _pdf_store_hit(aid):
+            print(f"{label} ✅ {aid} — paper store 已有 PDF，更新状态", flush=True)
+            slim["pdf_status"] = "ok"
+            _paper_store_update_pdf_status(aid, "ok")
+            changed = True
+            total_ok += 1
+            continue
+
+        # 检测是否已有翻译 tex，有则只重跑编译（优先查宿主机备份，再查容器内）
+        container_tex = f"/gpt/gpt_log/arxiv_cache/{aid}/workfolder/merge_translate_zh.tex"
+        has_container = subprocess.run(
+            ["docker", "exec", CONTAINER_NAME,
+             "test", "-s", container_tex],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+
+        host_tex = os.path.join(TEX_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
+        has_host = os.path.exists(host_tex) and os.path.getsize(host_tex) > 0
+        if not has_host:
+            host_tex_failed = os.path.join(TEX_FAILED_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
+            has_host = os.path.exists(host_tex_failed) and os.path.getsize(host_tex_failed) > 0
+
+        if has_container:
+            has_cache = True
+            print(f"{label} 🔬 {aid} — 容器内有翻译缓存，只重跑编译...", flush=True)
+        elif has_host:
+            print(f"{label} 🔬 {aid} — 发现宿主机 tex 备份，恢复后只重跑编译...", flush=True)
+            has_cache = _restore_tex_to_container(aid)
+            if not has_cache:
+                print(f"{label} ⚠️  {aid} — tex 恢复失败，改为重新翻译", flush=True)
+        else:
+            has_cache = False
+            print(f"{label} 🔬 {aid} — 无翻译缓存，重新翻译全文...", flush=True)
+        try:
+            r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
+                               no_cache=not has_cache,
+                               keep_translation=has_cache,
+                               timeout=3600)
+            if has_cache and not r.get("pdf_path"):
+                print(
+                    f"{label} ⚠️  {aid} — 缓存重编译失败，清缓存后重新翻译全文...",
+                    flush=True,
+                )
+                r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
+                                   no_cache=True,
+                                   keep_translation=False,
+                                   timeout=3600)
+            if r.get("pdf_path"):
+                slim["pdf_status"] = "ok"
+                _paper_store_update_pdf_status(aid, "ok")
+                print(f"{label} ✅ {aid} — 成功: {r['pdf_path']}", flush=True)
+                changed = True
+                total_ok += 1
+            else:
+                print(f"{label} ❌ {aid} — 仍失败: {r.get('error', '')}", flush=True)
+                total_fail += 1
+        except Exception as e:
+            print(f"{label} ❌ {aid}: {e}", flush=True)
+            total_fail += 1
+
+    return {"ok": total_ok, "failed": total_fail, "changed": changed}
+
+
+def retry_pdf(mode=None, key=None):
+    """
+    扫描 pdf_status=failed 的条目，重新尝试全文 PDF 翻译，成功后更新 paper store 与 slim index。
+    mode=None 时扫描全部 (daily/weekly/monthly)。
+    key=None  时扫描该 mode 下所有 key。
+    返回成功翻译的篇数。
+    """
     modes = [mode] if mode else ["daily", "weekly", "monthly"]
     total_ok = 0
     total_fail = 0
@@ -376,73 +457,10 @@ def retry_pdf(mode=None, key=None):
                 continue
 
             print(f"[retry-pdf] {m}/{k} — {len(failed)} 篇待重试", flush=True)
-            changed = False
-
-            for slim in failed:
-                aid = slim.get("arxiv_id", "")
-                if not aid:
-                    continue
-
-                # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态
-                if _pdf_store_hit(aid):
-                    print(f"[retry-pdf] ✅ {aid} — paper store 已有 PDF，更新状态", flush=True)
-                    slim["pdf_status"] = "ok"
-                    _paper_store_update_pdf_status(aid, "ok")
-                    changed = True
-                    total_ok += 1
-                    continue
-
-                # 检测是否已有翻译 tex，有则只重跑编译（优先查宿主机备份，再查容器内）
-                container_tex = f"/gpt/gpt_log/arxiv_cache/{aid}/workfolder/merge_translate_zh.tex"
-                has_container = subprocess.run(
-                    ["docker", "exec", CONTAINER_NAME,
-                     "test", "-s", container_tex],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                ).returncode == 0
-
-                host_tex = os.path.join(TEX_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
-                has_host = os.path.exists(host_tex) and os.path.getsize(host_tex) > 0
-                if not has_host:
-                    host_tex_failed = os.path.join(TEX_FAILED_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
-                    has_host = os.path.exists(host_tex_failed) and os.path.getsize(host_tex_failed) > 0
-
-                if has_container:
-                    has_cache = True
-                    print(f"[retry-pdf] 🔬 {aid} — 容器内有翻译缓存，只重跑编译...", flush=True)
-                elif has_host:
-                    print(f"[retry-pdf] 🔬 {aid} — 发现宿主机 tex 备份，恢复后只重跑编译...", flush=True)
-                    has_cache = _restore_tex_to_container(aid)
-                    if not has_cache:
-                        print(f"[retry-pdf] ⚠️  {aid} — tex 恢复失败，改为重新翻译", flush=True)
-                else:
-                    has_cache = False
-                    print(f"[retry-pdf] 🔬 {aid} — 无翻译缓存，重新翻译全文...", flush=True)
-                try:
-                    r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
-                                       no_cache=not has_cache,
-                                       keep_translation=has_cache,
-                                       timeout=3600)
-                    if has_cache and not r.get("pdf_path"):
-                        print(
-                            f"[retry-pdf] ⚠️  {aid} — 缓存重编译失败，清缓存后重新翻译全文...",
-                            flush=True,
-                        )
-                        r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
-                                           no_cache=True,
-                                           keep_translation=False,
-                                           timeout=3600)
-                    if r.get("pdf_path"):
-                        slim["pdf_status"] = "ok"
-                        _paper_store_update_pdf_status(aid, "ok")
-                        print(f"[retry-pdf] ✅ {aid} — 成功: {r['pdf_path']}", flush=True)
-                        changed = True
-                        total_ok += 1
-                    else:
-                        print(f"[retry-pdf] ❌ {aid} — 仍失败: {r.get('error', '')}", flush=True)
-                        total_fail += 1
-                except Exception as e:
-                    print(f"[retry-pdf] ❌ {aid}: {e}", flush=True)
-                    total_fail += 1
+            result = retry_failed_pdf_entries(papers, label=f"[retry-pdf] {m}/{k}")
+            changed = result["changed"]
+            total_ok += result["ok"]
+            total_fail += result["failed"]
 
             if changed:
                 idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

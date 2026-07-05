@@ -68,6 +68,7 @@ python3 translate_full.py 2605.21573 -o data/papers
 python3 run_repair.py
 python3 run_repair.py --mode daily --days 2
 python3 run_repair.py --mode weekly --key 2026-W22
+python3 run_repair.py --mode topic --topic opd --days 7
 
 # 补抓缺失 index.json 的日期/周期
 python3 run_repair.py --refetch --mode daily --days 3
@@ -78,9 +79,13 @@ python3 run_repair.py --post --mode daily --days 2
 # 对 pdf_status=failed 的条目重试全文 PDF
 python3 run_repair.py --retry-pdf --mode weekly --key 2026-W22
 python3 run_repair.py --retry-pdf --mode daily --days 7
+python3 run_repair.py --retry-pdf --mode topic --topic opd --days 7
+python3 run_repair.py --retry-pdf --mode topic --key opd/2026-07-05
 ```
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。
+
+topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套 PDF retry 逻辑，包括翻译 tex 缓存重编译、失败后 no-cache 全文重译和 paper store 状态回写。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 
 全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、inline `\verb` 分隔符与正则内容冲突、坏 `.aux`、旧式 FontAwesome 图标、XeLaTeX 下缺失的 `\DeclareUnicodeCharacter`、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
 
@@ -314,6 +319,7 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 0  2 28 * *  $PYTHON $PTDIR/run_monthly.py >> $PTDIR/logs/cron-monthly.log 2>&1
 
 0  5 * * *   docker restart $GPT_ACADEMIC_CONTAINER >> $PTDIR/logs/docker-restart.log 2>&1
+30 6 * * *   $PYTHON $PTDIR/run_repair.py --retry-pdf --mode topic --days 7 >> $PTDIR/logs/repair.log 2>&1
 30 3 * * 0   $PTDIR/scripts/cleanup_docker_cache.sh
 
 0  1 * * *   $PYTHON $PTDIR/run_repair.py --post       --mode daily   --days 2  >> $RLOG 2>&1
