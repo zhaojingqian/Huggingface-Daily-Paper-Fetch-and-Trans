@@ -665,10 +665,8 @@ def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False):
         slug = profile.get("slug", "")
         idx = topic_store.load_index(slug, k)
         papers = idx.get("papers", [])
-        failed = [p for p in papers if p.get("pdf_status") == "failed"]
-        if not failed:
+        if not papers:
             continue
-        print(f"[retry-topic-pdf] {slug}/{k} — {len(failed)} 篇待重试", flush=True)
         result = retry_failed_pdf_entries(papers, label=f"[retry-topic-pdf] {slug}/{k}")
         total_ok += result["ok"]
         total_fail += result["failed"]

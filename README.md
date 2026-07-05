@@ -83,7 +83,7 @@ python3 run_repair.py --retry-pdf --mode topic --topic opd --days 7
 python3 run_repair.py --retry-pdf --mode topic --key opd/2026-07-05
 ```
 
-`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：当 `data/papers/<id>.json` 仍为 `pdf_status=failed` 但 `<id>_zh.pdf` 已真实存在时，自动回写为 `ok`，避免历史状态残留误报。
+`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：当 `data/papers/<id>.json` 仍为 `pdf_status=failed` 但 `<id>_zh.pdf` 已真实存在时，自动回写为 `ok`，避免历史状态残留误报；当 slim index 标记 `pdf_status=ok` 但 paper store PDF 文件缺失时，会自动降级进入重试，避免状态写早但文件丢失后被 retry 漏掉。
 
 topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套 PDF retry 逻辑，包括翻译 tex 缓存重编译、失败后 no-cache 全文重译和 paper store 状态回写。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 

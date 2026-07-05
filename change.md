@@ -10,7 +10,10 @@
 - **`2606.29823`**：topic `loop-agent-long-horizen-task/2026-07-04` 的 PDF 失败在 `cidr-2025/acmart` 模板，class 加载阶段调用 `\setmonofont` 但未加载 `fontspec`。fallback 新增 fontspec 风格命令 no-op，并对 CIDR/ACM 类提前插入到 `\documentclass` 前；同时在 `\end{document}` 前重置 ACM/CIDR `\baselinestretch` guard，避免最终 class 校验报错。
 - `latex_translation_filters.py` 沉淀 XeLaTeX 兼容补丁：`inputenc`/listing 场景补 `\inputencodingname`，CIDR/ACM 或直接使用 `\setmainfont`、`\setsansfont`、`\setmonofont`、`\newfontfamily` 时补安全 no-op，且识别 `\usepackage[...]{fontspec}` / `\RequirePackage{fontspec}` 时不干预正常 fontspec 论文。
 - `run_papers.retry_pdf()` 新增 paper store 状态一致性同步：全局 JSON 里 `pdf_status=failed` 但 `data/papers/<id>_zh.pdf` 已真实存在时自动回写 `ok`，避免索引已恢复但 paper store 旧状态继续误报。
+- `retry_failed_pdf_entries()` 新增反向一致性修复：slim index 标记 `pdf_status=ok` 但 paper store PDF 文件缺失时，会先降级为 `failed` 并进入同一套缓存重编译/全文重译流程；topic、daily、weekly、monthly 的 retry caller 不再提前只筛 `failed`，统一交给 shared helper 判断。
 - 本次复用中文 tex 缓存重编译成功：`2606.26080_zh.pdf`、`2606.29823_zh.pdf`、历史残留 `2605.10344_zh.pdf`；另将已有 PDF 的 `2603.21065`、`2604.24300`、`2604.25914`、`2606.02060` 全局状态同步为 `ok`。全量扫描 `data/` 后已无 `pdf_status=failed`，`logs/pdf_errors/` 和 `data/tex_backup_failed/` 均无残留。
+- 继续补齐用户反馈的 3 篇 topic 中文 PDF：`2606.29296`（Process Advantage Signal Shaping）、`2606.29445`（Bridging VideoQA and Video-Guided Agentic Tasks）、`2606.29823`（Experience Graphs）。其中前两篇为 `pdf_status=ok` 但 paper store PDF 缺失，已通过中文 tex 缓存重编译补回；`2606.29823` 现有 PDF 路由验证正常。
+- 全库复扫还发现 5 个历史 paper store `ok` 但 PDF 缺失残留；其中 `2605.06507`、`2605.26114`、`2606.03985` 复用中文 tex 缓存重编译，`2604.04921`、`2604.11804` 无缓存后重新全文翻译并通过健康检查。最终全库 `ok_missing=0`，无 `pdf_status=failed`。
 
 #### 验证
 
@@ -18,6 +21,7 @@
 - `python3 -m unittest tests.test_paper_store tests.test_latex_translation_filters` 通过。
 - `python3 run_repair.py --retry-pdf --mode topic --key long-trajectory-reward-multi-reward-dense-reward/2026-07-04` 和 `python3 run_repair.py --retry-pdf --mode topic --key loop-agent-long-horizen-task/2026-07-04` 均成功。
 - `python3 translate_full.py 2605.10344 -o data/papers --keep-translation` 复用中文 tex 缓存重编译成功。
+- 本地 Range GET 验证 `2606.29296_zh.pdf`、`2606.29445_zh.pdf`、`2606.29823_zh.pdf` 均返回 `206 application/pdf`，topic 页面均渲染“全文PDF”按钮。
 
 ### 主题订阅翻译失败修复
 

@@ -338,6 +338,7 @@ def _run_locked(mode, key, limit, do_full_translate):
 def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
     """
     对一组 slim index paper entries 中 pdf_status=failed 的条目重试全文 PDF。
+    若条目标记 ok 但 paper store PDF 已缺失，会先降级为 failed 再重试。
 
     优先复用 paper store PDF；其次复用容器/宿主机里的翻译 tex 缓存只重跑编译；
     缓存重编译失败时再清缓存重新全文翻译。调用方负责把 papers 写回对应 index。
@@ -350,10 +351,19 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
         translate_full,
     )
 
-    failed = [p for p in papers if p.get("pdf_status") == "failed"]
     total_ok = 0
     total_fail = 0
     changed = False
+
+    for slim in papers:
+        aid = slim.get("arxiv_id", "")
+        if aid and slim.get("pdf_status") == "ok" and not _pdf_store_hit(aid):
+            print(f"{label} ⚠️  {aid} — pdf_status=ok 但 paper store 缺 PDF，降级重试", flush=True)
+            slim["pdf_status"] = "failed"
+            _paper_store_update_pdf_status(aid, "failed")
+            changed = True
+
+    failed = [p for p in papers if p.get("pdf_status") == "failed"]
 
     for slim in failed:
         aid = slim.get("arxiv_id", "")
@@ -460,11 +470,8 @@ def retry_pdf(mode=None, key=None):
                 continue
 
             papers = idx.get("papers", [])
-            failed = [p for p in papers if p.get("pdf_status") == "failed"]
-            if not failed:
+            if not papers:
                 continue
-
-            print(f"[retry-pdf] {m}/{k} — {len(failed)} 篇待重试", flush=True)
             result = retry_failed_pdf_entries(papers, label=f"[retry-pdf] {m}/{k}")
             changed = result["changed"]
             total_ok += result["ok"]
