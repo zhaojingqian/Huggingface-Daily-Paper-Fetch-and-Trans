@@ -326,6 +326,44 @@ class WebServerContractTest(unittest.TestCase):
         self.assertEqual(resp.status, 403)
         self.assertEqual(payload["error"], "forbidden")
 
+    def test_topic_display_name_is_saved_and_rendered(self):
+        old_topic_dir = web_server.topic_store.TOPIC_DIR
+        old_topics_file = web_server.topic_store.TOPICS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            web_server.topic_store.TOPIC_DIR = tmp
+            web_server.topic_store.TOPICS_FILE = os.path.join(tmp, "topics.json")
+            try:
+                web_server.topic_store.upsert_topic({
+                    "slug": "opd",
+                    "query": "opd",
+                    "display_name": "OPD 策略蒸馏",
+                    "generated_terms": {"must": ["opd"], "should": [], "negative": []},
+                })
+
+                resp, body = self.request("/topic")
+                html = body.decode("utf-8", errors="replace")
+                self.assertEqual(resp.status, 200)
+                self.assertIn("OPD 策略蒸馏", html)
+                self.assertIn("query: <code>opd</code>", html)
+
+                resp, body = self.post_json(
+                    "/api/topic",
+                    {"action": "update", "slug": "opd", "display_name": "策略蒸馏每日"},
+                    headers={"X-Topic-Admin-Token": "test-token"},
+                )
+                payload = json.loads(body.decode("utf-8"))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(payload["topic"]["display_name"], "策略蒸馏每日")
+
+                resp, body = self.request("/topic/opd")
+                html = body.decode("utf-8", errors="replace")
+                self.assertEqual(resp.status, 200)
+                self.assertIn("🧭 策略蒸馏每日", html)
+                self.assertIn('value="策略蒸馏每日"', html)
+            finally:
+                web_server.topic_store.TOPIC_DIR = old_topic_dir
+                web_server.topic_store.TOPICS_FILE = old_topics_file
+
     def test_global_paper_detail_route(self):
         resp, body = self.request(f"/detail/{SAMPLE_VIEW_ID}")
         html = body.decode("utf-8", errors="replace")

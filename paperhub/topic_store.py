@@ -57,6 +57,10 @@ def default_terms(query):
     return {"must": [q] if q else [], "should": [], "negative": []}
 
 
+def normalize_display_name(value):
+    return re.sub(r"\s+", " ", str(value or "").strip())[:80]
+
+
 def normalize_profile(profile):
     query = (profile.get("query") or profile.get("slug") or "").strip()
     slug = slugify(profile.get("slug") or query)
@@ -64,6 +68,7 @@ def normalize_profile(profile):
     normalized = {
         "slug": slug,
         "query": query or slug,
+        "display_name": normalize_display_name(profile.get("display_name", "")),
         "enabled": bool(profile.get("enabled", True)),
         "generated_terms": {
             "must": [str(x).strip() for x in terms.get("must", []) if str(x).strip()],
@@ -83,6 +88,8 @@ def upsert_topic(profile):
     data = load_topics()
     existing = data["topics"].get(normalized["slug"], {})
     merged = {**existing, **normalized}
+    if "display_name" not in profile and existing.get("display_name"):
+        merged["display_name"] = existing["display_name"]
     data["topics"][normalized["slug"]] = normalize_profile(merged)
     save_topics(data)
     ensure_topic_dir(normalized["slug"])

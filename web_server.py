@@ -1305,6 +1305,10 @@ def _topic_job(slug):
         return dict(_topic_jobs.get(topic_store.slugify(slug), {}))
 
 
+def _topic_display_name(profile):
+    return (profile.get("display_name") or profile.get("query") or profile.get("slug") or "").strip()
+
+
 def _topic_admin_js():
     return """
 function topicToken() {
@@ -1338,6 +1342,8 @@ def build_topic_overview():
     rows = []
     for profile in topics:
         slug = profile.get("slug", "")
+        title = _topic_display_name(profile)
+        raw_query = profile.get("query") or slug
         keys = topic_store.list_keys(slug)
         latest = keys[0] if keys else ""
         job = _topic_job(slug)
@@ -1345,8 +1351,8 @@ def build_topic_overview():
         status = job.get("status", "")
         msg = f" · {h_text(job.get('msg',''))}" if status else ""
         rows.append(f"""<div class="list-card">
-  <div class="list-title">🧭 {h_text(profile.get('query') or slug)}</div>
-  <div class="list-meta">slug: <code>{h_text(slug)}</code> · {enabled}{msg}</div>
+  <div class="list-title">🧭 {h_text(title)}</div>
+  <div class="list-meta">query: <code>{h_text(raw_query)}</code> · slug: <code>{h_text(slug)}</code> · {enabled}{msg}</div>
   <div style="margin-top:10px" class="btns">
     <a class="btn btn-detail" href="/topic/{h_attr(slug)}">查看</a>
     {f'<a class="btn btn-detail" href="/topic/{h_attr(slug)}/{h_attr(latest)}">最新 {h_text(latest)}</a>' if latest else ''}
@@ -1357,8 +1363,10 @@ def build_topic_overview():
     body = f"""<div style="max-width:980px;margin:0 auto;padding:20px 0">
   <h2 style="color:#e2e8f0;margin-bottom:16px">🧭 主题订阅</h2>
   <div style="background:#1e293b;border-radius:12px;padding:18px 20px;margin-bottom:20px">
-    <div style="display:grid;grid-template-columns:1fr 180px 120px;gap:10px;align-items:center">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:center">
       <input id="topic-query" placeholder="输入主题词，例如 opd"
+        style="padding:10px 14px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
+      <input id="topic-display-name" placeholder="备注名，可选，例如 OPD 策略蒸馏"
         style="padding:10px 14px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
       <input id="topic-token" placeholder="管理口令" type="password" oninput="saveTopicToken()"
         style="padding:10px 14px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
@@ -1374,10 +1382,11 @@ fillTopicToken();
 async function addTopic() {{
   saveTopicToken();
   const q = document.getElementById('topic-query').value.trim();
+  const displayName = document.getElementById('topic-display-name').value.trim();
   const msg = document.getElementById('topic-msg');
   if (!q) {{ msg.textContent='请输入主题词'; return; }}
   msg.textContent='正在创建主题并生成检索词…';
-  const d = await topicPost({{action:'create', query:q}});
+  const d = await topicPost({{action:'create', query:q, display_name:displayName}});
   if (d.ok) {{
     msg.textContent='已创建，后台开始刷新；页面稍后自动更新';
     setTimeout(()=>location.href=(window.BP||'') + '/topic/' + d.topic.slug, 1000);
@@ -1414,14 +1423,17 @@ def build_topic_detail(slug, key=None):
     must = "\n".join(terms.get("must", []))
     should = "\n".join(terms.get("should", []))
     negative = "\n".join(terms.get("negative", []))
+    title = _topic_display_name(profile)
+    raw_query = profile.get("query") or slug
+    display_name = profile.get("display_name", "")
     job = _topic_job(slug)
     job_msg = f"<span style='color:#94a3b8'> · {h_text(job.get('msg',''))}</span>" if job else ""
     enabled_checked = "checked" if profile.get("enabled", True) else ""
     body = f"""<div style="max-width:1100px;margin:0 auto;padding:20px 0">
   <div style="display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px">
     <div>
-      <h2 style="color:#e2e8f0;margin:0">🧭 {h_text(profile.get('query') or slug)}</h2>
-      <div style="color:#94a3b8;font-size:13px;margin-top:6px">slug: <code>{h_text(slug)}</code>{job_msg}</div>
+      <h2 style="color:#e2e8f0;margin:0">🧭 {h_text(title)}</h2>
+      <div style="color:#94a3b8;font-size:13px;margin-top:6px">query: <code>{h_text(raw_query)}</code> · slug: <code>{h_text(slug)}</code>{job_msg}</div>
     </div>
     <div class="btns">
       <a class="btn btn-detail" href="/topic">返回主题</a>
@@ -1430,7 +1442,9 @@ def build_topic_detail(slug, key=None):
     </div>
   </div>
   <div style="background:#1e293b;border-radius:12px;padding:16px 18px;margin-bottom:18px">
-    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <input id="topic-display-name" placeholder="备注名，可选" value="{h_attr(display_name)}"
+        style="width:240px;padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
       <input id="topic-token" placeholder="管理口令" type="password" oninput="saveTopicToken()"
         style="width:180px;padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0">
       <label style="color:#cbd5e1;font-size:13px"><input id="topic-enabled" type="checkbox" {enabled_checked}> 启用每日刷新</label>
@@ -1462,6 +1476,7 @@ async function saveTopic() {{
   const d = await topicPost({{
     action:'update',
     slug:{js_str(slug)},
+    display_name:document.getElementById('topic-display-name').value.trim(),
     enabled:document.getElementById('topic-enabled').checked,
     generated_terms:{{must:lines('topic-must'), should:lines('topic-should'), negative:lines('topic-negative')}}
   }});
@@ -1474,7 +1489,7 @@ async function refreshTopic(force) {{
   else alert(d.error || d.msg || '刷新失败');
 }}
 </script>"""
-    return page(profile.get("query") or slug, body, active_tab="topic")
+    return page(title, body, active_tab="topic")
 
 
 # ── 收藏页面 ──────────────────────────────────────────────────────────────────
@@ -1764,6 +1779,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         self.send_json({"error": "query required"}, 400); return
                     from topic_engine import ensure_topic
                     profile = ensure_topic(query, refresh_terms=True)
+                    if "display_name" in req:
+                        profile["display_name"] = req.get("display_name", "")
+                        profile = topic_store.upsert_topic(profile)
                     ok, msg = enqueue_topic_run(profile["slug"], force=False,
                                                 no_full=bool(req.get("no_full", False)))
                     self.send_json({"ok": ok, "msg": msg, "topic": profile})
@@ -1773,6 +1791,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     profile = topic_store.get_topic(slug)
                     if not profile:
                         self.send_json({"error": "topic not found"}, 404); return
+                    if "display_name" in req:
+                        profile["display_name"] = req.get("display_name", "")
                     if "enabled" in req:
                         profile["enabled"] = bool(req.get("enabled"))
                     if isinstance(req.get("generated_terms"), dict):

@@ -23,6 +23,14 @@ class TopicEngineTest(unittest.TestCase):
         self.assertEqual(topic_store.slugify("On Policy Distillation!"), "on-policy-distillation")
         self.assertEqual(topic_store.slugify("OPD_v2"), "opd_v2")
 
+    def test_topic_profile_keeps_optional_display_name(self):
+        profile = topic_store.normalize_profile({
+            "query": "opd",
+            "display_name": "  OPD   策略蒸馏  ",
+        })
+        self.assertEqual(profile["display_name"], "OPD 策略蒸馏")
+        self.assertEqual(profile["query"], "opd")
+
     def test_relevance_filters_negative_terms(self):
         good = {
             "title": "On-Policy Distillation for Large Language Models",

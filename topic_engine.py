@@ -544,6 +544,7 @@ def run_topic(slug_or_query, key=None, limit=3, do_full_translate=True, force=Fa
         papers,
         extra={
             "query": profile.get("query", slug),
+            "display_name": profile.get("display_name", ""),
             "generated_terms": profile.get("generated_terms", {}),
             "weights": profile.get("weights", topic_store.DEFAULT_WEIGHTS),
         },

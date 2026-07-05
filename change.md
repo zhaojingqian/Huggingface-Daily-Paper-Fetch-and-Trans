@@ -4,6 +4,13 @@
 
 ## v4.30 — 2026-07-04
 
+### 主题订阅备注名
+
+- topic profile 新增可选 `display_name` 字段，用作用户自定义备注名；为空时继续回退到原始 query。
+- `/topic` 创建表单和 `/topic/<slug>` 详情页支持填写/编辑备注名；列表和详情标题优先展示备注名，meta 里保留 query 与 slug，检索逻辑、slug、seen 去重和缓存目录不受影响。
+- 每日 topic index 会保存当时的 `display_name`，便于后续追溯展示名称。
+- 新增测试覆盖备注名规范化、API 保存和页面渲染。
+
 ### 主题订阅检索词生成优化
 
 - 优化 `topic_engine.py` 的 LLM prompt：明确用户输入一定按 AI/ML/CS 论文主题解释，限定 arXiv 类别方向，并要求 `should` 覆盖同义词、方法名、任务名、应用子方向、上下游相邻概念和 arXiv 标题常见写法。
