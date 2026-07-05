@@ -62,6 +62,18 @@ class PaperStoreTest(unittest.TestCase):
         self.assertTrue(os.path.exists(dst))
         self.assertTrue(paper_store.pdf_exists("2606.00004"))
 
+    def test_reconcile_existing_pdf_statuses_only_marks_existing_pdfs_ok(self):
+        paper_store.write_raw({"arxiv_id": "2606.00005", "pdf_status": "failed"})
+        paper_store.write_raw({"arxiv_id": "2606.00006", "pdf_status": "failed"})
+        with open(paper_store.pdf_path("2606.00005"), "wb") as f:
+            f.write(b"%PDF" + b"x" * (paper_store.MIN_VALID_PDF_BYTES + 1))
+
+        fixed = paper_store.reconcile_existing_pdf_statuses()
+
+        self.assertEqual(fixed, ["2606.00005"])
+        self.assertEqual(paper_store.read_raw("2606.00005")["pdf_status"], "ok")
+        self.assertEqual(paper_store.read_raw("2606.00006")["pdf_status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

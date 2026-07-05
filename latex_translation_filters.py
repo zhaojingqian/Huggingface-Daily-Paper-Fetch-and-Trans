@@ -201,6 +201,123 @@ def strip_llm_translation_artifacts(text: str) -> Tuple[str, int]:
     return new_text, total
 
 
+def _insert_latex_preamble_snippet(
+    text: str,
+    insertion: str,
+    command_markers: Iterable[str] = (),
+) -> Tuple[str, bool]:
+    snippet = insertion.strip()
+    if not snippet or snippet in text:
+        return text, False
+
+    positions = []
+    for marker in command_markers:
+        token = marker if marker.startswith("\\") else "\\" + marker
+        pos = text.find(token)
+        if pos >= 0:
+            positions.append(pos)
+
+    begin_doc = text.find(r"\begin{document}")
+    if positions:
+        pos = min(positions)
+        if begin_doc < 0 or pos < begin_doc:
+            line_start = text.rfind("\n", 0, pos) + 1
+            return text[:line_start] + insertion + "\n" + text[line_start:], True
+
+    if begin_doc >= 0:
+        return text[:begin_doc] + insertion + "\n" + text[begin_doc:], True
+    return text + "\n" + insertion + "\n", True
+
+
+def _latex_command_defined(text: str, name: str) -> bool:
+    pattern = re.compile(
+        r"\\(?:providecommand|newcommand|renewcommand)\*?\s*"
+        r"(?:\{\\" + re.escape(name) + r"\}|\\" + re.escape(name) + r"\b)"
+        r"|\\def\\" + re.escape(name) + r"\b"
+    )
+    return bool(pattern.search(text or ""))
+
+
+def _latex_package_loaded(text: str, name: str) -> bool:
+    pattern = re.compile(
+        r"\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\s*\{[^}]*\b"
+        + re.escape(name)
+        + r"\b[^}]*\}"
+    )
+    return bool(pattern.search(text or ""))
+
+
+def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
+    """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
+    source = text or ""
+
+    needs_inputencoding = (
+        (r"\inputencodingname" in source
+         or r"\newtcblisting" in source
+         or r"\DeclareTCBListing" in source
+         or "listing only" in source)
+        and not _latex_command_defined(source, "inputencodingname")
+    )
+    class_needs_early_fontspec = bool(
+        re.search(r"\\documentclass(?:\[[^\]]*\])?\{(?:cidr-2025|acmart)\}", source)
+    )
+    needs_fontspec_noops = (
+        (re.search(r"\\(?:setmainfont|setsansfont|setmonofont|newfontfamily)\b", source)
+         or class_needs_early_fontspec)
+        and not _latex_package_loaded(source, "fontspec")
+    )
+
+    total = 0
+    if needs_inputencoding:
+        insertion = "\n".join([
+            r"% paper-trans fallback for XeLaTeX compatibility commands",
+            r"\providecommand{\inputencodingname}{utf8}",
+        ])
+        markers = ["inputencodingname"] if r"\inputencodingname" in source else []
+        source, changed = _insert_latex_preamble_snippet(source, insertion, markers)
+        total += int(changed)
+
+    if needs_fontspec_noops:
+        lines = [r"% paper-trans fallback for XeLaTeX compatibility commands"]
+        if not _latex_command_defined(source, "setmainfont"):
+            lines.append(r"\providecommand{\setmainfont}[2][]{}")
+        if not _latex_command_defined(source, "setsansfont"):
+            lines.append(r"\providecommand{\setsansfont}[2][]{}")
+        if not _latex_command_defined(source, "setmonofont"):
+            lines.append(r"\providecommand{\setmonofont}[2][]{}")
+        if not _latex_command_defined(source, "newfontfamily"):
+            lines.append(r"\providecommand{\newfontfamily}[3][]{\providecommand#2{}}")
+        if len(lines) > 1:
+            insertion = "\n".join(lines)
+            markers = ["documentclass"] if class_needs_early_fontspec else [
+                "setmainfont", "setsansfont", "setmonofont", "newfontfamily"
+            ]
+            source, changed = _insert_latex_preamble_snippet(source, insertion, markers)
+            total += int(changed)
+
+    return source, total
+
+
+def reset_acm_baselinestretch_before_end_document(text: str) -> Tuple[str, int]:
+    """Reset acmart/CIDR baselinestretch guard before final class validation."""
+    source = text or ""
+    if "paper-trans reset ACM baselinestretch guard" in source:
+        return source, 0
+    if not re.search(r"\\documentclass(?:\[[^\]]*\])?\{(?:cidr-2025|acmart)\}", source):
+        return source, 0
+    end_marker = r"\end{document}"
+    pos = source.rfind(end_marker)
+    if pos < 0:
+        return source, 0
+    snippet = (
+        r"% paper-trans reset ACM baselinestretch guard" "\n"
+        r"\makeatletter" "\n"
+        r"\@ifundefined{ACM@origbaselinestretch}{}{\let\baselinestretch\ACM@origbaselinestretch}" "\n"
+        r"\makeatother"
+    )
+    return source[:pos] + snippet + "\n" + source[pos:], 1
+
+
 ZERO_ARG_COMMAND_DEF_RE = re.compile(
     r"\\(?:newcommand|renewcommand|providecommand)\*?\s*"
     r"(?:\{\\([A-Za-z@]+)\}|\\([A-Za-z@]+))"

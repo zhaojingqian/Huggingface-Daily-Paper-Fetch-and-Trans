@@ -74,3 +74,25 @@ def update_pdf_status(arxiv_id, status):
         return True
     except Exception:
         return False
+
+
+def reconcile_existing_pdf_statuses():
+    """Mark stale failed paper-store entries ok when their PDF already exists."""
+    os.makedirs(paths.PAPER_STORE_DIR, exist_ok=True)
+    fixed = []
+    for name in sorted(os.listdir(paths.PAPER_STORE_DIR)):
+        if not name.endswith(".json"):
+            continue
+        arxiv_id = name[:-5]
+        data = read_raw(arxiv_id)
+        if data.get("pdf_status") != "failed":
+            continue
+        if not pdf_exists(arxiv_id):
+            continue
+        data["pdf_status"] = "ok"
+        try:
+            write_raw(data)
+            fixed.append(arxiv_id)
+        except Exception:
+            continue
+    return fixed

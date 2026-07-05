@@ -1799,6 +1799,23 @@ def patch_declare_unicode_character_fallback(trans_tex_path):
     return 1
 
 
+def patch_xelatex_compatibility_fallbacks(trans_tex_path):
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    fixed, count = _ltf.add_xelatex_compatibility_fallbacks(text)
+    fixed, acm_count = _ltf.reset_acm_baselinestretch_before_end_document(fixed)
+    total = count + acm_count
+    if not total:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(fixed)
+    if count:
+        print("[driver] 🔧 patch_xelatex_compatibility_fallbacks: 补充 XeLaTeX 兼容命令 fallback", flush=True)
+    if acm_count:
+        print("[driver] 🔧 patch_xelatex_compatibility_fallbacks: 重置 ACM/CIDR baselinestretch guard", flush=True)
+    return total
+
+
 def patch_pdftex_primitives_for_xelatex(trans_tex_path):
     """Guard pdfTeX primitive lines in the translated main tex."""
     with open(trans_tex_path, encoding='utf-8') as f:
@@ -2557,6 +2574,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
     patch_declare_unicode_character_fallback(trans_tex)
+    patch_xelatex_compatibility_fallbacks(trans_tex)
     patch_local_pdftex_primitives(workfolder)
     patch_pdftex_primitives_for_xelatex(trans_tex)
     patch_textsc_for_xelatex(trans_tex)

@@ -176,6 +176,67 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(fixed, text)
 
+    def test_add_xelatex_compatibility_fallbacks_for_tcolorbox_listing(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage[most]{tcolorbox}" "\n"
+            r"\newtcblisting{promptbox}{listing only}" "\n"
+            r"\begin{document}" "\n"
+            r"\begin{promptbox}x\end{promptbox}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\inputencodingname}{utf8}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\inputencodingname}"), fixed.index(r"\begin{document}"))
+
+    def test_add_xelatex_compatibility_fallbacks_for_cidr_fontspec_commands(self):
+        text = (
+            r"\documentclass[sigplan]{cidr-2025}" "\n"
+            r"\begin{document}" "\n"
+            r"\setmonofont[StylisticSet=3]{inconsolata}" "\n"
+            r"正文" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\setmonofont}[2][]{}", fixed)
+        self.assertIn(r"\providecommand{\newfontfamily}[3][]{\providecommand#2{}}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\setmonofont}"), fixed.index(r"\documentclass"))
+        self.assertLess(fixed.index(r"\providecommand{\setmonofont}"), fixed.index(r"\setmonofont"))
+
+    def test_add_xelatex_compatibility_fallbacks_respects_fontspec_package(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage{fontspec}" "\n"
+            r"\begin{document}" "\n"
+            r"\setmonofont{Inconsolata}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(fixed, text)
+
+    def test_reset_acm_baselinestretch_before_end_document(self):
+        text = (
+            r"\documentclass{acmart}" "\n"
+            r"\begin{document}" "\n"
+            r"正文" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.reset_acm_baselinestretch_before_end_document(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn("paper-trans reset ACM baselinestretch guard", fixed)
+        self.assertLess(fixed.index("paper-trans reset ACM"), fixed.index(r"\end{document}"))
+
 
 if __name__ == "__main__":
     unittest.main()

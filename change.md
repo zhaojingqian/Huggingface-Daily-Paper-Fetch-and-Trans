@@ -4,6 +4,21 @@
 
 ## v4.30 — 2026-07-04
 
+### 主题 PDF 编译失败与状态同步修复
+
+- **`2606.26080`**：topic `long-trajectory-reward-multi-reward-dense-reward/2026-07-04` 的 PDF 失败在 `tcolorbox/newtcblisting`，XeLaTeX 环境缺少 `\inputencodingname`。fallback 编译阶段新增 `\providecommand{\inputencodingname}{utf8}` 兼容，只重跑中文 tex 编译后通过。
+- **`2606.29823`**：topic `loop-agent-long-horizen-task/2026-07-04` 的 PDF 失败在 `cidr-2025/acmart` 模板，class 加载阶段调用 `\setmonofont` 但未加载 `fontspec`。fallback 新增 fontspec 风格命令 no-op，并对 CIDR/ACM 类提前插入到 `\documentclass` 前；同时在 `\end{document}` 前重置 ACM/CIDR `\baselinestretch` guard，避免最终 class 校验报错。
+- `latex_translation_filters.py` 沉淀 XeLaTeX 兼容补丁：`inputenc`/listing 场景补 `\inputencodingname`，CIDR/ACM 或直接使用 `\setmainfont`、`\setsansfont`、`\setmonofont`、`\newfontfamily` 时补安全 no-op，且识别 `\usepackage[...]{fontspec}` / `\RequirePackage{fontspec}` 时不干预正常 fontspec 论文。
+- `run_papers.retry_pdf()` 新增 paper store 状态一致性同步：全局 JSON 里 `pdf_status=failed` 但 `data/papers/<id>_zh.pdf` 已真实存在时自动回写 `ok`，避免索引已恢复但 paper store 旧状态继续误报。
+- 本次复用中文 tex 缓存重编译成功：`2606.26080_zh.pdf`、`2606.29823_zh.pdf`、历史残留 `2605.10344_zh.pdf`；另将已有 PDF 的 `2603.21065`、`2604.24300`、`2604.25914`、`2606.02060` 全局状态同步为 `ok`。全量扫描 `data/` 后已无 `pdf_status=failed`，`logs/pdf_errors/` 和 `data/tex_backup_failed/` 均无残留。
+
+#### 验证
+
+- `python3 -m py_compile paperhub/paper_store.py run_papers.py latex_translation_filters.py full_translate_driver.py tests/test_paper_store.py tests/test_latex_translation_filters.py` 通过。
+- `python3 -m unittest tests.test_paper_store tests.test_latex_translation_filters` 通过。
+- `python3 run_repair.py --retry-pdf --mode topic --key long-trajectory-reward-multi-reward-dense-reward/2026-07-04` 和 `python3 run_repair.py --retry-pdf --mode topic --key loop-agent-long-horizen-task/2026-07-04` 均成功。
+- `python3 translate_full.py 2605.10344 -o data/papers --keep-translation` 复用中文 tex 缓存重编译成功。
+
 ### 主题订阅翻译失败修复
 
 - `run_repair.py` 支持 `--mode topic` 和 `--topic <slug>`，可按全部 topic、单个 topic、近 N 天或 `slug/YYYY-MM-DD` 指定 key 扫描修复。

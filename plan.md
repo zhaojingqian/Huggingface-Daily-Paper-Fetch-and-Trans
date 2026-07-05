@@ -158,6 +158,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 为 inline `\verb` 分隔符冲突沉淀 fallback fixture，修复 regex 内容包含原分隔符导致的 undefined control sequence。
 - [x] 扩展 FontAwesome legacy alias 与 `\DeclareUnicodeCharacter` fallback，并修复 preamble 参数内命令的 snippet 插入位置，恢复 2026-07-01 / 2026-07-03 daily 三篇失败 PDF。
 - [x] 全量补扫索引失败、缺失 PDF、残留失败日志和失败现场，恢复 `2606.11324`、补齐 `2605.10344`，并清理已恢复 PDF 的陈旧诊断。
+- [x] 修复 topic PDF 编译失败：为 listing/inputenc 补 `\inputencodingname`，为 CIDR/ACM/fontspec 风格模板补安全 no-op 和 `baselinestretch` guard reset，恢复 `2606.26080`、`2606.29823`。
+- [x] `retry-pdf` 增加 paper store 状态一致性同步，自动把已有中文 PDF 但 JSON 仍 failed 的历史残留回写为 `ok`。
 - [ ] 继续梳理 `full_translate_driver.py` 其他 fallback patch 的触发条件，沉淀为小型 fixtures。
 - [ ] 继续补充 PDF 失败诊断日志中的常见 LaTeX 错误分类。
 - [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。

@@ -435,6 +435,14 @@ def retry_pdf(mode=None, key=None):
     total_ok = 0
     total_fail = 0
 
+    from paperhub import paper_store
+    reconciled = paper_store.reconcile_existing_pdf_statuses()
+    if reconciled:
+        print(
+            f"[retry-pdf] 已同步已有 PDF 的 paper store 状态: {', '.join(reconciled)}",
+            flush=True,
+        )
+
     for m in modes:
         mode_path = mode_dir(m)
         if not os.path.isdir(mode_path):

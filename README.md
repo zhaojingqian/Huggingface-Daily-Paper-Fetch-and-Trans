@@ -83,7 +83,7 @@ python3 run_repair.py --retry-pdf --mode topic --topic opd --days 7
 python3 run_repair.py --retry-pdf --mode topic --key opd/2026-07-05
 ```
 
-`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。
+`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：当 `data/papers/<id>.json` 仍为 `pdf_status=failed` 但 `<id>_zh.pdf` 已真实存在时，自动回写为 `ok`，避免历史状态残留误报。
 
 topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套 PDF retry 逻辑，包括翻译 tex 缓存重编译、失败后 no-cache 全文重译和 paper store 状态回写。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 
@@ -95,7 +95,7 @@ splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 ma
 
 过滤策略可通过环境变量扩展：`PAPER_TRANS_EXTRA_HARD_ENVS` 增加需要硬保护的环境名，`PAPER_TRANS_EXTRA_SOFT_ENVS` 增加可拆出自然语言继续翻译的环境名，`PAPER_TRANS_EXTRA_RESTORE_ENVS` 增加 fallback 中可从原文恢复的环境名，`PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS` 按行增加需要清理的模型残留正则。
 
-fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO`、`\faEnvelope`、`\faGem` 等旧命令），禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc 场景常见的 `\DeclareUnicodeCharacter` no-op 兼容，从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
+fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO`、`\faEnvelope`、`\faGem` 等旧命令），禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc/listing 场景常见的 `\DeclareUnicodeCharacter` no-op 和 `\inputencodingname` 兼容，为缺少 `fontspec` 的 CIDR/ACM 或 fontspec 风格模板补 `\setmainfont`、`\setsansfont`、`\setmonofont`、`\newfontfamily` no-op，并在 CIDR/ACM 文档结束前重置 `\baselinestretch` guard。从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
 
 宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间没有换行输出时，外层 timeout 仍会按时收口，并会尽力清理同篇 `full_translate_driver.py` 进程，避免 retry 阶段被悬挂的旧编译卡住。
 
