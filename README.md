@@ -332,6 +332,8 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 
 `run_repair.py --post` 会先修复已有索引中的摘要，再补抓缺失或空 `index.json` 的周期。为避免提前抓取未到榜单生成时间的数据，当前周期只会在首次 cron 触发时间前被跳过：daily 为当天 23:00 前，weekly 为周日 02:00 前，monthly 为 28 日 02:00 前。触发时间之后如果遇到 Hugging Face 临时网络失败，后续 `--post` 会重新补抓该周期。
 
+topic 订阅不走 `--refetch` 补索引，必须由 root crontab 中的 `run_topic.py --all` 生成每日结果；如果 `/topic` 没有当天结果，优先检查 `crontab -l` 是否包含 `run_topic.py --all` 和 `--retry-pdf --mode topic` 两行，再看 `logs/cron-topic.log` 与 `logs/repair.log`。
+
 ### full-TeX slim LaTeX 容器
 
 当前生产翻译容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。它继续继承原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，避免逐个补 TeX 包；同时删除 torch、nvidia、transformers、nougat、缓存、文档和源码等中文翻译不需要的大体积内容。

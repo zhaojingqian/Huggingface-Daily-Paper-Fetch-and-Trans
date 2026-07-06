@@ -182,6 +182,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [ ] 将常用 health check 命令整理成脚本。
 - [ ] 为 cron 运行结果增加轻量摘要日志。
 - [x] 修复 `run_repair.py --post` 对当前周期的跳过边界，确保首次 cron 触发后可补抓临时网络失败的 daily/weekly/monthly。
+- [x] 补齐生产 root crontab 的 topic 调度：每天 01:30 `run_topic.py --all`，06:30 `run_repair.py --retry-pdf --mode topic --days 7`，并补跑 `2026-07-06` 主题结果。
 - [ ] 对磁盘低水位、Docker 容器异常、PDF retry 长期失败增加告警入口。
 
 ### Phase E — Docker 镜像瘦身验证

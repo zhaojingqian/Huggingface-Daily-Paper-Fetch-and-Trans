@@ -2,6 +2,22 @@
 
 ---
 
+## v4.31 — 2026-07-06
+
+### 主题订阅每日调度修复
+
+- **根因**：生产 root crontab 只有 daily/weekly/monthly 抓取和 repair 任务，缺少 `run_topic.py --all`，导致 `/topic` 的最新主题结果停留在 `2026-07-04`；`2026-07-06 22:27 CST` 时 daily 未出现是正常现象，因为 daily 主任务固定 `23:00` 才触发。
+- **修复**：已在 root crontab 增加 topic 生成和 PDF 重试：
+  - `30 1 * * * $PYTHON $PTDIR/run_topic.py --all >> $PTDIR/logs/cron-topic.log 2>&1`
+  - `30 6 * * * $PYTHON $PTDIR/run_repair.py --retry-pdf --mode topic --days 7 >> $RLOG 2>&1`
+- **补跑**：手动执行 `python3 run_topic.py --all` 生成 `2026-07-06` 三个启用主题：
+  - `loop-agent-long-horizen-task`：`2607.00483`、`2607.00160`、`2606.31639`
+  - `long-trajectory-reward-multi-reward-dense-reward`：`2606.30316`、`2607.00442`、`2606.29905`
+  - `opd`：`2606.30406`、`2606.30616`、`2607.01763`
+- **验证**：`data/topic/*/2026-07-06/index.json` 均已生成，9 篇均为 `pdf_status=ok`；`topic_ok_missing=0`；本地 `/topic` 返回 `200`，列表已展示“最新 2026-07-06”。
+
+---
+
 ## v4.30 — 2026-07-04
 
 ### 主题 PDF 编译失败与状态同步修复
