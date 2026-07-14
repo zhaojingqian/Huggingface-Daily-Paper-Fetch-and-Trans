@@ -101,6 +101,8 @@ fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontaweso
 
 `logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。如果编译超大图片/重资源论文时发生 `xdvipdfmx` 进程异常退出或超时（可能由 OOM 强杀导致），需确认独立容器已启用 `--memory-swappiness=60` 以允许向 Swap 换页。
 
+`scripts/weekly_cleanup.sh` 的孤立 PDF 判断会递归扫描 daily、weekly、monthly、manual 和 topic 的全部 `index.json`。topic 使用 `data/topic/<slug>/<date>/index.json` 两层目录，维护清理脚本时不能退回只扫描一层 key，也不能遗漏 topic，否则会误删仍被订阅页引用的 paper store PDF。
+
 ### Web 服务
 
 ```bash

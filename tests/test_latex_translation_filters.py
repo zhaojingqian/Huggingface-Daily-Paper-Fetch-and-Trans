@@ -118,6 +118,17 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertIn(r"\Ours 通过", fixed)
 
+    def test_separate_custom_macro_robust_command_cjk_glue(self):
+        text = (
+            r"\DeclareRobustCommand{\ourmethod}{LaMem-VLA\xspace}" "\n"
+            r"\ourmethod通过四个模块。"
+        )
+
+        fixed, count = filters.separate_custom_macro_cjk_glue(text)
+
+        self.assertEqual(count, 3)
+        self.assertIn(r"\ourmethod 通过", fixed)
+
     def test_collapse_spaced_cjk_characters(self):
         text = r"\item 我 们提出了\Ours{}，一种统一框架。"
 
@@ -130,6 +141,7 @@ class LatexTranslationFiltersTest(unittest.TestCase):
     def test_guard_pdftex_primitive_lines(self):
         text = (
             r"\pdfoutput=1" "\n"
+            r"\pdfgentounicode =1" "\n"
             r"  \pdfmapline{+font < font.ttf < enc.enc}" "\n"
             r"\ifdefined\pdfinfo\pdfinfo{/Title(Test)}\fi" "\n"
             r"\section{正文}"
@@ -137,10 +149,48 @@ class LatexTranslationFiltersTest(unittest.TestCase):
 
         fixed, count = filters.guard_pdftex_primitive_lines(text)
 
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 3)
         self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
+        self.assertIn(r"\ifdefined\pdfgentounicode\pdfgentounicode =1\fi", fixed)
         self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
         self.assertEqual(fixed.count(r"\ifdefined\pdfinfo"), 1)
+
+    def test_replace_bare_citation_commands_glued_to_cjk(self):
+        text = r"测试定义如\cite中所述；正常引用见\cite{smith2026}。"
+
+        fixed, count = filters.replace_bare_citation_commands(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn("如文献中所述", fixed)
+        self.assertIn(r"\cite{smith2026}", fixed)
+
+    def test_separate_declaration_command_cjk_glue(self):
+        text = r"这是{\em去中心化}策略，且 \textit{正常命令} 不变。"
+
+        fixed, count = filters.separate_declaration_command_cjk_glue(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"{\em 去中心化}", fixed)
+        self.assertIn(r"\textit{正常命令}", fixed)
+
+    def test_remove_spurious_cjk_command_escapes(self):
+        text = r"我们使用\(\widehat{T}\)\作为接受信号，保留\alpha。"
+
+        fixed, count = filters.remove_spurious_cjk_command_escapes(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\(\widehat{T}\)作为接受信号", fixed)
+        self.assertIn(r"\alpha", fixed)
+
+    def test_relocate_packages_from_documentclass_options(self):
+        text = "\\documentclass[\n\\usepackage{ctex}\n  11pt,\n]{article}\n正文"
+
+        fixed, count = filters.relocate_packages_from_documentclass_options(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn("11pt,", fixed)
+        self.assertGreater(fixed.index(r"\usepackage{ctex}"), fixed.index(r"]{article}"))
+        self.assertNotIn("\\documentclass[\n\\usepackage", fixed)
 
     def test_demote_structural_commands_in_captions(self):
         text = (
@@ -222,6 +272,50 @@ class LatexTranslationFiltersTest(unittest.TestCase):
 
         self.assertEqual(count, 0)
         self.assertEqual(fixed, text)
+
+    def test_add_xelatex_compatibility_fallbacks_for_missing_xspace(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\newcommand{\model}{Audex\xspace}" "\n"
+            r"\begin{document}" "\n"
+            r"\model 文本" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\xspace}{}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\xspace}"), fixed.index(r"\newcommand{\model}"))
+
+    def test_add_xelatex_compatibility_fallbacks_for_abscontent(self):
+        text = (
+            r"\documentclass{nvidiatechreport}" "\n"
+            r"\begin{document}" "\n"
+            r"\maketitle" "\n"
+            r"\abscontent" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\abscontent}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\abscontent}"), fixed.index(r"\begin{document}"))
+
+    def test_add_xelatex_compatibility_fallbacks_for_missing_href(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\begin{document}" "\n"
+            r"\href{https://example.com}{Example}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\href}[2]{#2}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\href}"), fixed.index(r"\begin{document}"))
 
     def test_reset_acm_baselinestretch_before_end_document(self):
         text = (

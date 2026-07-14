@@ -74,12 +74,12 @@ import os, json
 DATA_DIR = "/root/workspace/paper-trans/data"
 PAPERS_DIR = os.path.join(DATA_DIR, "papers")
 used_ids = set()
-for mode in ("daily", "weekly", "monthly", "manual"):
+for mode in ("daily", "weekly", "monthly", "manual", "topic"):
     mode_dir = os.path.join(DATA_DIR, mode)
     if not os.path.isdir(mode_dir): continue
-    for key in os.listdir(mode_dir):
-        idx = os.path.join(mode_dir, key, "index.json")
-        if not os.path.exists(idx): continue
+    for root, _, files in os.walk(mode_dir):
+        if "index.json" not in files: continue
+        idx = os.path.join(root, "index.json")
         try:
             with open(idx) as f:
                 d = json.load(f)

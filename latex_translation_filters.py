@@ -266,6 +266,20 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
          or class_needs_early_fontspec)
         and not _latex_package_loaded(source, "fontspec")
     )
+    needs_xspace_noop = (
+        r"\xspace" in source
+        and not _latex_command_defined(source, "xspace")
+        and not _latex_package_loaded(source, "xspace")
+    )
+    needs_abscontent_fallback = (
+        r"\abscontent" in source
+        and not _latex_command_defined(source, "abscontent")
+    )
+    needs_href_fallback = (
+        r"\href" in source
+        and not _latex_command_defined(source, "href")
+        and not _latex_package_loaded(source, "hyperref")
+    )
 
     total = 0
     if needs_inputencoding:
@@ -295,6 +309,31 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             source, changed = _insert_latex_preamble_snippet(source, insertion, markers)
             total += int(changed)
 
+    if needs_xspace_noop:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing xspace package",
+            r"\providecommand{\xspace}{}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["xspace"])
+        total += int(changed)
+
+    if needs_abscontent_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for templates with external abstract renderer",
+            r"\providecommand{\theabstract}{}",
+            r"\providecommand{\abscontent}{\par\noindent{\bfseries Abstract}\par\theabstract\par}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["abscontent"])
+        total += int(changed)
+
+    if needs_href_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing hyperref package",
+            r"\providecommand{\href}[2]{#2}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["href"])
+        total += int(changed)
+
     return source, total
 
 
@@ -319,7 +358,7 @@ def reset_acm_baselinestretch_before_end_document(text: str) -> Tuple[str, int]:
 
 
 ZERO_ARG_COMMAND_DEF_RE = re.compile(
-    r"\\(?:newcommand|renewcommand|providecommand)\*?\s*"
+    r"\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand)\*?\s*"
     r"(?:\{\\([A-Za-z@]+)\}|\\([A-Za-z@]+))"
     r"(?:\[(\d+)\])?"
 )
@@ -413,8 +452,55 @@ def collapse_spaced_cjk_characters(text: str) -> Tuple[str, int]:
     return CJK_INTER_CHAR_SPACE_RE.subn(r"\1", text or "")
 
 
+def replace_bare_citation_commands(text: str) -> Tuple[str, int]:
+    r"""Replace citations whose argument was deleted by translation.
+
+    A fragment such as ``如\cite中所述`` is parsed as the undefined command
+    ``\cite中`` by XeLaTeX.  The citation key is already gone, so the safest
+    deterministic fallback is readable prose instead of inventing a key.
+    Proper ``\cite{key}`` and optional-argument forms are left untouched.
+    """
+    pattern = re.compile(r"\\cite(?=" + CJK_COMMAND_FOLLOW_RE + r")")
+    return pattern.subn("文献", text or "")
+
+
+def separate_declaration_command_cjk_glue(text: str) -> Tuple[str, int]:
+    r"""Terminate legacy font declarations before translated CJK prose."""
+    commands = ("em", "bf", "it", "rm", "sf", "tt")
+    pattern = re.compile(r"\\(" + "|".join(commands) + r")(?=" + CJK_COMMAND_FOLLOW_RE + r")")
+    return pattern.subn(lambda m: "\\" + m.group(1) + " ", text or "")
+
+
+def remove_spurious_cjk_command_escapes(text: str) -> Tuple[str, int]:
+    r"""Remove stray command escapes before CJK text or punctuation."""
+    pattern = re.compile(r"\\(?=" + CJK_COMMAND_FOLLOW_RE + r")")
+    return pattern.subn("", text or "")
+
+
+def relocate_packages_from_documentclass_options(text: str) -> Tuple[str, int]:
+    r"""Move ``\usepackage`` lines accidentally inserted inside class options."""
+    pattern = re.compile(
+        r"(?P<head>\\documentclass\[)(?P<options>.*?)(?P<tail>\]\{[^{}]+\})",
+        re.DOTALL,
+    )
+    total = 0
+
+    def replace(match) -> str:
+        nonlocal total
+        options = match.group("options")
+        packages = re.findall(r"(?m)^\s*(\\usepackage(?:\[[^\]]*\])?\{[^{}]+\})\s*$", options)
+        if not packages:
+            return match.group(0)
+        cleaned = re.sub(r"(?m)^\s*\\usepackage(?:\[[^\]]*\])?\{[^{}]+\}\s*\n?", "", options)
+        total += len(packages)
+        return match.group("head") + cleaned + match.group("tail") + "\n" + "\n".join(packages)
+
+    return pattern.sub(replace, text or "", count=1), total
+
+
 PDFTEX_PRIMITIVE_NAMES = (
     "pdfoutput",
+    "pdfgentounicode",
     "pdfminorversion",
     "pdfcompresslevel",
     "pdfobjcompresslevel",

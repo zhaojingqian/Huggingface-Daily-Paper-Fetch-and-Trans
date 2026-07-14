@@ -2,6 +2,25 @@
 
 ---
 
+## v4.32 — 2026-07-14
+
+### 近两周论文巡检与 topic PDF 防误删修复
+
+- **巡检范围**：检查 `2026-06-29` 至 `2026-07-12` 的 daily、weekly、monthly、topic 索引，核对中文标题/摘要、paper store JSON、PDF 实体、索引状态和失败日志；中文标题与摘要未发现缺失。
+- **根因**：`scripts/weekly_cleanup.sh` 的孤立 PDF 扫描只统计 daily/weekly/monthly/manual，既漏掉 topic，也只检查一层 key 目录。`2026-07-12 04:00` 因而把 63 个 topic-only PDF 误判为孤立文件并删除。
+- **修复**：孤立 PDF 扫描改为递归遍历全部 mode，并把 topic 纳入引用集合，兼容 `data/topic/<slug>/<date>/index.json` 两层目录。
+- **驱动收口**：一次性容器驱动输出最终 `RESULT` 后直接退出，避免 gpt-academic 遗留非守护线程让宿主机误判为持续运行。
+- **新增 LaTeX fallback**：
+  - 缺失参数并与中文粘连的 `\\cite中` 降级为可读的“文献中”；
+  - `\\em去中心化` 等旧式字体声明与中文自动分隔；
+  - 误插入 `\\documentclass[...]` 选项块的 `\\usepackage` 自动移到 class 声明之后；
+  - 禁用 microtype 时同步禁用残留的 `\\UseMicrotypeSet` / `\\microtypesetup` 调用。
+- **已验证恢复**：`2606.31399`、`2606.30966`、`2607.07663` 的新增失败类型均已通过翻译覆盖率和 LaTeX 健康门禁；批量恢复过程中成功生成的 PDF 会继续复用 paper store 和 tex 备份。
+- **后续编译兜底**：补充 `pdfgentounicode` 等 pdfTeX 原语兼容、XeLaTeX 缺失 `xspace`/摘要/链接命令 fallback、声明宏与中文粘连、裸 `cite`、中文误转义及 `documentclass` 选项包迁移修复；缺失图片资源会使用可编译占位图，避免单个 logo 资源阻断整篇 PDF。
+- **回归验证**：`tests.test_latex_translation_filters` 共 24 项通过；`full_translate_driver.py`、`latex_translation_filters.py` 通过 `py_compile`，清理脚本通过 `bash -n`，`git diff --check` 无空白错误。
+
+---
+
 ## v4.31 — 2026-07-06
 
 ### 主题订阅每日调度修复

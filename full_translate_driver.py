@@ -210,7 +210,7 @@ if _latex_toolbox_spec:
             else:
                 # 检查是否为系统级 TeX 文件（通过 kpsewhich 查找）
                 try:
-                    probe = f if f.endswith('.tex') else f + '.tex'
+                    probe = f if _os.path.splitext(f)[1] else f + '.tex'
                     r = _sp.run(['kpsewhich', probe],
                                 capture_output=True, text=True, timeout=5)
                     if r.returncode == 0 and r.stdout.strip():
@@ -1560,6 +1560,97 @@ def patch_common_command_cjk_glue(trans_tex_path):
     return total
 
 
+def patch_bare_citation_commands(trans_tex_path):
+    """Turn argument-less citations glued to CJK prose into readable text."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.replace_bare_citation_commands(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_bare_citation_commands: 修复 {total} 处缺失参数的 cite", flush=True)
+    return total
+
+
+def patch_declaration_command_cjk_glue(trans_tex_path):
+    """Separate legacy font declaration commands from CJK text."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.separate_declaration_command_cjk_glue(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_declaration_command_cjk_glue: 修复 {total} 处字体命令/CJK 粘连", flush=True)
+    return total
+
+
+def patch_spurious_cjk_command_escapes(trans_tex_path):
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.remove_spurious_cjk_command_escapes(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_spurious_cjk_command_escapes: 移除 {total} 处中文前误加反斜杠", flush=True)
+    return total
+
+
+def patch_missing_graphics(trans_tex_path):
+    """Replace genuinely missing image inclusions with a compilable marker."""
+    import re as _re
+    workfolder = os.path.dirname(trans_tex_path)
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    pattern = _re.compile(r"\\includegraphics\*?(?P<opts>\s*\[[^\]]*\])?\s*\{(?P<path>[^{}]+)\}")
+    total = 0
+
+    def replace(match):
+        nonlocal total
+        rel = match.group('path').strip()
+        candidates = [os.path.join(workfolder, rel)]
+        if not os.path.splitext(rel)[1]:
+            candidates.extend(os.path.join(workfolder, rel + ext) for ext in ('.pdf', '.png', '.jpg', '.jpeg', '.eps'))
+        if any(os.path.exists(path) for path in candidates):
+            return match.group(0)
+        total += 1
+        return r"\fbox{\texttt{missing image}}"
+
+    new_text = pattern.sub(replace, text)
+    # Class/style files sometimes hide logo paths behind macros, so there is no
+    # includegraphics command in the merged TeX to replace.
+    asset_re = _re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.(?:png|jpe?g|pdf|eps))")
+    fallback = '/gpt/docs/logo.png'
+    for support in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
+        with open(support, encoding='utf-8', errors='replace') as f:
+            support_text = f.read()
+        for rel in asset_re.findall(support_text):
+            if rel.startswith('/') or '//' in rel:
+                continue
+            target = os.path.join(workfolder, rel)
+            if os.path.exists(target) or not os.path.exists(fallback):
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(fallback, target)
+            total += 1
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_missing_graphics: 替换 {total} 个缺失图片引用", flush=True)
+    return total
+
+
+def patch_packages_in_documentclass_options(trans_tex_path):
+    """Move package imports out of a multiline documentclass option list."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.relocate_packages_from_documentclass_options(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_packages_in_documentclass_options: 移出 {total} 个 package", flush=True)
+    return total
+
+
 def patch_duplicate_end_environments(trans_tex_path):
     """Remove accidental duplicated environment endings produced by translation."""
     import re as _re
@@ -2234,6 +2325,10 @@ def patch_microtype_for_xelatex(trans_tex_path):
     text, removed = package_re.subn(r'\1% paper-trans: microtype disabled for XeLaTeX', text)
     total += removed
 
+    command_re = _re.compile(r'(?m)^(\s*)\\(?:UseMicrotypeSet|microtypesetup)\b.*$')
+    text, removed = command_re.subn(r'\1% paper-trans: microtype command disabled for XeLaTeX', text)
+    total += removed
+
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(text)
@@ -2246,7 +2341,10 @@ def patch_local_microtype_loads(workfolder):
     import re as _re
 
     total = 0
-    pattern = _re.compile(r'\\(?:AtEndOfClass\{)?\\RequirePackage(?:\[[^\]]*\])?\{microtype\}\}?')
+    patterns = (
+        _re.compile(r'\\RequirePackage(?:\[[^\]]*\])?\{microtype\}'),
+        _re.compile(r'\\AtEndOfClass\{\s*\\RequirePackage(?:\[[^\]]*\])?\{microtype\}\s*\}'),
+    )
     for path in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
         try:
             with open(path, encoding='utf-8', errors='replace') as f:
@@ -2255,7 +2353,11 @@ def patch_local_microtype_loads(workfolder):
             continue
         if 'microtype' not in text:
             continue
-        new_text, count = pattern.subn('% paper-trans: local microtype load disabled for XeLaTeX', text)
+        new_text = text
+        count = 0
+        for pattern in patterns:
+            new_text, n = pattern.subn('% paper-trans: local microtype load disabled for XeLaTeX', new_text)
+            count += n
         if count:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(new_text)
@@ -2570,6 +2672,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
 
     print(f"[driver] 🔧 检测到编译失败但翻译已完成，尝试 verbatim 修补+重编译...", flush=True)
     patch_body_endinput(trans_tex)
+    patch_packages_in_documentclass_options(trans_tex)
     fix_label_ref_emdash(trans_tex)
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
@@ -2599,6 +2702,10 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_unclosed_textbf_reference_heads(trans_tex)
     patch_inline_math_delimiter_artifacts(trans_tex)
     patch_common_command_cjk_glue(trans_tex)
+    patch_bare_citation_commands(trans_tex)
+    patch_declaration_command_cjk_glue(trans_tex)
+    patch_spurious_cjk_command_escapes(trans_tex)
+    patch_missing_graphics(trans_tex)
     patch_duplicate_end_environments(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
     patch_dangling_href_commands(trans_tex, orig_tex)
@@ -3052,8 +3159,12 @@ else:
 # ── 输出结果 ────────────────────────────────────────────────────────────────
 if result_pdf:
     print(f"RESULT:SUCCESS:{result_pdf}", flush=True)
+    # gpt-academic may leave non-daemon worker threads alive after all output
+    # has been produced.  This file is a one-shot subprocess, so waiting for
+    # those idle workers only makes the host wrapper appear hung.
+    os._exit(0)
 else:
     workfolder_ = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder')
     diagnose_failure(workfolder_, arxiv_id)
     print(f"RESULT:ERROR:所有 {max_retries+1} 次尝试均未生成 PDF", flush=True)
-    sys.exit(1)
+    os._exit(1)
