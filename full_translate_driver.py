@@ -6,6 +6,7 @@
 """
 import sys, os, glob, time, shutil, tarfile
 import latex_translation_filters as _ltf
+from failure_taxonomy import classify_failure
 
 sys.path.insert(0, '/gpt')
 os.chdir('/gpt')
@@ -87,6 +88,12 @@ import signal as _signal
 
 def _patched_compile_with_timeout(command, cwd, timeout=90):
     """修复版：shell=True + 进程组 kill，确保 pdflatex 子进程也被杀掉。"""
+    # gpt-academic 传入的缓存目录通常是相对 /gpt 的路径。插件内部会切换
+    # 当前目录，多轮编译时若继续把相对路径交给 Popen，会把同一路径重复
+    # 拼接并触发 FileNotFoundError。这里统一锚定到稳定的容器项目根目录。
+    if not _os.path.isabs(cwd):
+        cwd = _os.path.join("/gpt", cwd)
+    cwd = _os.path.abspath(cwd)
     process = _subprocess.Popen(
         command, shell=True,
         stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
@@ -198,7 +205,7 @@ if _latex_toolbox_spec:
         import re as _re, subprocess as _sp
         main_file = _lt.rm_comments(main_file)
         for s in reversed([q for q in _re.finditer(r"\\input\{(.*?)\}", main_file, _re.M)]):
-            f = s.group(1)
+            f = _ltf.normalize_tex_include_target(s.group(1))
             fp = _os.path.join(project_folder, f)
             fp_ = _lt.find_tex_file_ignore_case(fp)
             if fp_:
@@ -869,10 +876,7 @@ def latex_compile_health_ok(workfolder: str, arxiv_id_: str, strict: bool = Fals
     # for these, but the engine recovers and the PDF is still complete.  Treat these
     # occurrences as non-fatal warnings rather than hard failures.
     _PDFTEX_PRIM_RE = _re.compile(
-        r"\\(?:pdfoutput|pdfminorversion|pdfcompresslevel|pdfobjcompresslevel|"
-        r"pdfpagewidth|pdfpageheight|pdfhorigin|pdfvorigin|pdfmapline|pdfinfo|"
-        r"pdfcatalog|pdfobj|pdfximage|pdfrefximage|pdfannot|pdfsavepos|"
-        r"pdfliteral|pdfpageattr)\b"
+        r"\\(?:" + "|".join(_re.escape(name) for name in _ltf.PDFTEX_PRIMITIVE_NAMES) + r")\b"
     )
 
     def _has_fatal_undefined_control(text: str) -> bool:
@@ -975,10 +979,7 @@ def latex_compile_health_only_stale_refs(workfolder: str) -> bool:
     # pdfTeX-only primitives cause recoverable "Undefined control sequence" under
     # XeLaTeX; these should not block the stale-refs re-run path.
     _PDFTEX_PRIM_RE = _re.compile(
-        r"\\(?:pdfoutput|pdfminorversion|pdfcompresslevel|pdfobjcompresslevel|"
-        r"pdfpagewidth|pdfpageheight|pdfhorigin|pdfvorigin|pdfmapline|pdfinfo|"
-        r"pdfcatalog|pdfobj|pdfximage|pdfrefximage|pdfannot|pdfsavepos|"
-        r"pdfliteral|pdfpageattr)\b"
+        r"\\(?:" + "|".join(_re.escape(name) for name in _ltf.PDFTEX_PRIMITIVE_NAMES) + r")\b"
     )
     for m in _re.finditer(r"Undefined control sequence", log):
         context = log[m.start(): m.start() + 300]
@@ -1243,6 +1244,22 @@ def patch_tcolorbox_small_groups(trans_tex_path):
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
         print(f"[driver] 🔧 patch_tcolorbox_small_groups: 修复了 {total} 个 trajcase 字号分组", flush=True)
+    return total
+
+
+def patch_tcolorbox_opening_options(trans_tex_path, orig_tex_path):
+    """Restore tcolorbox option keys/units that must never be translated."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        translated = f.read()
+    with open(orig_tex_path, encoding='utf-8') as f:
+        original = f.read()
+    fixed, total = _ltf.restore_environment_opening_options(
+        translated, original, 'tcolorbox'
+    )
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(fixed)
+        print(f"[driver] 🔧 patch_tcolorbox_opening_options: 恢复 {total} 组原始选项", flush=True)
     return total
 
 
@@ -1597,8 +1614,9 @@ def patch_spurious_cjk_command_escapes(trans_tex_path):
 
 def patch_missing_graphics(trans_tex_path):
     """Replace genuinely missing image inclusions with a compilable marker."""
+    import base64 as _base64
     import re as _re
-    workfolder = os.path.dirname(trans_tex_path)
+    workfolder = os.path.realpath(os.path.dirname(trans_tex_path))
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
     pattern = _re.compile(r"\\includegraphics\*?(?P<opts>\s*\[[^\]]*\])?\s*\{(?P<path>[^{}]+)\}")
@@ -1618,24 +1636,39 @@ def patch_missing_graphics(trans_tex_path):
     new_text = pattern.sub(replace, text)
     # Class/style files sometimes hide logo paths behind macros, so there is no
     # includegraphics command in the merged TeX to replace.
-    asset_re = _re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.(?:png|jpe?g|pdf|eps))")
-    fallback = '/gpt/docs/logo.png'
+    asset_re = _re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.png)")
+    transparent_png = _base64.b64decode(
+        b'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+    )
     for support in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
         with open(support, encoding='utf-8', errors='replace') as f:
             support_text = f.read()
         for rel in asset_re.findall(support_text):
             if rel.startswith('/') or '//' in rel:
                 continue
-            target = os.path.join(workfolder, rel)
-            if os.path.exists(target) or not os.path.exists(fallback):
+            target = os.path.realpath(os.path.join(workfolder, rel))
+            if not target.startswith(workfolder + os.sep) or os.path.exists(target):
                 continue
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copyfile(fallback, target)
+            with open(target, 'wb') as f:
+                f.write(transparent_png)
             total += 1
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
         print(f"[driver] 🔧 patch_missing_graphics: 替换 {total} 个缺失图片引用", flush=True)
+    return total
+
+
+def patch_fragile_cleveref_references(trans_tex_path):
+    """Demote fragile cleveref calls to core references after a failed compile."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.demote_cleveref_commands(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_fragile_cleveref_references: 降级 {total} 处 cleveref 引用", flush=True)
     return total
 
 
@@ -1818,6 +1851,7 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
     )
 
     aliases = {
+        'faFile': ('file', 'F'),
         'faGlobe': ('globe', 'G'),
         'faGithub': ('github', 'GH'),
         'faSearch': ('search', 'S'),
@@ -1840,7 +1874,12 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
         if provide_pos >= 0 and (use_pos < 0 or provide_pos < use_pos):
             continue
         needed.append((name, icon, fallback))
-    if not needed:
+    known_names = {name for name, _icon, _fallback in needed}
+    generic_needed = [
+        name for name in _ltf.fontawesome_command_names(combined)
+        if name not in known_names
+    ]
+    if not needed and not generic_needed:
         return 0
 
     lines = [r'% paper-trans fallback for fontawesome5 legacy aliases']
@@ -1849,16 +1888,21 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
             '\\providecommand{\\' + name + '}{\\ifcsname faIcon\\endcsname\\faIcon{'
             + icon + '}\\else\\textcircled{' + fallback + '}\\fi}'
         )
+    for name in generic_needed:
+        lines.append('\\providecommand{\\' + name + '}{\\textbullet}')
     insertion = '\n'.join(lines)
-    markers = tuple(name for name, _icon, _fallback in needed)
+    markers = tuple(name for name, _icon, _fallback in needed) + tuple(generic_needed)
     new_text, ok = _insert_latex_preamble_snippet(text, insertion, markers)
     if not ok:
         return 0
     with open(trans_tex_path, 'w', encoding='utf-8') as f:
         f.write(new_text)
-    names = ','.join('\\' + name for name, _icon, _fallback in needed)
+    names = ','.join(
+        ['\\' + name for name, _icon, _fallback in needed]
+        + ['\\' + name for name in generic_needed]
+    )
     print(f"[driver] 🔧 patch_fontawesome_legacy_aliases: 补充 {names} fallback", flush=True)
-    return len(needed)
+    return len(needed) + len(generic_needed)
 
 
 def patch_declare_unicode_character_fallback(trans_tex_path):
@@ -2338,13 +2382,7 @@ def patch_microtype_for_xelatex(trans_tex_path):
 
 def patch_local_microtype_loads(workfolder):
     """Disable local class/style microtype loads that force pdfTeX-only options."""
-    import re as _re
-
     total = 0
-    patterns = (
-        _re.compile(r'\\RequirePackage(?:\[[^\]]*\])?\{microtype\}'),
-        _re.compile(r'\\AtEndOfClass\{\s*\\RequirePackage(?:\[[^\]]*\])?\{microtype\}\s*\}'),
-    )
     for path in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
         try:
             with open(path, encoding='utf-8', errors='replace') as f:
@@ -2353,11 +2391,7 @@ def patch_local_microtype_loads(workfolder):
             continue
         if 'microtype' not in text:
             continue
-        new_text = text
-        count = 0
-        for pattern in patterns:
-            new_text, n = pattern.subn('% paper-trans: local microtype load disabled for XeLaTeX', new_text)
-            count += n
+        new_text, count = _ltf.disable_microtype_package_loads(text)
         if count:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(new_text)
@@ -2674,6 +2708,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_body_endinput(trans_tex)
     patch_packages_in_documentclass_options(trans_tex)
     fix_label_ref_emdash(trans_tex)
+    patch_tcolorbox_opening_options(trans_tex, orig_tex)
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
     patch_declare_unicode_character_fallback(trans_tex)
@@ -2706,6 +2741,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_declaration_command_cjk_glue(trans_tex)
     patch_spurious_cjk_command_escapes(trans_tex)
     patch_missing_graphics(trans_tex)
+    patch_fragile_cleveref_references(trans_tex)
     patch_duplicate_end_environments(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
     patch_dangling_href_commands(trans_tex, orig_tex)
@@ -2719,6 +2755,11 @@ def patch_and_recompile(workfolder, arxiv_id_):
             synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
         if synthesized_bbl:
             patch_bibliography_to_generated_bbl(workfolder, trans_tex)
+
+    # Some late bibliography/source-reconciliation patches rewrite TeX fragments.
+    # Run the idempotent escape cleanup once more immediately before compilation
+    # so a restored ``\中文`` artifact cannot survive into the final pass.
+    patch_spurious_cjk_command_escapes(trans_tex)
 
     def _latex_cmds(engine, has_bbl):
         if engine == 'xelatex':
@@ -2861,6 +2902,12 @@ def diagnose_failure(workfolder, arxiv_id_):
         for i, ln in enumerate(all_log_lines):
             is_err = (
                 (ln.startswith('!') and 'TeX capacity exceeded' not in ln)
+                or 'Undefined control sequence' in ln
+                or 'LaTeX Error:' in ln
+                or 'Package Error:' in ln
+                or 'Missing number' in ln
+                or 'Illegal unit of measure' in ln
+                or 'TeX capacity exceeded' in ln
                 or '! LaTeX Error' in ln
                 or '! Package' in ln
                 or '! Missing' in ln
@@ -2880,76 +2927,14 @@ def diagnose_failure(workfolder, arxiv_id_):
         tail_lines = all_log_lines[-60:] if len(all_log_lines) > 60 else all_log_lines
         tex_log_tail = ''.join(tail_lines).strip()
 
-    # ── 3. 错误类型判断 ───────────────────────────────────────────────────
-    all_text = '\n'.join(errors_raw)
-    category   = 'unknown'
-    suggestion = '查看下方详细错误信息'
-
-    if phase == 'translate':
-        # translate 阶段：从插件报错里提取具体原因
-        if '找不到' in plugin_error_full and 'Tex源文件缺失' in plugin_error_full:
-            m = _re.search(r'找不到([^\n，]+)[，,]', plugin_error_full)
-            missing = m.group(1).strip() if m else '未知文件'
-            category   = f'missing_input_file:{_os.path.basename(missing)}'
-            suggestion = (f'\\input 引用的文件不在项目目录中: {missing}\n'
-                          f'如果是系统级 TeX 文件（如 glyphtounicode），已由驱动 patch 自动跳过。\n'
-                          f'如果是项目自定义文件，需手动将其加入 arxiv 源码包后重试。')
-        elif 'RuntimeError' in plugin_error_full:
-            m = _re.search(r'RuntimeError:\s*(.+)', plugin_error_full)
-            msg = m.group(1).strip()[:120] if m else plugin_error_full[:120]
-            category   = f'runtime_error'
-            suggestion = f'插件内部 RuntimeError: {msg}'
-        elif 'Traceback' in plugin_error_full or 'Error:' in plugin_error_full:
-            category   = 'plugin_exception'
-            suggestion = '插件抛出异常，见下方完整 Traceback'
-        elif not plugin_error_full:
-            suggestion = '无插件报错消息，可能是网络/API 超时，或驱动脚本被意外终止'
-    else:
-        # compile 阶段：从 LaTeX log 判断
-        if 'input stack size' in all_text or ('normalsize' in all_text and '->' in all_text):
-            category   = 'normalsize_recursion'
-            suggestion = ('preamble 中 \\normalsize 自引用递归。\n'
-                          '修复: 在 merge_translate_zh.tex 中把\n'
-                          '  \\expandafter\\def\\expandafter\\normalsize\\expandafter{\\normalsize ...}\n'
-                          '替换为:\n'
-                          '  \\let\\normalsizesaved\\normalsize\n'
-                          '  \\def\\normalsize{\\normalsizesaved ...}')
-        elif 'pgfkeys Error' in all_text or ('tcblisting' in all_text and 'Missing $' in all_text):
-            category   = 'tcblisting_translated'
-            suggestion = ('tcblisting/lstlisting 内代码被 GPT 翻译，导致特殊字符破坏编译。\n'
-                          '修复: 运行 patch_and_recompile 或手动从 merge.tex 还原 verbatim 块')
-        elif 'File' in all_text and 'not found' in all_text:
-            m = _re.search(r"File '([^']+)' not found", all_text)
-            pkg = m.group(1) if m else '未知'
-            category   = f'missing_package:{pkg}'
-            suggestion = (f'缺少 LaTeX 包: {pkg}。\n'
-                          f'修复: 在容器内 tlmgr install 或在 texmf 目录创建 stub .sty')
-        elif ('twocolumn' in all_text and 'ended by' in all_text) or \
-             'begin{document} ended by' in all_text:
-            category   = 'missing_bracket'
-            suggestion = ('\\twocolumn[ 缺少闭合 ]，GPT 翻译时被删除。\n'
-                          '修复: 在 merge_translate_zh.tex 中 \\printAffiliationsAndNotice 前补回 ]\n'
-                          '参考 merge.tex 对应位置')
-        elif 'Emergency stop' in all_text or 'Missing }' in all_text:
-            category   = 'group_mismatch'
-            suggestion = '大括号/环境不匹配导致 Emergency stop，通常是 GPT 翻译破坏了嵌套结构'
-        elif 'Undefined control sequence' in all_text:
-            m = _re.search(r'\\([A-Za-z@]+)',
-                           all_text.split('Undefined control sequence')[1][:80])
-            cmd = ('\\' + m.group(1)) if m else '未知'
-            category   = f'undefined_command:{cmd}'
-            suggestion = f'未定义命令 {cmd}，可能是自定义宏未翻译/丢失'
-        elif errors_raw:
-            # 有错误行但未匹配具体类型
-            first_line = errors_raw[0].splitlines()[0][:80]
-            category   = f'latex_error:{first_line}'
-            suggestion = '见下方 LaTeX 错误详情'
+    # ── 3. 稳定分类 + 可执行重试策略 ──────────────────────────────────────
+    diagnostic_text = '\n'.join(errors_raw + [tex_log_tail])
+    classified = classify_failure(phase, diagnostic_text, plugin_error_full)
 
     diag = {
         'arxiv_id':          arxiv_id_,
         'phase':             phase,
-        'category':          category,
-        'suggestion':        suggestion,
+        **classified,
         'top_errors':        errors_raw[:8],
         'tex_log_tail':      tex_log_tail,
         'plugin_error_full': plugin_error_full,

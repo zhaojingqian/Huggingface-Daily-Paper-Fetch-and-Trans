@@ -154,7 +154,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 ### Phase C — 翻译链路稳定性
 
 - [ ] 为 `run_papers.py` 的 slim index 写入和 pdf_status 同步增加纯函数测试。
-- [ ] 为 `translate_arxiv.py` 的 JSON 修复逻辑增加样例测试。
+- [x] 为 paper store 不完整翻译缓存、原子 JSON 写入和全项目数据审计增加样例测试。
 - [x] 为 inline `\verb` 分隔符冲突沉淀 fallback fixture，修复 regex 内容包含原分隔符导致的 undefined control sequence。
 - [x] 扩展 FontAwesome legacy alias 与 `\DeclareUnicodeCharacter` fallback，并修复 preamble 参数内命令的 snippet 插入位置，恢复 2026-07-01 / 2026-07-03 daily 三篇失败 PDF。
 - [x] 全量补扫索引失败、缺失 PDF、残留失败日志和失败现场，恢复 `2606.11324`、补齐 `2605.10344`，并清理已恢复 PDF 的陈旧诊断。
@@ -162,7 +162,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] `retry-pdf` 增加 paper store 状态一致性同步，自动把已有中文 PDF 但 JSON 仍 failed 的历史残留回写为 `ok`。
 - [x] `retry-pdf` 增加 ok-but-missing 降级重试：索引标 `pdf_status=ok` 但 paper store PDF 缺失时自动进入缓存重编译/全文重译，补回 `2606.29296`、`2606.29445` 等缺失 PDF。
 - [ ] 继续梳理 `full_translate_driver.py` 其他 fallback patch 的触发条件，沉淀为小型 fixtures。
-- [ ] 继续补充 PDF 失败诊断日志中的常见 LaTeX 错误分类。
+- [x] 建立稳定的翻译/编译失败 taxonomy、JSON sidecar、聚合报告和 retry strategy，后续按 category 直接定位。
 - [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。
 - [x] 为 gpt-academic LaTeX splitter 增加普通正文扩展翻译补丁，避免 preserve 节点吞掉正文。
 - [x] 增加 `merge_translate_zh.tex` 翻译覆盖率门禁，拒绝大段英文漏译 PDF。
@@ -179,8 +179,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 ### Phase D — 运维体验
 
-- [ ] 将常用 health check 命令整理成脚本。
-- [ ] 为 cron 运行结果增加轻量摘要日志。
+- [x] 将索引/store/PDF 全量审计和失败分类摘要整理成独立脚本。
+- [x] 为失败队列增加 category / retry strategy / repair action 轻量摘要日志。
 - [x] 修复 `run_repair.py --post` 对当前周期的跳过边界，确保首次 cron 触发后可补抓临时网络失败的 daily/weekly/monthly。
 - [x] 补齐生产 root crontab 的 topic 调度：每天 01:30 `run_topic.py --all`，06:30 `run_repair.py --retry-pdf --mode topic --days 7`，并补跑 `2026-07-06` 主题结果。
 - [x] 修复 weekly cleanup 的 topic 引用漏扫：孤立 PDF 统计递归覆盖 topic 两层索引，避免 topic-only PDF 被误删。

@@ -17,6 +17,7 @@ import shutil
 import json
 from pathlib import Path
 
+from paperhub.json_io import write_json_atomic
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DEFAULT_GPT_ACADEMIC_CONTAINER,
@@ -30,6 +31,7 @@ DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
 DRIVER_SUPPORT_FILES = [
     DRIVER_SCRIPT,
     os.path.join(BASE_DIR, "latex_translation_filters.py"),
+    os.path.join(BASE_DIR, "failure_taxonomy.py"),
 ]
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
@@ -324,9 +326,23 @@ def _write_error_log(arxiv_id: str, stdout: str):
     err_dir   = os.path.join(base_dir, "logs", "pdf_errors")
     os.makedirs(err_dir, exist_ok=True)
     log_path  = os.path.join(err_dir, f"{arxiv_id}.log")
+    diag_path = os.path.join(err_dir, f"{arxiv_id}.json")
 
     from datetime import datetime
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    structured = diag or {
+        "arxiv_id": arxiv_id,
+        "phase": "unknown",
+        "category": "unknown.unstructured",
+        "family": "unknown",
+        "retry_strategy": "manual_review",
+        "repair_action": "inspect_driver_output",
+        "retryable": False,
+        "suggestion": "驱动未输出结构化诊断；检查原始日志。",
+        "evidence": "",
+    }
+    structured["recorded_at"] = ts
+    write_json_atomic(diag_path, structured)
 
     SEP  = "=" * 60
     SEP2 = "-" * 60
@@ -345,8 +361,15 @@ def _write_error_log(arxiv_id: str, stdout: str):
 
             f.write(f"【失败阶段】  {phase}  —  {phase_cn}\n")
             f.write(f"【错误类型】  {category}\n")
+            f.write(f"【错误家族】  {diag.get('family', '?')}\n")
+            f.write(f"【重试策略】  {diag.get('retry_strategy', '?')}\n")
+            f.write(f"【修复动作】  {diag.get('repair_action', '?')}\n")
             f.write(f"【原始 tex】  {'存在' if diag.get('has_orig_tex') else '不存在（源码未解压成功）'}\n")
             f.write(f"【翻译 tex】  {'存在' if diag.get('has_trans_tex') else '不存在（GPT 翻译未完成）'}\n\n")
+
+            evidence = diag.get('evidence', '').strip()
+            if evidence:
+                f.write(f"【关键证据】\n  {evidence}\n\n")
 
             f.write(f"【修复建议】\n")
             for line in diag.get('suggestion', '').splitlines():
@@ -431,16 +454,20 @@ def _write_error_log(arxiv_id: str, stdout: str):
 def _clear_error_log(arxiv_id: str):
     """Remove stale failure diagnosis after the same paper succeeds."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(base_dir, "logs", "pdf_errors", f"{arxiv_id}.log")
-    if not os.path.exists(log_path):
-        return False
-    try:
-        os.remove(log_path)
-        print(f"🧹 已清理旧错误诊断: {log_path}", flush=True)
-        return True
-    except OSError as e:
-        print(f"⚠️  旧错误诊断清理失败: {log_path} ({e})", flush=True)
-        return False
+    err_dir = os.path.join(base_dir, "logs", "pdf_errors")
+    removed = False
+    for suffix in (".log", ".json"):
+        path = os.path.join(err_dir, f"{arxiv_id}{suffix}")
+        if not os.path.exists(path):
+            continue
+        try:
+            os.remove(path)
+            removed = True
+        except OSError as e:
+            print(f"⚠️  旧错误诊断清理失败: {path} ({e})", flush=True)
+    if removed:
+        print(f"🧹 已清理旧错误诊断: {arxiv_id}", flush=True)
+    return removed
 
 
 def _clear_failed_tex_backup(arxiv_id: str):

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Persistent storage helpers for topic subscriptions."""
 
-import json
 import os
 import re
 from datetime import datetime
 
 from paperhub.paths import TOPIC_DIR
+from paperhub.json_io import read_json, write_json_atomic
 
 
 TOPICS_FILE = os.path.join(TOPIC_DIR, "topics.json")
@@ -27,17 +27,11 @@ def ensure_topic_dir(slug=None):
 
 
 def _read_json(path, default):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+    return read_json(path, default)
 
 
 def _write_json(path, payload):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, payload)
 
 
 def load_topics():

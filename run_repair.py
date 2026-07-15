@@ -25,15 +25,15 @@ crontab 示例（当前配置）：
   每天 06:30   --retry-pdf --mode topic   --days 7
 """
 import sys, os, argparse
-from datetime import datetime, timedelta
+from datetime import datetime
 
+from paperhub.modes import CONTENT_MODES, FETCH_MODES, mode_spec
 from paperhub.paths import ROOT_DIR as BASE_DIR, LOGS_DIR, mode_dir, mode_index_path
 
 sys.path.insert(0, BASE_DIR)
 
 LOG_FILE = os.path.join(LOGS_DIR, "repair.log")
-CONTENT_MODES = ["daily", "weekly", "monthly", "topic"]
-REFETCH_MODES = ["daily", "weekly", "monthly"]
+REFETCH_MODES = FETCH_MODES
 
 
 def _log(msg):
@@ -47,23 +47,11 @@ def _log(msg):
 
 def _recent_keys(mode, days):
     """返回最近 N 天/周/月对应的 key 列表"""
-    today = datetime.now().date()
-    keys = set()
-    for d in range(days):
-        dt = today - timedelta(days=d)
-        if mode == "daily":
-            keys.add(dt.strftime("%Y-%m-%d"))
-        elif mode == "weekly":
-            y, w, _ = dt.isocalendar()
-            keys.add(f"{y}-W{w:02d}")
-        elif mode == "monthly":
-            keys.add(dt.strftime("%Y-%m"))
-    return sorted(keys)
+    return list(mode_spec(mode).recent_keys(days))
 
 
 def _week_key(dt):
-    y, w, _ = dt.isocalendar()
-    return f"{y}-W{w:02d}"
+    return mode_spec("weekly").key_for(dt.date() if isinstance(dt, datetime) else dt)
 
 
 def _pending_refetch_key(mode, now=None):
@@ -73,24 +61,15 @@ def _pending_refetch_key(mode, now=None):
     Once the scheduled trigger time has passed, the key must be eligible for
     refetch so a transient network failure can be repaired the same day.
     """
-    now = now or datetime.now()
+    return mode_spec(mode).pending_refetch_key(now)
 
-    if mode == "daily":
-        return now.strftime("%Y-%m-%d") if now.hour < 23 else None
 
-    if mode == "weekly":
-        # weekly cron runs Sunday 02:00 for the current ISO week.
-        if now.weekday() != 6 or now.hour < 2:
-            return _week_key(now)
-        return None
-
-    if mode == "monthly":
-        # monthly cron runs on the 28th at 02:00 for the current month.
-        if now.day < 28 or (now.day == 28 and now.hour < 2):
-            return now.strftime("%Y-%m")
-        return None
-
-    return None
+def _existing_recent_keys(mode, days):
+    """Return recent scheduled keys that already have a mode directory."""
+    path = mode_dir(mode)
+    if not os.path.isdir(path):
+        return []
+    return sorted(set(_recent_keys(mode, days)) & set(os.listdir(path)))
 
 
 def _index_has_papers(index_path):
@@ -115,8 +94,7 @@ def refetch_missing(mode="daily", days=3):
     """
     from run_papers import run
 
-    LIMITS = {"daily": 3, "weekly": 10, "monthly": 10}
-    limit = LIMITS.get(mode, 10)
+    limit = mode_spec(mode).limit
 
     now = datetime.now()
     skip_key = _pending_refetch_key(mode, now)
@@ -172,9 +150,7 @@ def retry_pdf_keys(mode, days, scan_all, key):
         _log(f"[retry-pdf:{mode}] 目录不存在，跳过")
         return 0
 
-    recent = _recent_keys(mode, days)
-    existing = set(os.listdir(mode_path))
-    targets = sorted(set(recent) & existing)
+    targets = _existing_recent_keys(mode, days)
     if not targets:
         _log(f"[retry-pdf:{mode}] 近 {days} 天无数据，跳过")
         return 0
@@ -279,10 +255,7 @@ def main():
             elif args.scan_all:
                 total_repair += repair(mode=m, key=None)
             else:
-                mode_path = mode_dir(m)
-                if not os.path.isdir(mode_path):
-                    continue
-                targets = sorted(set(_recent_keys(m, args.days)) & set(os.listdir(mode_path)))
+                targets = _existing_recent_keys(m, args.days)
                 if not targets:
                     _log(f"[post:repair:{m}] 近 {args.days} 天无数据，跳过")
                     continue
@@ -347,12 +320,7 @@ def main():
             total += n
         else:
             # 仅扫描最近 N 天范围的 key
-            mode_path = mode_dir(m)
-            if not os.path.isdir(mode_path):
-                continue
-            recent = _recent_keys(m, args.days)
-            existing = set(os.listdir(mode_path))
-            targets = sorted(set(recent) & existing)
+            targets = _existing_recent_keys(m, args.days)
             if not targets:
                 _log(f"[{m}] 近 {args.days} 天无数据，跳过")
                 continue

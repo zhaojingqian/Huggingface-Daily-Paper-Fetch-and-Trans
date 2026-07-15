@@ -102,7 +102,11 @@ def paper_store_write_raw(payload):
 
 def paper_store_write(arxiv_id, meta, translation):
     """将元数据 + 翻译结果合并写入 paper store"""
-    payload = {
+    # Preserve orthogonal state such as pdf_status when repairing an incomplete
+    # summary translation.
+    existing = paper_store.read_raw(arxiv_id)
+    payload = dict(existing) if isinstance(existing, dict) else {}
+    payload.update({
         "arxiv_id":   arxiv_id,
         "stored_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "title":      meta.get("title", ""),
@@ -115,7 +119,7 @@ def paper_store_write(arxiv_id, meta, translation):
         "abstract_zh":translation.get("abstract_zh", ""),
         "keywords_zh":translation.get("keywords_zh", []),
         "summary_zh": translation.get("summary_zh", ""),
-    }
+    })
     paper_store_write_raw(payload)
 
 
@@ -603,7 +607,7 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None,
 
     # ── 1. 命中 paper store（跨 mode/key 复用，无需重复翻译）─────────────────
     cached = paper_store_read(arxiv_id)
-    if cached:
+    if cached and paper_store.translation_complete(cached):
         print(f"  ⚡ paper store 命中: {cached['title_zh'][:50]}...", flush=True)
         meta = {
             "arxiv_id": arxiv_id,
@@ -621,6 +625,8 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None,
             "summary_zh": cached.get("summary_zh", ""),
         }
     else:
+        if cached:
+            print("  🔁 paper store 翻译不完整，重新获取元数据并翻译...", flush=True)
         # ── 2. 无缓存：抓取元数据 + LLM 翻译 ──────────────────────────────────
         if prefetched_meta and (prefetched_meta.get("title") or
                                 prefetched_meta.get("abstract") or

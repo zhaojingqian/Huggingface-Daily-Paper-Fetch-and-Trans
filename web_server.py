@@ -11,6 +11,7 @@ import requests
 
 from paperhub import paper_store, topic_store
 from paperhub.env_config import admin_token
+from paperhub.json_io import write_json_atomic
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DATA_DIR,
@@ -137,8 +138,7 @@ def _load_jobs():
 
 
 def _save_jobs(jobs):
-    with open(SUBMIT_JOBS_FILE, "w", encoding="utf-8") as f:
-        json.dump(jobs, f, ensure_ascii=False, indent=2)
+    write_json_atomic(SUBMIT_JOBS_FILE, jobs)
 
 
 def _update_job(arxiv_id, **kw):
@@ -242,8 +242,7 @@ def _upsert_manual_index(mode, key, paper_entry):
     idx["papers"] = papers
     idx["total"]  = len(papers)
     idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(idx_file, "w", encoding="utf-8") as f:
-        json.dump(idx, f, ensure_ascii=False, indent=2)
+    write_json_atomic(idx_file, idx)
 
 
 def _do_submit_job(arxiv_id):
@@ -344,9 +343,7 @@ def load_bookmarks():
 
 
 def save_bookmarks(data):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(BOOKMARKS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_atomic(BOOKMARKS_FILE, data)
 
 
 # ── Paper Store 读取（唯一元数据源）────────────────────────────────────────
@@ -1117,8 +1114,7 @@ def _delete_paper(mode, key, arxiv_id):
             idx["papers"] = [p for p in idx.get("papers", [])
                              if p.get("arxiv_id") != arxiv_id]
             idx["total"] = len(idx["papers"])
-            with open(idx_file, "w", encoding="utf-8") as f:
-                json.dump(idx, f, ensure_ascii=False, indent=2)
+            write_json_atomic(idx_file, idx)
         except Exception:
             pass
 

@@ -2,6 +2,21 @@
 
 ---
 
+## v4.33 — 2026-07-15
+
+### 全项目巡检、失败分类与架构收拢
+
+- **全项目审计**：扫描 227 个 `index.json`、827 条索引记录、485 篇唯一论文和 492 份 paper store JSON；最终坏 JSON、索引总数不一致、缺 store、缺翻译、`ok` 缺 PDF、`failed` 状态、失败日志和失败现场 tex 全部为 0。
+- **论文恢复**：修复并通过翻译覆盖率与 LaTeX 健康门禁的 PDF 共 11 篇：`2607.07675`、`2607.09657`、`2607.09024`、`2607.04033`、`2607.02980`、`2606.16190`、`2607.09153`、`2606.27180`、`2607.09375`、`2606.22528`、`2606.30445`；另把已有 PDF 的 `2606.29526` 历史失败状态同步为 `ok`。
+- **摘要恢复**：修正“不完整缓存只看中文标题”的误判，重新获取元数据并补齐 `2602.12670`、`2602.10809` 的原文元数据、中文摘要和中文总结；重译时保留独立的 `pdf_status`。
+- **结构化失败诊断**：新增 `failure_taxonomy.py`，失败 sidecar 固定输出 `phase/category/family/retry_strategy/repair_action/evidence`；新增 `scripts/summarize_failures.py`，可按失败类别、策略和动作聚合，成功后同步清理 `.log`、`.json` 和失败 tex。
+- **智能 retry**：编译类失败和未分类驱动异常默认保留中文 tex，不再自动清缓存重复调用 GPT；只有 `retry_translation` 明确要求时才重译。修复容器编译工作目录相对路径重复解析导致的 `FileNotFoundError`，并单独归类为 `runtime.workdir_missing`。
+- **通用 LaTeX 修复**：覆盖 microtype class hook 失衡及残留 `\DisableLigatures`、`\input{... }` 尾空格、晚期 `\中文`、FontAwesome 任意零参数图标 fallback、cleveref 元数据损坏降级、tcolorbox 键名/长度单位被翻译、缺失图片和 pdfTeX 原语等失败形态。
+- **架构优化**：新增 `paperhub.modes` / `paperhub.runner` 收敛 daily、weekly、monthly 入口与周期语义；新增 `paperhub.json_io` 统一同目录临时文件、fsync、`os.replace` 的原子 JSON 写入；新增 `paperhub.audit` / `paperhub.failure_reports` 作为日常维护入口。
+- **验证命令**：`python3 scripts/audit_project.py --json` 与 `python3 scripts/summarize_failures.py` 最终均为 0 问题；完整回归 88 项测试通过，Python 语法检查、Shell 语法检查和 `git diff --check` 通过。
+
+---
+
 ## v4.32 — 2026-07-14
 
 ### 近两周论文巡检与 topic PDF 防误删修复

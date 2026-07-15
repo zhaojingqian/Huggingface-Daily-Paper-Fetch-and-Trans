@@ -43,6 +43,13 @@ class SharedPathsTest(unittest.TestCase):
             os.path.join(paths.DATA_DIR, "monthly", "2026-06", "index.json"),
         )
 
+    def test_container_driver_support_modules_are_deployed_together(self):
+        names = {os.path.basename(path) for path in translate_full.DRIVER_SUPPORT_FILES}
+        self.assertEqual(
+            names,
+            {"full_translate_driver.py", "latex_translation_filters.py", "failure_taxonomy.py"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

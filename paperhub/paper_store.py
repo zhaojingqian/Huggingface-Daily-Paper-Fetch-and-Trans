@@ -7,12 +7,12 @@ The paper store has two read modes:
   entries that already contain a Chinese title.
 """
 
-import json
 import os
 import re
 import shutil
 
 from paperhub import paths
+from paperhub.json_io import read_json, write_json_atomic
 
 
 MIN_VALID_PDF_BYTES = 10240
@@ -33,11 +33,7 @@ def pdf_path(arxiv_id):
 
 
 def read_raw(arxiv_id):
-    try:
-        with open(json_path(arxiv_id), encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return read_json(json_path(arxiv_id), {})
 
 
 def read_translated(arxiv_id):
@@ -45,9 +41,17 @@ def read_translated(arxiv_id):
     return data if has_chinese(data.get("title_zh", "")) else None
 
 
+def translation_complete(data):
+    """Return whether a cached entry has both a Chinese title and summary."""
+    return bool(
+        isinstance(data, dict)
+        and has_chinese(data.get("title_zh", ""))
+        and has_chinese(data.get("summary_zh", ""))
+    )
+
+
 def write_raw(payload):
-    with open(json_path(payload["arxiv_id"]), "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_atomic(json_path(payload["arxiv_id"]), payload)
 
 
 def pdf_exists(arxiv_id, min_bytes=MIN_VALID_PDF_BYTES):

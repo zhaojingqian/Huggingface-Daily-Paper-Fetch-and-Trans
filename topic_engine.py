@@ -14,6 +14,7 @@ import requests
 
 from paperhub import paper_store, topic_store
 from paperhub.env_config import get_env
+from paperhub.json_io import write_json_atomic
 from paperhub.paths import PAPER_STORE_DIR
 
 
@@ -604,8 +605,7 @@ def _write_topic_index(slug, key, idx):
     path = topic_store.index_path(slug, key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(idx, f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, idx)
 
 
 def repair_topic(topic=None, key=None, days=None, scan_all=False):

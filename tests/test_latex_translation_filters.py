@@ -142,6 +142,7 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         text = (
             r"\pdfoutput=1" "\n"
             r"\pdfgentounicode =1" "\n"
+            r"\pdfinfoomitdate=1" "\n"
             r"  \pdfmapline{+font < font.ttf < enc.enc}" "\n"
             r"\ifdefined\pdfinfo\pdfinfo{/Title(Test)}\fi" "\n"
             r"\section{正文}"
@@ -149,11 +150,12 @@ class LatexTranslationFiltersTest(unittest.TestCase):
 
         fixed, count = filters.guard_pdftex_primitive_lines(text)
 
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 4)
         self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfgentounicode\pdfgentounicode =1\fi", fixed)
+        self.assertIn(r"\ifdefined\pdfinfoomitdate\pdfinfoomitdate=1\fi", fixed)
         self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
-        self.assertEqual(fixed.count(r"\ifdefined\pdfinfo"), 1)
+        self.assertEqual(fixed.count(r"\ifdefined\pdfinfo\pdfinfo"), 1)
 
     def test_replace_bare_citation_commands_glued_to_cjk(self):
         text = r"测试定义如\cite中所述；正常引用见\cite{smith2026}。"
@@ -181,6 +183,76 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertIn(r"\(\widehat{T}\)作为接受信号", fixed)
         self.assertIn(r"\alpha", fixed)
+
+    def test_captionexample_is_hard_protected(self):
+        self.assertTrue(filters.is_hard_protected_env("captionexample"))
+
+    def test_demote_cleveref_commands(self):
+        text = r"见 \cref{fig:a} 与 \Cref[名字]{sec:b}，保留 \ref{tab:c}。"
+
+        fixed, count = filters.demote_cleveref_commands(text)
+
+        self.assertEqual(count, 2)
+        self.assertIn(r"\ref{fig:a}", fixed)
+        self.assertIn(r"\ref{sec:b}", fixed)
+        self.assertIn(r"\ref{tab:c}", fixed)
+
+    def test_disable_microtype_loads_keeps_class_hooks_balanced(self):
+        text = "\\AtEndOfClass{\\RequirePackage{microtype}}\n\\RequirePackage[tracking]{microtype}\n正文"
+
+        fixed, count = filters.disable_microtype_package_loads(text)
+
+        self.assertEqual(count, 2)
+        self.assertNotIn(r"\AtEndOfClass{", fixed)
+        self.assertIn("\n正文", fixed)
+
+    def test_disable_microtype_loads_repairs_historical_broken_marker(self):
+        broken = r"\AtEndOfClass{% paper-trans: local microtype load disabled for XeLaTeX}" + "\n正文"
+
+        fixed, count = filters.disable_microtype_package_loads(broken)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(fixed, "% paper-trans: local microtype load disabled for XeLaTeX\n正文")
+
+    def test_disable_microtype_loads_neutralizes_dependent_commands_inside_hooks(self):
+        text = (
+            r"\AtBeginDocument{\DisableLigatures[f]{family=sf*}}" "\n"
+            r"\microtypesetup{protrusion=true}"
+        )
+
+        fixed, count = filters.disable_microtype_package_loads(text)
+
+        self.assertEqual(count, 2)
+        self.assertEqual(fixed, "\\AtBeginDocument{\\relax}\n\\relax")
+
+    def test_normalize_tex_include_target_strips_harmless_whitespace(self):
+        self.assertEqual(filters.normalize_tex_include_target(" 6_conclusion \n"), "6_conclusion")
+
+    def test_fontawesome_command_names_excludes_argument_based_fa_icon(self):
+        text = r"\faRobot \faCheckCircle \faIcon{github} \faRobot"
+
+        self.assertEqual(
+            filters.fontawesome_command_names(text),
+            ("faCheckCircle", "faRobot"),
+        )
+
+    def test_restore_tcolorbox_opening_options_from_original(self):
+        original = (
+            "\\begin{tcolorbox}[boxsep=1.5mm, attach boxed title to top left={xshift=4mm}]\n"
+            "Body\n\\end{tcolorbox}"
+        )
+        translated = (
+            "\\begin{tcolorbox}[boxsep=1.5毫米, 将带框标题附加到左上角={xshift=4mm}]\n"
+            "正文\n\\end{tcolorbox}"
+        )
+
+        fixed, count = filters.restore_environment_opening_options(
+            translated, original, "tcolorbox"
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn("boxsep=1.5mm, attach boxed title to top left", fixed)
+        self.assertIn("正文", fixed)
 
     def test_relocate_packages_from_documentclass_options(self):
         text = "\\documentclass[\n\\usepackage{ctex}\n  11pt,\n]{article}\n正文"
@@ -316,6 +388,19 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertIn(r"\providecommand{\href}[2]{#2}", fixed)
         self.assertLess(fixed.index(r"\providecommand{\href}"), fixed.index(r"\begin{document}"))
+
+    def test_add_xelatex_compatibility_fallbacks_for_common_missing_commands(self):
+        text = "\\documentclass{article}\n\\begin{document}\n\\citep{x} $\\mathbb{R}$\n\\begin{appendices}A\\end{appendices}\n\\begin{tabular}{cc}\\toprule\\multirow{2}{*}{A}&B\\\\\\cmidrule(lr){1-2}\\bottomrule\\end{tabular}\n\\end{document}"
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 6)
+        self.assertIn(r"\providecommand{\citep}[2][]{\cite{#2}}", fixed)
+        self.assertIn(r"\providecommand{\mathbb}[1]{\mathbf{#1}}", fixed)
+        self.assertIn(r"\newenvironment{appendices}{\appendix}{}", fixed)
+        self.assertIn(r"\providecommand{\toprule}{\hline}", fixed)
+        self.assertIn(r"\providecommand{\multirow}[4][]{#4}", fixed)
+        self.assertNotIn(r"\cmidrule", fixed)
 
     def test_reset_acm_baselinestretch_before_end_document(self):
         text = (

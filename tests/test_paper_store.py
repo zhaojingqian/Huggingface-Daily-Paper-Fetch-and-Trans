@@ -30,6 +30,11 @@ class PaperStoreTest(unittest.TestCase):
         payload["title_zh"] = "示例论文"
         paper_store.write_raw(payload)
         self.assertEqual(paper_store.read_translated("2606.00001")["title_zh"], "示例论文")
+        self.assertFalse(paper_store.translation_complete(payload))
+
+        payload["summary_zh"] = "这是完整的中文总结。"
+        self.assertTrue(paper_store.translation_complete(payload))
+        self.assertFalse(paper_store.translation_complete([payload]))
 
     def test_pdf_status_update_is_best_effort(self):
         payload = {"arxiv_id": "2606.00002", "title_zh": "已有中文标题"}

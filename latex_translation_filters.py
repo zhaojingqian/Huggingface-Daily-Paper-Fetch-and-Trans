@@ -22,6 +22,8 @@ BASE_HARD_PROTECTED_ENVS = frozenset({
     "lstlisting", "verbatim", "Verbatim", "minted", "equation",
     "equation*", "align", "align*", "multline", "multline*", "gather",
     "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
+    # Structured JSON samples are source data, not untranslated prose.
+    "captionexample",
 })
 
 BASE_VERBATIM_RESTORE_ENVS = frozenset({
@@ -247,6 +249,66 @@ def _latex_package_loaded(text: str, name: str) -> bool:
     return bool(pattern.search(text or ""))
 
 
+def normalize_tex_include_target(target: str) -> str:
+    r"""Normalize harmless whitespace inside ``\input{...}`` references."""
+    return (target or "").strip()
+
+
+def fontawesome_command_names(text: str) -> Tuple[str, ...]:
+    """Return FontAwesome-style zero-argument commands used by a document."""
+    names = set(re.findall(r"\\(fa[A-Z][A-Za-z]+)\b", text or ""))
+    names.discard("faIcon")  # faIcon itself takes a mandatory icon-name argument.
+    return tuple(sorted(names))
+
+
+def restore_environment_opening_options(
+    translated: str, original: str, environment: str
+) -> Tuple[str, int]:
+    """Restore bracketed environment options by occurrence from the source TeX."""
+
+    def spans(source: str):
+        results = []
+        pattern = re.compile(r"\\begin\{" + re.escape(environment) + r"\}")
+        for match in pattern.finditer(source):
+            pos = match.end()
+            while pos < len(source) and source[pos].isspace():
+                pos += 1
+            if pos >= len(source) or source[pos] != "[":
+                continue
+            depth = 0
+            escaped = False
+            for end in range(pos, len(source)):
+                char = source[end]
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\":
+                    escaped = True
+                    continue
+                if char == "[":
+                    depth += 1
+                elif char == "]":
+                    depth -= 1
+                    if depth == 0:
+                        results.append((pos, end + 1, source[pos:end + 1]))
+                        break
+        return results
+
+    translated_spans = spans(translated or "")
+    original_spans = spans(original or "")
+    replacements = []
+    for translated_span, original_span in zip(translated_spans, original_spans):
+        start, end, current = translated_span
+        source_options = original_span[2]
+        if current != source_options:
+            replacements.append((start, end, source_options))
+
+    fixed = translated or ""
+    for start, end, source_options in reversed(replacements):
+        fixed = fixed[:start] + source_options + fixed[end:]
+    return fixed, len(replacements)
+
+
 def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
     """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
     source = text or ""
@@ -279,6 +341,30 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         r"\href" in source
         and not _latex_command_defined(source, "href")
         and not _latex_package_loaded(source, "hyperref")
+    )
+    needs_natbib_cite_fallback = (
+        (r"\citep" in source or r"\citet" in source)
+        and not _latex_package_loaded(source, "natbib")
+    )
+    needs_mathbb_fallback = (
+        r"\mathbb" in source
+        and not _latex_command_defined(source, "mathbb")
+        and not _latex_package_loaded(source, "amsfonts")
+        and not _latex_package_loaded(source, "amssymb")
+    )
+    needs_appendices_fallback = (
+        r"\begin{appendices}" in source
+        and not re.search(r"\\(?:newenvironment|renewenvironment)\s*\{appendices\}", source)
+        and not _latex_package_loaded(source, "appendix")
+    )
+    needs_booktabs_fallback = (
+        any(command in source for command in (r"\toprule", r"\midrule", r"\bottomrule"))
+        and not _latex_package_loaded(source, "booktabs")
+    )
+    needs_multirow_fallback = (
+        r"\multirow" in source
+        and not _latex_command_defined(source, "multirow")
+        and not _latex_package_loaded(source, "multirow")
     )
 
     total = 0
@@ -332,6 +418,53 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\href}[2]{#2}",
         ])
         source, changed = _insert_latex_preamble_snippet(source, insertion, ["href"])
+        total += int(changed)
+
+    if needs_natbib_cite_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing natbib citation commands",
+            r"\providecommand{\citep}[2][]{\cite{#2}}",
+            r"\providecommand{\citet}[2][]{\cite{#2}}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["citep", "citet"])
+        total += int(changed)
+
+    if needs_mathbb_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing AMS blackboard bold",
+            r"\providecommand{\mathbb}[1]{\mathbf{#1}}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["mathbb"])
+        total += int(changed)
+
+    if needs_appendices_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing appendices environment",
+            r"\newenvironment{appendices}{\appendix}{}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["appendices"])
+        total += int(changed)
+
+    if needs_booktabs_fallback:
+        source, cmidrule_count = re.subn(
+            r"\\cmidrule(?:\([^)]*\))?\{[^{}]+\}", r"\\hline", source
+        )
+        total += cmidrule_count
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing booktabs package",
+            r"\providecommand{\toprule}{\hline}",
+            r"\providecommand{\midrule}{\hline}",
+            r"\providecommand{\bottomrule}{\hline}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["toprule", "midrule", "bottomrule"])
+        total += int(changed)
+
+    if needs_multirow_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing multirow package",
+            r"\providecommand{\multirow}[4][]{#4}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["multirow"])
         total += int(changed)
 
     return source, total
@@ -477,6 +610,42 @@ def remove_spurious_cjk_command_escapes(text: str) -> Tuple[str, int]:
     return pattern.subn("", text or "")
 
 
+def demote_cleveref_commands(text: str) -> Tuple[str, int]:
+    r"""Use core LaTeX references when a template's cleveref setup is fragile."""
+    pattern = re.compile(r"\\(?:c|C)ref(?:\s*\[[^\]]*\])?(?=\s*\{)")
+    return pattern.subn(r"\\ref", text or "")
+
+
+def disable_microtype_package_loads(text: str) -> Tuple[str, int]:
+    r"""Disable local microtype loads and dependent commands without breaking hooks."""
+    source = text or ""
+    marker = "% paper-trans: local microtype load disabled for XeLaTeX"
+    total = 0
+    source, repaired = re.subn(
+        r"\\AtEndOfClass\{% paper-trans: local microtype load disabled for XeLaTeX\}",
+        marker,
+        source,
+    )
+    total += repaired
+    for pattern in (
+        re.compile(r"\\AtEndOfClass\{\s*\\RequirePackage(?:\[[^\]]*\])?\{microtype\}\s*\}"),
+        re.compile(r"\\RequirePackage(?:\[[^\]]*\])?\{microtype\}"),
+    ):
+        source, count = pattern.subn(marker, source)
+        total += count
+    # A class may invoke microtype commands outside the package-load hook. Replacing
+    # only the invocation (rather than commenting its full line) preserves any
+    # surrounding AtBeginDocument/AtEndOfClass braces.
+    command_patterns = (
+        re.compile(r"\\DisableLigatures\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}"),
+        re.compile(r"\\(?:UseMicrotypeSet|microtypesetup)\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}"),
+    )
+    for pattern in command_patterns:
+        source, count = pattern.subn(r"\\relax", source)
+        total += count
+    return source, total
+
+
 def relocate_packages_from_documentclass_options(text: str) -> Tuple[str, int]:
     r"""Move ``\usepackage`` lines accidentally inserted inside class options."""
     pattern = re.compile(
@@ -501,6 +670,9 @@ def relocate_packages_from_documentclass_options(text: str) -> Tuple[str, int]:
 PDFTEX_PRIMITIVE_NAMES = (
     "pdfoutput",
     "pdfgentounicode",
+    "pdfinfoomitdate",
+    "pdftrailerid",
+    "pdfsuppressptexinfo",
     "pdfminorversion",
     "pdfcompresslevel",
     "pdfobjcompresslevel",

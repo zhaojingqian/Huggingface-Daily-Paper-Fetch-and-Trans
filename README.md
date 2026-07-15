@@ -81,11 +81,19 @@ python3 run_repair.py --retry-pdf --mode weekly --key 2026-W22
 python3 run_repair.py --retry-pdf --mode daily --days 7
 python3 run_repair.py --retry-pdf --mode topic --topic opd --days 7
 python3 run_repair.py --retry-pdf --mode topic --key opd/2026-07-05
+
+# 全项目数据一致性与失败分类报告
+python3 scripts/audit_project.py
+python3 scripts/audit_project.py --json
+python3 scripts/summarize_failures.py
+python3 scripts/summarize_failures.py --json
 ```
 
-`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。如果缓存重编译失败，外层 retry 会清缓存后自动退回 no-cache 全文重译。如果没有翻译 tex 但源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 重新翻译/编译，避免反复失败在源码下载阶段。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：当 `data/papers/<id>.json` 仍为 `pdf_status=failed` 但 `<id>_zh.pdf` 已真实存在时，自动回写为 `ok`，避免历史状态残留误报；当 slim index 标记 `pdf_status=ok` 但 paper store PDF 文件缺失时，会自动降级进入重试，避免状态写早但文件丢失后被 retry 漏掉。
+`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。失败诊断会同时写入便于阅读的 `logs/pdf_errors/<id>.log` 和便于程序处理的 `<id>.json`，稳定字段包括 `phase`、`category`、`family`、`retry_strategy`、`repair_action` 和 `evidence`。`reuse_translation` 表示保留中文 tex、定向修补后重编译；只有明确分类为 `retry_translation` 才会清缓存再次调用 GPT，未知驱动异常也不会自动浪费一次全文重译。若没有翻译 tex 且源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 翻译/编译。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：已有 PDF 但 JSON 仍为 failed 时回写 `ok`；slim index 标记 `ok` 但 PDF 实体缺失时自动降级进入重试。
 
-topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套 PDF retry 逻辑，包括翻译 tex 缓存重编译、失败后 no-cache 全文重译和 paper store 状态回写。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
+失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的宏递归、资源缺失、依赖缺失、pdfTeX 原语、未定义命令、结构损坏、数值/单位语法、数学/表格、verbatim、资源耗尽、翻译覆盖率和普通 LaTeX 错误。`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
+
+topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套分类式 PDF retry 逻辑。paper store 的完整翻译缓存要求中文标题和中文总结同时有效；只残留标题的历史条目会重新抓取元数据并补译，同时保留原 `pdf_status`。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 
 全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、inline `\verb` 分隔符与正则内容冲突、坏 `.aux`、旧式 FontAwesome 图标、XeLaTeX 下缺失的 `\DeclareUnicodeCharacter`、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
 
@@ -188,12 +196,18 @@ paper-trans/
 ├── translate_full.py           # 宿主机侧全文 PDF 翻译封装
 ├── full_translate_driver.py    # 容器内 gpt-academic 驱动和 LaTeX fallback
 ├── latex_translation_filters.py # LaTeX 环境保护、质量过滤和 LLM 残留清理策略
+├── failure_taxonomy.py         # 翻译/编译失败稳定分类与重试策略
 ├── web_server.py               # 单文件 HTTP Web 服务
 ├── paperhub/
 │   ├── paths.py                 # 共享路径、paper store、容器默认名常量
 │   ├── env_config.py            # 本地 .env 读取 helper
+│   ├── modes.py                 # mode 限额、周期和 cron 语义
+│   ├── runner.py                # daily/weekly/monthly 共享 CLI runner
+│   ├── json_io.py               # 原子 JSON 读写
 │   ├── paper_store.py           # 统一 paper store JSON/PDF 读写 helper
-│   └── topic_store.py           # topic profile、seen 和 index 读写 helper
+│   ├── topic_store.py           # topic profile、seen 和 index 读写 helper
+│   ├── audit.py                 # 全项目索引/store/PDF 一致性审计
+│   └── failure_reports.py       # 结构化与历史失败日志聚合
 ├── tests/
 │   ├── test_web_server_contract.py
 │   ├── test_latex_translation_filters.py
@@ -201,6 +215,8 @@ paper-trans/
 │   ├── test_paths.py
 │   └── test_repair_refetch.py
 ├── scripts/
+│   ├── audit_project.py
+│   ├── summarize_failures.py
 │   ├── setup_docker_env.sh
 │   ├── cleanup_docker_cache.sh
 │   ├── weekly_cleanup.sh
@@ -257,6 +273,8 @@ python3 -m unittest discover -s tests -v
 - 收藏 API 的 create/toggle/move/remove 和常见 API 错误响应保持稳定。
 - 入口脚本继续使用同一套共享路径常量。
 - paper store 的 raw read、translated-cache read、PDF 阈值和 pdf_status 更新语义保持稳定。
+- mode 规格、共享 runner、原子 JSON 写入、全项目审计与失败分类保持稳定。
+- 缓存编译失败默认保留中文 tex，只有明确的翻译阶段诊断才允许再次调用 GPT。
 - `run_repair.py --refetch/--post` 对 daily/weekly/monthly 当前周期的跳过边界保持稳定：只在首次 cron 触发时间未到时跳过，触发后允许补抓临时网络失败的周期。
 - LaTeX fallback 对 inline `\verb` 分隔符冲突只修补可疑 regex/code 形态，不改普通 inline verb。
 

@@ -149,11 +149,13 @@ def fetch_hf_papers(mode, key, limit=10, use_proxy=True):  # noqa: use_proxy kep
 # ── 便捷日期函数 ─────────────────────────────────────────────────────────────
 def today_key():
     """当前日期 YYYY-MM-DD。daily cron 在 23:00 触发，取当天日期。"""
-    return datetime.now().strftime("%Y-%m-%d")
+    from paperhub.modes import mode_spec
+    return mode_spec("daily").current_key()
 
 def current_month_key():
     """当前年月 YYYY-MM。monthly cron 在 28 日 02:00 触发，取当月。"""
-    return datetime.now().strftime("%Y-%m")
+    from paperhub.modes import mode_spec
+    return mode_spec("monthly").current_key()
 
 def current_week_key():
     """
@@ -161,9 +163,8 @@ def current_week_key():
     ISO 8601：周一为第 1 天，周日为第 7 天（仍属于本周）。
     weekly cron 在周日 02:00 触发，此时 isocalendar() 返回本周编号，正确。
     """
-    now = datetime.now()
-    y, w, _ = now.isocalendar()
-    return f"{y}-W{w:02d}"
+    from paperhub.modes import mode_spec
+    return mode_spec("weekly").current_key()
 
 def last_week_key():
     """

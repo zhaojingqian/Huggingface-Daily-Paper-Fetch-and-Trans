@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from paperhub import paper_store
+from paperhub.json_io import read_json, write_json_atomic
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DATA_DIR,
@@ -132,8 +133,7 @@ def save_index(base_dir, mode, key, papers_data, extra=None):
     if extra:
         idx.update(extra)
     idx_file = os.path.join(base_dir, "index.json")
-    with open(idx_file, "w", encoding="utf-8") as f:
-        json.dump(idx, f, ensure_ascii=False, indent=2)
+    write_json_atomic(idx_file, idx)
     return idx_file
 
 
@@ -370,6 +370,15 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
         if not aid:
             continue
 
+        diagnosis = read_json(os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"), {})
+        retry_strategy = diagnosis.get("retry_strategy", "")
+        if diagnosis:
+            print(
+                f"{label} 🧭 {aid} — {diagnosis.get('category', 'unknown')} / "
+                f"{retry_strategy or 'default'}",
+                flush=True,
+            )
+
         # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态
         if _pdf_store_hit(aid):
             print(f"{label} ✅ {aid} — paper store 已有 PDF，更新状态", flush=True)
@@ -393,7 +402,10 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
             host_tex_failed = os.path.join(TEX_FAILED_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
             has_host = os.path.exists(host_tex_failed) and os.path.getsize(host_tex_failed) > 0
 
-        if has_container:
+        if retry_strategy == "retry_translation":
+            has_cache = False
+            print(f"{label} 🔄 {aid} — 诊断要求重新翻译，跳过失败 TeX 缓存", flush=True)
+        elif has_container:
             has_cache = True
             print(f"{label} 🔬 {aid} — 容器内有翻译缓存，只重跑编译...", flush=True)
         elif has_host:
@@ -410,14 +422,26 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
                                keep_translation=has_cache,
                                timeout=3600)
             if has_cache and not r.get("pdf_path"):
-                print(
-                    f"{label} ⚠️  {aid} — 缓存重编译失败，清缓存后重新翻译全文...",
-                    flush=True,
-                )
-                r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
-                                   no_cache=True,
-                                   keep_translation=False,
-                                   timeout=3600)
+                latest = read_json(os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"), {})
+                latest_strategy = latest.get("retry_strategy", "")
+                # 只在诊断明确要求重译时再次调用 GPT。缓存编译失败、驱动异常或
+                # 尚未分类的错误都先保留翻译结果，等待定向补丁，避免昂贵且通常
+                # 无效的全文重译掩盖真实编译问题。
+                if latest_strategy != "retry_translation":
+                    print(
+                        f"{label} 🧭 {aid} — 诊断为 {latest.get('category', 'unknown')}，"
+                        "保留翻译缓存等待定向编译补丁，不重复调用 GPT",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"{label} ⚠️  {aid} — 缓存重编译失败，清缓存后重新翻译全文...",
+                        flush=True,
+                    )
+                    r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
+                                       no_cache=True,
+                                       keep_translation=False,
+                                       timeout=3600)
             if r.get("pdf_path"):
                 slim["pdf_status"] = "ok"
                 _paper_store_update_pdf_status(aid, "ok")
@@ -480,8 +504,7 @@ def retry_pdf(mode=None, key=None):
             if changed:
                 idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 idx["papers"] = papers
-                with open(idx_file, "w", encoding="utf-8") as f:
-                    json.dump(idx, f, ensure_ascii=False, indent=2)
+                write_json_atomic(idx_file, idx)
 
     print(f"[retry-pdf] 完成: 成功={total_ok} 仍失败={total_fail}", flush=True)
     return total_ok
