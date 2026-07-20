@@ -23,6 +23,9 @@ crontab 示例（当前配置）：
   每月28日04:00 --post     --mode monthly --days 60
   每月28日07:00 --retry-pdf --mode monthly --days 60
   每天 06:30   --retry-pdf --mode topic   --days 7
+
+周日 02:00 的当前周串行修复由 scripts/repair_weekly_current.py 负责；它会等待
+当前 ISO 周 index.json 出现并等待 weekly 抓取锁释放，再执行摘要/翻译修复和 PDF 编译重试。
 """
 import sys, os, argparse
 from datetime import datetime

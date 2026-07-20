@@ -26,6 +26,12 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertEqual(result["category"], "compile.pdftex_primitive")
         self.assertEqual(result["repair_action"], "guard_pdftex_primitive")
 
+    def test_legacy_cjk_environment_has_a_specific_category(self):
+        result = classify_failure("compile", "LaTeX Error: Environment CJK* undefined")
+
+        self.assertEqual(result["category"], "compile.legacy_cjk_environment")
+        self.assertEqual(result["retry_strategy"], "reuse_translation")
+
     def test_translation_categories_distinguish_auth_and_timeout(self):
         auth = classify_failure("translate", plugin_error="401 Unauthorized: invalid API key")
         timeout = classify_failure("translate", plugin_error="Connection timed out")

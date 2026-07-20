@@ -313,6 +313,18 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
     """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
     source = text or ""
 
+    # Replace the first-generation CJK fallback, which used ``providecommand``
+    # with ``\csname`` and can emit "already defined" errors on CJKutf8.
+    legacy_cjk = "\n".join([
+        r"% paper-trans fallback for legacy CJK environments under XeLaTeX",
+        r"\expandafter\providecommand\csname CJK\endcsname[2]{}",
+        r"\expandafter\providecommand\csname endCJK\endcsname{}",
+        r"\expandafter\providecommand\csname CJK*\endcsname[2]{}",
+        r"\expandafter\providecommand\csname endCJK*\endcsname{}",
+        r"\providecommand{\CJKfamily}[1]{}",
+    ])
+    source = source.replace(legacy_cjk + "\n", "").replace(legacy_cjk, "")
+
     needs_inputencoding = (
         (r"\inputencodingname" in source
          or r"\newtcblisting" in source
@@ -365,6 +377,15 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         r"\multirow" in source
         and not _latex_command_defined(source, "multirow")
         and not _latex_package_loaded(source, "multirow")
+    )
+    needs_cjk_environment_fallback = bool(
+        re.search(r"\\(?:begin|end)\{CJK\*?\}", source)
+        # Some legacy papers load CJKutf8 but the package does not expose the
+        # CJK environments under XeLaTeX (or the slim image's compatibility
+        # layer).  The emitted ``ifcsname`` guards are no-ops when the package
+        # really did define them, so key this fallback on actual source
+        # environments rather than the package declaration alone.
+        and not _latex_command_defined(source, "CJK")
     )
 
     total = 0
@@ -467,7 +488,34 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         source, changed = _insert_latex_preamble_snippet(source, insertion, ["multirow"])
         total += int(changed)
 
+    if needs_cjk_environment_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for legacy CJK environments under XeLaTeX",
+            r"\ifcsname CJK\endcsname\else\expandafter\def\csname CJK\endcsname#1#2{}\fi",
+            r"\ifcsname endCJK\endcsname\else\expandafter\def\csname endCJK\endcsname{}\fi",
+            r"\ifcsname CJK*\endcsname\else\expandafter\def\csname CJK*\endcsname#1#2{}\fi",
+            r"\ifcsname endCJK*\endcsname\else\expandafter\def\csname endCJK*\endcsname{}\fi",
+            r"\ifcsname CJKfamily\endcsname\else\def\CJKfamily#1{}\fi",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["CJK"])
+        total += int(changed)
+
     return source, total
+
+
+def repair_missing_math_aliases(text: str) -> Tuple[str, int]:
+    """Repair a common translation typo where ``\\Imat`` becomes ``\\I``.
+
+    A few papers define a named identity-matrix macro (usually ``\\Imat``)
+    but the translated prose drops the ``mat`` suffix.  Only apply this
+    conservative replacement when the target macro is actually defined and
+    ``\\I`` is not, so unrelated one-letter commands are left untouched.
+    """
+    source = text or ""
+    if _latex_command_defined(source, "I") or not _latex_command_defined(source, "Imat"):
+        return source, 0
+    fixed, count = re.subn(r"\\I(?![A-Za-z@])", r"\\Imat", source)
+    return fixed, count
 
 
 def reset_acm_baselinestretch_before_end_document(text: str) -> Tuple[str, int]:

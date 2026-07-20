@@ -94,6 +94,12 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
             "LaTeX 依赖文件缺失；安装依赖或提供兼容 stub 后重编译。",
             _evidence(latex, r"File [`']?[^\n`']+\.(?:sty|cls|def)[`']? not found"),
         )
+    if re.search(r"Environment CJK\*? undefined|Undefined control sequence.*?endCJK\*?", latex, re.I | re.S):
+        return _result(
+            "compile.legacy_cjk_environment", "latex_command", "reuse_translation", "add_cjk_environment_fallback",
+            "旧模板使用未加载的 CJK/CJK* 环境；补 XeLaTeX 兼容定义后复用翻译重编译。",
+            _evidence(latex, r"Environment CJK\*? undefined|Undefined control sequence.*?endCJK\*?"),
+        )
     if re.search(
         r"Undefined control sequence.*?\\pdf(?:infoomitdate|trailerid|suppressptexinfo|gentounicode|output)",
         latex,

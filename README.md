@@ -91,7 +91,7 @@ python3 scripts/summarize_failures.py --json
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。失败诊断会同时写入便于阅读的 `logs/pdf_errors/<id>.log` 和便于程序处理的 `<id>.json`，稳定字段包括 `phase`、`category`、`family`、`retry_strategy`、`repair_action` 和 `evidence`。`reuse_translation` 表示保留中文 tex、定向修补后重编译；只有明确分类为 `retry_translation` 才会清缓存再次调用 GPT，未知驱动异常也不会自动浪费一次全文重译。若没有翻译 tex 且源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 翻译/编译。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：已有 PDF 但 JSON 仍为 failed 时回写 `ok`；slim index 标记 `ok` 但 PDF 实体缺失时自动降级进入重试。
 
-失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的宏递归、资源缺失、依赖缺失、pdfTeX 原语、未定义命令、结构损坏、数值/单位语法、数学/表格、verbatim、资源耗尽、翻译覆盖率和普通 LaTeX 错误。`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
+失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的宏递归、资源缺失、依赖缺失、旧式 CJK 环境、pdfTeX 原语、未定义命令、结构损坏、数值/单位语法、数学/表格、verbatim、资源耗尽、翻译覆盖率和普通 LaTeX 错误。`paperhub/patch_catalog.py` 为每个结构化类别登记 patch、来源和策略；`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
 
 topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套分类式 PDF retry 逻辑。paper store 的完整翻译缓存要求中文标题和中文总结同时有效；只残留标题的历史条目会重新抓取元数据并补译，同时保留原 `pdf_status`。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 
@@ -103,7 +103,7 @@ splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 ma
 
 过滤策略可通过环境变量扩展：`PAPER_TRANS_EXTRA_HARD_ENVS` 增加需要硬保护的环境名，`PAPER_TRANS_EXTRA_SOFT_ENVS` 增加可拆出自然语言继续翻译的环境名，`PAPER_TRANS_EXTRA_RESTORE_ENVS` 增加 fallback 中可从原文恢复的环境名，`PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS` 按行增加需要清理的模型残留正则。
 
-fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO`、`\faEnvelope`、`\faGem` 等旧命令），禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc/listing 场景常见的 `\DeclareUnicodeCharacter` no-op 和 `\inputencodingname` 兼容，为缺少 `fontspec` 的 CIDR/ACM 或 fontspec 风格模板补 `\setmainfont`、`\setsansfont`、`\setmonofont`、`\newfontfamily` no-op，并在 CIDR/ACM 文档结束前重置 `\baselinestretch` guard。从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
+fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO`、`\faEnvelope`、`\faGem` 等旧命令），为声明了 `CJKutf8` 但 XeLaTeX 未暴露环境的旧论文补 `CJK/CJK*` no-op guard，将已定义的 `\Imat` 被误写成 `\I` 的数学别名恢复，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc/listing 场景常见的 `\DeclareUnicodeCharacter` no-op 和 `\inputencodingname` 兼容，为缺少 `fontspec` 的 CIDR/ACM 或 fontspec 风格模板补 `\setmainfont`、`\setsansfont`、`\setmonofont`、`\newfontfamily` no-op，并在 CIDR/ACM 文档结束前重置 `\baselinestretch` guard。从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
 
 宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间没有换行输出时，外层 timeout 仍会按时收口，并会尽力清理同篇 `full_translate_driver.py` 进程，避免 retry 阶段被悬挂的旧编译卡住。
 
@@ -204,6 +204,8 @@ paper-trans/
 │   ├── modes.py                 # mode 限额、周期和 cron 语义
 │   ├── runner.py                # daily/weekly/monthly 共享 CLI runner
 │   ├── json_io.py               # 原子 JSON 读写
+│   ├── patch_catalog.py         # 失败类别到通用 patch 的映射
+│   ├── weekly_repair.py         # 周日 02:00 当前周串行修复 runner
 │   ├── paper_store.py           # 统一 paper store JSON/PDF 读写 helper
 │   ├── topic_store.py           # topic profile、seen 和 index 读写 helper
 │   ├── audit.py                 # 全项目索引/store/PDF 一致性审计
@@ -213,9 +215,11 @@ paper-trans/
 │   ├── test_latex_translation_filters.py
 │   ├── test_paper_store.py
 │   ├── test_paths.py
+│   ├── test_weekly_repair.py
 │   └── test_repair_refetch.py
 ├── scripts/
 │   ├── audit_project.py
+│   ├── repair_weekly_current.py
 │   ├── summarize_failures.py
 │   ├── setup_docker_env.sh
 │   ├── cleanup_docker_cache.sh
@@ -336,6 +340,7 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 0 23 * * *   $PYTHON $PTDIR/run_daily.py   >> $PTDIR/logs/cron-daily.log   2>&1
 30 1 * * *   $PYTHON $PTDIR/run_topic.py --all >> $PTDIR/logs/cron-topic.log 2>&1
 0  2 * * 0   $PYTHON $PTDIR/run_weekly.py  >> $PTDIR/logs/cron-weekly.log  2>&1
+0  2 * * 0   $PYTHON $PTDIR/scripts/repair_weekly_current.py >> $RLOG 2>&1
 0  2 28 * *  $PYTHON $PTDIR/run_monthly.py >> $PTDIR/logs/cron-monthly.log 2>&1
 
 0  5 * * *   docker restart $GPT_ACADEMIC_CONTAINER >> $PTDIR/logs/docker-restart.log 2>&1
@@ -351,6 +356,8 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 ```
 
 `run_repair.py --post` 会先修复已有索引中的摘要，再补抓缺失或空 `index.json` 的周期。为避免提前抓取未到榜单生成时间的数据，当前周期只会在首次 cron 触发时间前被跳过：daily 为当天 23:00 前，weekly 为周日 02:00 前，monthly 为 28 日 02:00 前。触发时间之后如果遇到 Hugging Face 临时网络失败，后续 `--post` 会重新补抓该周期。
+
+周日 02:00 的 `scripts/repair_weekly_current.py` 与 weekly 抓取并行启动，但会先等待 `weekly/<当前 ISO 周>/index.json` 出现，再等待抓取锁释放，随后在同一锁内串行执行摘要/翻译修复和 `pdf_status=failed` 编译重试，最长等待 3 小时；这样不会在抓取尚未创建索引时提前退出，也不会读取半成品索引或与 02:30 weekly 兜底抓取互相覆盖。每次运行会以 `runs` 追加记录本周失败类别、匹配的通用 patch、修复数量和剩余失败到 `logs/repair_history/weekly-<key>.json`。通用 patch 目录由 `paperhub/patch_catalog.py` 维护，具体实现仍集中在 `full_translate_driver.py` 和 `latex_translation_filters.py`。
 
 topic 订阅不走 `--refetch` 补索引，必须由 root crontab 中的 `run_topic.py --all` 生成每日结果；如果 `/topic` 没有当天结果，优先检查 `crontab -l` 是否包含 `run_topic.py --all` 和 `--retry-pdf --mode topic` 两行，再看 `logs/cron-topic.log` 与 `logs/repair.log`。
 

@@ -1951,6 +1951,19 @@ def patch_xelatex_compatibility_fallbacks(trans_tex_path):
     return total
 
 
+def patch_missing_math_aliases(trans_tex_path):
+    """Repair conservative identity-matrix aliases introduced by translation."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    fixed, total = _ltf.repair_missing_math_aliases(text)
+    if not total:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(fixed)
+    print(f"[driver] 🔧 patch_missing_math_aliases: 修复 {total} 处 \\I -> \\Imat", flush=True)
+    return total
+
+
 def patch_pdftex_primitives_for_xelatex(trans_tex_path):
     """Guard pdfTeX primitive lines in the translated main tex."""
     with open(trans_tex_path, encoding='utf-8') as f:
@@ -2713,6 +2726,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_fontawesome_legacy_aliases(trans_tex)
     patch_declare_unicode_character_fallback(trans_tex)
     patch_xelatex_compatibility_fallbacks(trans_tex)
+    patch_missing_math_aliases(trans_tex)
     patch_local_pdftex_primitives(workfolder)
     patch_pdftex_primitives_for_xelatex(trans_tex)
     patch_textsc_for_xelatex(trans_tex)

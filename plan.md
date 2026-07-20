@@ -181,6 +181,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 - [x] 将索引/store/PDF 全量审计和失败分类摘要整理成独立脚本。
 - [x] 为失败队列增加 category / retry strategy / repair action 轻量摘要日志。
+- [x] 增加周日 02:00 当前 ISO 周串行 repair runner，等待当前周 index.json 出现并等待 weekly 抓取锁后修复翻译和 PDF 编译问题。
+- [x] 建立通用 patch catalog 与 `logs/repair_history/weekly-<key>.json`，沉淀每周失败类别、匹配补丁和剩余失败。
 - [x] 修复 `run_repair.py --post` 对当前周期的跳过边界，确保首次 cron 触发后可补抓临时网络失败的 daily/weekly/monthly。
 - [x] 补齐生产 root crontab 的 topic 调度：每天 01:30 `run_topic.py --all`，06:30 `run_repair.py --retry-pdf --mode topic --days 7`，并补跑 `2026-07-06` 主题结果。
 - [x] 修复 weekly cleanup 的 topic 引用漏扫：孤立 PDF 统计递归覆盖 topic 两层索引，避免 topic-only PDF 被误删。

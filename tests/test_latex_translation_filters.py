@@ -314,6 +314,63 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn(r"\providecommand{\inputencodingname}{utf8}", fixed)
         self.assertLess(fixed.index(r"\providecommand{\inputencodingname}"), fixed.index(r"\begin{document}"))
 
+    def test_add_xelatex_compatibility_fallbacks_for_legacy_cjk_environments(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\begin{document}" "\n"
+            r"\begin{CJK*}{UTF8}{gbsn}中文\end{CJK*}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\csname CJK*\endcsname", fixed)
+        self.assertIn(r"\csname endCJK*\endcsname", fixed)
+        self.assertLess(fixed.index(r"% paper-trans fallback for legacy CJK"), fixed.index(r"\begin{document}"))
+
+    def test_legacy_cjk_fallback_is_added_even_when_cjkutf8_is_declared(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage{CJKutf8}" "\n"
+            r"\begin{document}" "\n"
+            r"\begin{CJK}{UTF8}{gbsn}中文\end{CJK}" "\n"
+            r"\end{document}" "\n"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertGreater(count, 0)
+        self.assertIn(r"\csname endCJK\endcsname", fixed)
+
+    def test_repair_missing_identity_matrix_alias(self):
+        text = (
+            r"\newcommand{\Imat}{\bm{I}}" "\n"
+            r"$\Omat^\top\Omat=\I_n$"
+        )
+
+        fixed, count = filters.repair_missing_math_aliases(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"=\Imat_n", fixed)
+
+    def test_cjk_fallback_replaces_legacy_providecommand_variant(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"% paper-trans fallback for legacy CJK environments under XeLaTeX" "\n"
+            r"\expandafter\providecommand\csname CJK\endcsname[2]{}" "\n"
+            r"\expandafter\providecommand\csname endCJK\endcsname{}" "\n"
+            r"\expandafter\providecommand\csname CJK*\endcsname[2]{}" "\n"
+            r"\expandafter\providecommand\csname endCJK*\endcsname{}" "\n"
+            r"\providecommand{\CJKfamily}[1]{}" "\n"
+            r"\begin{document}\begin{CJK}{UTF8}{gbsn}中文\end{CJK}\end{document}"
+        )
+
+        fixed, _ = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertNotIn(r"\expandafter\providecommand\csname endCJK\endcsname", fixed)
+        self.assertIn(r"\ifcsname endCJK\endcsname", fixed)
+
     def test_add_xelatex_compatibility_fallbacks_for_cidr_fontspec_commands(self):
         text = (
             r"\documentclass[sigplan]{cidr-2025}" "\n"
