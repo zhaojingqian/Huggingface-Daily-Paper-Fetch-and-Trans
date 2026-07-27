@@ -76,6 +76,19 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertFalse(auth["retryable"])
         self.assertEqual(timeout["retry_strategy"], "retry_translation")
 
+    def test_translation_quota_failure_is_not_blindly_retried(self):
+        quota = classify_failure(
+            "translate",
+            plugin_error=(
+                "insufficient_user_quota: need pre-deduct $0.010, "
+                "balance $0.005 is insufficient"
+            ),
+        )
+
+        self.assertEqual(quota["category"], "translate.api_quota")
+        self.assertEqual(quota["retry_strategy"], "manual_review")
+        self.assertEqual(quota["repair_action"], "recharge_api_balance")
+
     def test_timeout_configuration_does_not_mask_quality_failure(self):
         result = classify_failure(
             "compile",

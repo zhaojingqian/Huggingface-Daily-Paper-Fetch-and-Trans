@@ -19,7 +19,7 @@ SOFT_TEXT_ENVS = frozenset({
 
 BASE_HARD_PROTECTED_ENVS = frozenset({
     "figure", "figure*", "table", "table*", "algorithm",
-    "lstlisting", "verbatim", "Verbatim", "minted", "equation",
+    "lstlisting", "verbatim", "Verbatim", "minted", "comment", "equation",
     "equation*", "align", "align*", "multline", "multline*", "gather",
     "gather*", "tikzpicture", "minipage", "minipage*", "thebibliography",
     # Structured JSON samples are source data, not untranslated prose.
@@ -40,6 +40,8 @@ DYNAMIC_HARD_ENV_RE = re.compile(
     r"|(?:prompt|code|trace|traj|trajectory|transcript|console|terminal|log)(?:box|block)$"
     r"|(?:cli|gui|fail)mode$"
     r"|^trajact"
+    r"|(?:case|strategy|source|example)code$"
+    r"|^(?:toolcall|caseresponse|errorspan|normalspan|templatebubble|ccsxml|paperresources)$"
     r"|(?:listing|verbatim|transcript|trajectory|trace|prompt|codeblock)$"
     r")"
 )
@@ -189,6 +191,112 @@ LLM_ARTIFACT_PATTERNS = (
     re.compile(r"近年来，迁移学习作为一种有效的方法被提出.*?\\cite\{mnih2015human\}。", re.DOTALL),
     re.compile(r"为了解决数据不足的问题，许多研究关注于半监督学习和无监督学习方法\\cite\{lecun2015deep\}。此外，迁移学习.*?仍然是一个挑战。", re.DOTALL),
 )
+
+LLM_REQUEST_FAILURE_MARKERS = (
+    "[Local Message] 警告，线程",
+    "Traceback",
+    "Too Many Requests",
+    "Rate limit reached",
+    "429 Client Error",
+    "Error code: 429",
+    "insufficient_user_quota",
+)
+
+
+def llm_translation_response_failed(text: str) -> bool:
+    """Return whether a chunk response is an upstream request failure payload."""
+    value = text or ""
+    return not value.strip() or any(marker in value for marker in LLM_REQUEST_FAILURE_MARKERS)
+
+
+def llm_translation_response_quota_failed(text: str) -> bool:
+    value = (text or "").lower()
+    return (
+        "insufficient_user_quota" in value
+        or ("balance" in value and "insufficient" in value)
+        or "余额不足" in value
+        or "额度不足" in value
+    )
+
+
+def llm_translation_response_untranslated(source: str, response: str) -> bool:
+    """Detect prose-like source chunks whose response still lacks Chinese."""
+    if llm_translation_response_failed(response):
+        return True
+    source_value = source or ""
+    response_value = response or ""
+    source_letters = len(re.findall(r"[A-Za-z]", source_value))
+    source_cjk = len(re.findall(r"[\u4e00-\u9fff]", source_value))
+    response_letters = len(re.findall(r"[A-Za-z]", response_value))
+    response_cjk = len(re.findall(r"[\u4e00-\u9fff]", response_value))
+    return (
+        source_letters >= 40
+        and source_cjk < 8
+        and response_letters >= 24
+        and response_cjk < 6
+    )
+
+
+def coalesce_translation_fragments(
+    fragments: Iterable[Tuple[str, bool]],
+    max_translate_chars: int = 1800,
+) -> List[Tuple[str, bool]]:
+    """Merge prose fragments without recreating tiny or unbounded requests.
+
+    Whitespace-only PRESERVE fragments between two prose chunks are formatting,
+    not a semantic boundary. Absorb them into the translation request, while
+    retaining structural LaTeX boundaries and a conservative request-size cap.
+    """
+    items = [(text, preserve) for text, preserve in fragments if text]
+    result: List[Tuple[str, bool]] = []
+    pending_whitespace = ""
+    for index, (text, preserve) in enumerate(items):
+        next_is_translate = (
+            index + 1 < len(items)
+            and not items[index + 1][1]
+        )
+        if (
+            preserve
+            and text.isspace()
+            and result
+            and not result[-1][1]
+            and next_is_translate
+        ):
+            pending_whitespace += text
+            continue
+
+        if pending_whitespace:
+            if (
+                not preserve
+                and len(result[-1][0]) + len(pending_whitespace) + len(text)
+                <= max_translate_chars
+            ):
+                previous, _ = result[-1]
+                result[-1] = (
+                    previous + pending_whitespace + text,
+                    False,
+                )
+                pending_whitespace = ""
+                continue
+            result.append((pending_whitespace, True))
+            pending_whitespace = ""
+
+        can_merge = (
+            result
+            and result[-1][1] == preserve
+            and (
+                preserve
+                or len(result[-1][0]) + len(text) <= max_translate_chars
+            )
+        )
+        if can_merge:
+            previous, _ = result[-1]
+            result[-1] = (previous + text, preserve)
+        else:
+            result.append((text, preserve))
+    if pending_whitespace:
+        result.append((pending_whitespace, True))
+    return result
 
 
 def _extra_artifact_patterns() -> List[object]:

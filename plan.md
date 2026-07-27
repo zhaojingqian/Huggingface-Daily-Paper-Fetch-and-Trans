@@ -179,7 +179,10 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 加固 fallback 编译：安全 aux、直接接入生成 bbl、不安全 citation key 规范化、LuaLaTeX segfault fallback、algorithm2e/FontAwesome 兼容和更多 LLM artifact 过滤。
 - [x] 将模型序列化残留、字体族、engine driver、环境失配、TikZ matrix 图例和重复宏首字母归入稳定 taxonomy，并为每类登记通用 patch。
 - [x] 摘要翻译兼容 OpenAI-compatible 多形态 content、截断/非法反斜杠 JSON，并可从已成功中文 TeX 回填缺失字段。
-- [ ] 针对 `quality.untranslated_prose` 增加 chunk 级语言验证与局部重译，避免整篇模型回显英文后再次全量消耗。
+- [x] 针对 `quality.untranslated_prose` 增加 chunk 级失败响应验证与局部重试；低并发首轮后只串行补偿 429/空响应 chunk，仍失败则拒绝半成品缓存。
+- [x] 增加全量中文 TeX/chunk 英文分布分析，区分普通正文、混合语言与代码/轨迹保护环境，并按 CJK 覆盖和长英文行生成历史严重项队列。
+- [ ] 分批重译全量扫描识别出的历史严重英文残留论文；每批经过覆盖率、编译健康、索引/PDF 一致性门禁后再发布，避免与例行新论文任务争抢模型限额。
+- [ ] API 额度恢复后，优先清空近两周 `quality.untranslated_prose` 五篇队列，再按全量严重项排序分批重译；额度不足固定归类为 `translate.api_quota`，不自动循环。
 
 ### Phase D — 运维体验
 

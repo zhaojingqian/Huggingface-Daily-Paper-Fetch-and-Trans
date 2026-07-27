@@ -15,7 +15,7 @@ arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-06-17-v2"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-07-27-v4"
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
@@ -262,7 +262,10 @@ def _patch_latex_translation_splitter():
         r"bibliography|bibliographystyle|toprule|midrule|bottomrule|hline|"
         r"cline|cmidrule|addlinespace|centering|raggedright|small|footnotesize|"
         r"scriptsize|normalsize|vspace|hspace|vfill|newpage|clearpage|appendix|"
-        r"tableofcontents|maketitle|printbibliography)\b"
+        r"tableofcontents|maketitle|printbibliography|author|affiliation|"
+        r"icmlauthor|icmlaffiliation|icmlcorrespondingauthor|institute|email|"
+        r"homepage|orcidlink|thanks|newcommand|renewcommand|providecommand|"
+        r"DeclareMathOperator|newtheorem|def)\b"
     )
     latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
     inline_math_re = _re.compile(r"\$[^$]*\$")
@@ -579,26 +582,29 @@ def _patch_latex_translation_splitter():
         return True
 
     def _finalize_expanded_nodes(nodes):
-        finalized = []
+        fragments = []
         demoted = 0
+        transform_before_merge = 0
         for node in nodes:
             if not node.preserve and not _semantic_enough_for_gpt(node.string):
                 node.preserve = True
                 demoted += 1
 
             if node.preserve:
-                _append(finalized, node.string, True)
+                fragments.append((node.string, True))
                 continue
 
-            leading_len = len(node.string) - len(node.string.lstrip())
-            trailing_len = len(node.string.rstrip()) if node.string.rstrip() else 0
-            leading = node.string[:leading_len]
-            core = node.string[leading_len:trailing_len]
-            trailing = node.string[trailing_len:]
-            _append(finalized, leading, True)
-            _append(finalized, core, False, merge=False)
-            _append(finalized, trailing, True)
-        return finalized, demoted
+            transform_before_merge += 1
+            # Whitespace between adjacent prose fragments is safe to keep
+            # inside one translation request. Keeping it as a separate
+            # PRESERVE node previously fragmented a paragraph into one API
+            # call per sentence, multiplying 429 risk and creating mixed
+            # Chinese/English paragraphs when only some calls succeeded.
+            fragments.append((node.string, False))
+        merged = _ltf.coalesce_translation_fragments(fragments)
+        finalized = [_Node(text, preserve=preserve) for text, preserve in merged]
+        transform_after_merge = sum(1 for node in finalized if not node.preserve)
+        return finalized, demoted, transform_before_merge - transform_after_merge
 
     def _patched_split(self, txt, project_folder, opts):
         res = _orig_split(self, txt, project_folder, opts)
@@ -621,7 +627,7 @@ def _patch_latex_translation_splitter():
             for part in parts:
                 _append(expanded, part.string, part.preserve)
 
-        expanded, demoted_short = _finalize_expanded_nodes(expanded)
+        expanded, demoted_short, coalesced = _finalize_expanded_nodes(expanded)
         _invalidate_stale_split_cache(project_folder)
         _recompute_ranges(expanded)
         self.nodes = expanded
@@ -632,7 +638,8 @@ def _patch_latex_translation_splitter():
         print(
             f"[driver] ✅ latex splitter expanded prose chunks: "
             f"{original_transform} -> {len(self.sp)} "
-            f"(chars +{max(0, added_chars)}, short demoted={demoted_short})",
+            f"(chars +{max(0, added_chars)}, short demoted={demoted_short}, "
+            f"adjacent merged={coalesced})",
             flush=True,
         )
         if added > 0:
@@ -684,13 +691,139 @@ def _patch_latex_fix_content_artifacts():
     print("[driver] ✅ fix_content 已 patch（merge 前清理 LLM 非原文残留）", flush=True)
 
 
+def _int_env(name, default, minimum=0, maximum=20):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _patch_latex_llm_rate_limit_handling():
+    """Throttle LaTeX requests and retry only failed response slots serially."""
+    from crazy_functions import crazy_utils as _crazy_utils
+
+    if getattr(_crazy_utils, "_paper_trans_rate_limit_patch", False):
+        return
+
+    original = (
+        _crazy_utils
+        .request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency
+    )
+    # Two workers keep throughput reasonable without recreating the burst of
+    # eight simultaneous requests that caused widespread 429 responses. Any
+    # failed slots are subsequently retried with one worker.
+    max_workers = _int_env("PAPER_TRANS_LLM_WORKERS", 2, minimum=1, maximum=8)
+    # Let the outer failed-slot loop own retries. Upstream retries every failed
+    # future independently and can spend tens of minutes sleeping on a
+    # deterministic quota error before the batch result is inspectable.
+    per_call_retries = _int_env("PAPER_TRANS_LLM_RETRIES", 0, maximum=10)
+    retry_rounds = _int_env(
+        "PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS",
+        2,
+        maximum=5,
+    )
+
+    def _patched(*args, **kwargs):
+        options = dict(kwargs)
+        options["max_workers"] = max_workers
+        options["retry_times_at_unknown_error"] = per_call_retries
+        result = yield from original(*args, **options)
+
+        inputs = options.get("inputs_array", [])
+        visible_inputs = options.get("inputs_show_user_array", [])
+        histories = options.get("history_array", [])
+        prompts = options.get("sys_prompt_array", [])
+        # inputs_array contains the translation prompt plus the actual LaTeX
+        # fragment. inputs_show_user_array is only a label such as
+        # "translate_zh segment-7" and cannot be used for language validation.
+        validation_sources = inputs
+
+        def response_status(payload):
+            failed = []
+            request_failed = []
+            untranslated = []
+            quota_failed = []
+            for index, response in enumerate(payload[1::2]):
+                source = (
+                    validation_sources[index]
+                    if index < len(validation_sources)
+                    else ""
+                )
+                if _ltf.llm_translation_response_quota_failed(response):
+                    quota_failed.append(index)
+                if _ltf.llm_translation_response_failed(response):
+                    request_failed.append(index)
+                elif _ltf.llm_translation_response_untranslated(source, response):
+                    untranslated.append(index)
+                if index in request_failed or index in untranslated:
+                    failed.append(index)
+            return failed, request_failed, untranslated, quota_failed
+
+        remaining, request_failed, untranslated, quota_failed = response_status(result)
+        if quota_failed:
+            raise RuntimeError(
+                "insufficient_user_quota: API balance is insufficient for "
+                f"{len(quota_failed)} translation chunks"
+            )
+        if remaining:
+            print(
+                f"[driver] ⚠️  chunk 首轮异常: request_failed={len(request_failed)}, "
+                f"untranslated={len(untranslated)}",
+                flush=True,
+            )
+        for round_index in range(1, retry_rounds + 1):
+            if not remaining:
+                break
+            print(
+                f"[driver] 🐢 LLM 限流恢复: 第 {round_index}/{retry_rounds} 轮，"
+                f"串行重试 {len(remaining)} 个失败/漏译 chunk",
+                flush=True,
+            )
+            retry_options = dict(options)
+            retry_options.update({
+                "inputs_array": [inputs[index] for index in remaining],
+                "inputs_show_user_array": [visible_inputs[index] for index in remaining],
+                "history_array": [histories[index] for index in remaining],
+                "sys_prompt_array": [prompts[index] for index in remaining],
+                "max_workers": 1,
+            })
+            retried = yield from original(**retry_options)
+            for local_index, original_index in enumerate(remaining):
+                result[original_index * 2 + 1] = retried[local_index * 2 + 1]
+            remaining, request_failed, untranslated, quota_failed = response_status(result)
+            if quota_failed:
+                raise RuntimeError(
+                    "insufficient_user_quota: API balance is insufficient for "
+                    f"{len(quota_failed)} translation chunks"
+                )
+
+        if remaining:
+            # Never cache a temp.pkl where request failures are silently
+            # merged back into the output as English source text.
+            raise RuntimeError(
+                "LLM request/untranslated failures remain in "
+                f"{len(remaining)} translation chunks after serial retry"
+            )
+        return result
+
+    _crazy_utils.request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency = _patched
+    _crazy_utils._paper_trans_rate_limit_patch = True
+    print(
+        f"[driver] ✅ LaTeX LLM 请求已 patch（workers={max_workers}, "
+        f"retries={per_call_retries}, failed_chunk_rounds={retry_rounds}）",
+        flush=True,
+    )
+
+
 _patch_latex_translation_splitter()
 _patch_latex_fix_content_artifacts()
+_patch_latex_llm_rate_limit_handling()
 
 from toolbox import get_conf, ChatBotWithCookies, default_user_name
 
 api_key   = get_conf('API_KEY')
-llm_model = get_conf('LLM_MODEL')
+llm_model = os.environ.get("PAPER_TRANS_LLM_MODEL") or get_conf('LLM_MODEL')
 ARXIV_CACHE_DIR = get_conf('ARXIV_CACHE_DIR')
 print(f"[driver] 模型: {llm_model}", flush=True)
 print(f"[driver] 缓存目录: {ARXIV_CACHE_DIR}", flush=True)
@@ -1005,7 +1138,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
     """执行一次翻译+编译，成功返回 PDF 路径，否则返回 None。"""
     llm_kwargs = {
         'api_key': api_key, 'llm_model': llm_model,
-        'top_p': 1.0, 'max_length': None, 'temperature': 1.0,
+        'top_p': 1.0, 'max_length': None, 'temperature': 0.2,
     }
     cookie     = {**llm_kwargs, 'user_name': default_user_name, 'files_to_promote': []}
     chatbot    = ChatBotWithCookies(cookie)

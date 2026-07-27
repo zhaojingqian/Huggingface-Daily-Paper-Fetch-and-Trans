@@ -44,6 +44,22 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             self.assertTrue(filters.is_hard_protected_env("specialProof"))
             self.assertTrue(filters.is_tracked_env("specialProof"))
 
+    def test_discovered_code_and_benchmark_data_envs_are_protected(self):
+        for env in (
+            "casecode",
+            "strategycode",
+            "toolcall",
+            "caseresponse",
+            "errorspan",
+            "normalspan",
+            "templatebubble",
+            "CCSXML",
+            "paperresources",
+        ):
+            with self.subTest(env=env):
+                self.assertTrue(filters.is_dynamic_hard_env(env))
+        self.assertTrue(filters.is_hard_protected_env("comment"))
+
     def test_strip_llm_translation_artifacts(self):
         text = (
             "正常中文段落。\n"
@@ -101,6 +117,81 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn("后文。", stripped)
         self.assertNotIn('"translation"', stripped)
         self.assertNotIn("数据处理", stripped)
+
+    def test_detects_failed_llm_chunk_responses(self):
+        self.assertTrue(filters.llm_translation_response_failed(""))
+        self.assertTrue(filters.llm_translation_response_failed(
+            "[Local Message] 警告，线程7在执行过程中遭遇问题, Traceback：429"
+        ))
+        self.assertTrue(filters.llm_translation_response_failed(
+            "429 Client Error: Too Many Requests"
+        ))
+        self.assertFalse(filters.llm_translation_response_failed(
+            r"\section{方法}我们提出一种新的训练方法。"
+        ))
+        self.assertTrue(filters.llm_translation_response_quota_failed(
+            "insufficient_user_quota: balance $0.005 is insufficient"
+        ))
+
+    def test_detects_untranslated_llm_chunk_responses(self):
+        source = (
+            "This paragraph explains the training method and evaluation "
+            "protocol used throughout the paper."
+        )
+        self.assertTrue(filters.llm_translation_response_untranslated(
+            source,
+            source,
+        ))
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            source,
+            "本段解释了全文采用的训练方法和评估协议。",
+        ))
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            r"\section{GPT-4o}",
+            r"\section{GPT-4o}",
+        ))
+
+    def test_coalesces_adjacent_translation_fragments(self):
+        fragments = [
+            ("First sentence. ", False),
+            ("Second sentence.\n", False),
+            (r"\begin{equation}", True),
+            ("\n", True),
+            ("Following paragraph.", False),
+        ]
+
+        merged = filters.coalesce_translation_fragments(fragments)
+
+        self.assertEqual(merged, [
+            ("First sentence. Second sentence.\n", False),
+            (r"\begin{equation}" "\n", True),
+            ("Following paragraph.", False),
+        ])
+
+    def test_coalesces_whitespace_between_prose_with_size_cap(self):
+        fragments = [
+            ("First prose sentence.", False),
+            ("\n", True),
+            ("Second prose sentence.", False),
+            (r"\begin{equation}", True),
+            ("A" * 40, False),
+            ("B" * 40, False),
+        ]
+
+        merged = filters.coalesce_translation_fragments(
+            fragments,
+            max_translate_chars=60,
+        )
+
+        self.assertEqual(merged[:2], [
+            ("First prose sentence.\nSecond prose sentence.", False),
+            (r"\begin{equation}", True),
+        ])
+        self.assertEqual(merged[-3:], [
+            (r"\begin{equation}", True),
+            ("A" * 40, False),
+            ("B" * 40, False),
+        ])
 
     def test_separate_custom_macro_cjk_glue(self):
         text = (

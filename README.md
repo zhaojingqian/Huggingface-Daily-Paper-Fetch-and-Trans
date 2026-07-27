@@ -87,6 +87,11 @@ python3 scripts/audit_project.py
 python3 scripts/audit_project.py --json
 python3 scripts/summarize_failures.py
 python3 scripts/summarize_failures.py --json
+
+# 全量中文 TeX 的英文残留、词频、环境与 chunk 分布
+python3 scripts/analyze_translation_chunks.py \
+  --tex-dir data/tex_backup \
+  --tex-dir data/tex_backup_failed
 ```
 
 已安装的 Codex skill 为 `$paper-trans-repair`（本机路径
@@ -110,7 +115,11 @@ topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 
 
 全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、inline `\verb` 分隔符与正则内容冲突、坏 `.aux`、旧式 FontAwesome 图标、XeLaTeX 下缺失的 `\DeclareUnicodeCharacter`、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
 
-splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。二次拆分后会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或空白/分隔符类 chunk 会降级回 preserve，避免模型收到坏 chunk 后生成 “Below is/Please provide/请提供” 这类非原文回答。splitter 版本变化时会自动丢弃旧 `temp.pkl`，避免旧翻译缓存与新节点结构错位。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、bibliography 等硬保护区域。
+splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。二次拆分后会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或空白/分隔符类 chunk 会降级回 preserve。相邻正文及其间纯空白会合并成上下文更完整的请求，并以 1800 字符为上限，避免过去“一句一个请求”的碎片化，也避免重新形成无界超长 chunk；作者、单位、邮箱和宏定义等元数据命令不再送给模型。splitter 版本变化时会自动丢弃旧 `temp.pkl`，避免旧翻译缓存与新节点结构错位。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、comment、bibliography 及动态识别的代码/轨迹环境。
+
+LaTeX 全文翻译默认使用 2 路低并发（可通过 `PAPER_TRANS_LLM_WORKERS` 调整），取代上游一次 8 路请求；遇到 429、空响应、本地异常 payload，或英文正文响应仍几乎没有中文时，只把对应 chunk 改为单路重试。补偿重试后仍有失败会终止本轮并拒绝写入 `temp.pkl`，不再把失败位置的英文原文静默合并成“可编译但未翻译”的中文 PDF。
+
+模型可用 `PAPER_TRANS_LLM_MODEL=<model> python3 translate_full.py ...` 单次覆盖，宿主机只会把 `PAPER_TRANS_LLM_MODEL`、worker/retry 等明确白名单变量传入容器，不会透传其他环境或密钥。`insufficient_user_quota`、余额/额度不足会独立归类为 `translate.api_quota / manual_review`，停止盲目重试；需要充值或显式切换到同一凭据已授权、并经过翻译质量验证的模型后再恢复队列。
 
 `latex_translation_filters.py` 统一维护 LaTeX 过滤策略，供 splitter、翻译覆盖率门禁、merge 前 `fix_content` 清理和 fallback 重编译共同使用。对超长普通正文行，splitter 会按句子边界继续拆分，避免长段 cite 密集内容被模型整体回显成英文。CLI/GUI、trace、trajectory、prompt、code、listing、verbatim 等命名特征的自定义环境会被动态识别为硬保护环境；但 fallback 只会从原文恢复真正的 verbatim/listing/trace 类环境，不会把 table/figure/equation 这类普通保护块恢复成英文。
 

@@ -33,6 +33,21 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
     combined = f"{plugin}\n{latex}"
 
     if phase == "translate":
+        if re.search(
+            r"insufficient[_ ](?:user[_ ])?quota|insufficient.*balance|"
+            r"balance .* is insufficient|额度不足|余额不足",
+            plugin,
+            re.I,
+        ):
+            return _result(
+                "translate.api_quota", "api", "manual_review", "recharge_api_balance",
+                "API 余额或额度不足；充值或切换已授权模型凭据后再重试。",
+                _evidence(
+                    plugin,
+                    r"insufficient[_ ](?:user[_ ])?quota|insufficient.*balance|"
+                    r"balance .* is insufficient|额度不足|余额不足",
+                ),
+            )
         if re.search(r"FileNotFoundError.*(?:workfolder|gpt_log/arxiv_cache)", plugin, re.I | re.S):
             return _result(
                 "runtime.workdir_missing", "runtime_path", "reuse_translation", "normalize_compile_workdir",

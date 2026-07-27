@@ -190,16 +190,32 @@ def _terminate_container_driver(arxiv_id: str):
         time.sleep(1)
 
 
+def _container_driver_command(arxiv_id: str):
+    """Build docker exec command with an explicit, bounded LLM env allowlist."""
+    cmd = ["docker", "exec"]
+    for name in (
+        "PAPER_TRANS_LLM_MODEL",
+        "PAPER_TRANS_LLM_WORKERS",
+        "PAPER_TRANS_LLM_RETRIES",
+        "PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS",
+    ):
+        value = os.environ.get(name)
+        if value:
+            cmd.extend(["-e", f"{name}={value}"])
+    cmd.extend([
+        CONTAINER_NAME,
+        "python3", "/tmp/full_translate_driver.py", arxiv_id,
+    ])
+    return cmd
+
+
 def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
                      keep_translation: bool = False):
     """
     在容器内运行翻译驱动，实时流式打印进度，返回 (returncode, stdout_full, "")
     每 30s 打印一次心跳，避免长时间无输出让人误以为卡死。
     """
-    cmd = [
-        "docker", "exec", CONTAINER_NAME,
-        "python3", "/tmp/full_translate_driver.py", arxiv_id,
-    ]
+    cmd = _container_driver_command(arxiv_id)
     if no_cache:
         cmd.append("--no-cache")
     if keep_translation:

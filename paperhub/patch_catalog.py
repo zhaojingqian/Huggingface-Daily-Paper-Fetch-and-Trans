@@ -5,6 +5,12 @@ from typing import Dict, Iterable, List
 
 
 PATCH_CATALOG: Dict[str, Dict[str, object]] = {
+    "translate.api_quota": {
+        "patches": ("recharge_or_switch_authorized_model",),
+        "source": "config_private.py / PAPER_TRANS_LLM_MODEL",
+        "strategy": "manual_review",
+        "note": "余额不足不做盲目重试；充值或显式切换到同一凭据可用且质量验证通过的模型。",
+    },
     "translate.api_auth": {
         "patches": ("fix_api_credentials",),
         "source": "config_private.py / translate_full.py",
@@ -12,10 +18,14 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "note": "凭据类失败不自动重试；先修复 API key 或代理配置，再重跑翻译。",
     },
     "translate.api_rate_limit": {
-        "patches": ("backoff_translation",),
-        "source": "translate_full.py / run_repair.py",
+        "patches": (
+            "throttle_latex_chunk_requests",
+            "retry_failed_translation_chunks",
+            "reject_partial_translation_cache",
+        ),
+        "source": "full_translate_driver.py / translate_full.py",
         "strategy": "retry_later",
-        "note": "记录限流窗口并退避重试，避免重复消耗翻译请求。",
+        "note": "全文翻译默认两路低并发；仅串行重试失败或中文不足的 chunk，仍失败时拒绝缓存英文回填的半成品。",
     },
     "translate.network_timeout": {
         "patches": ("retry_with_backoff",),
@@ -181,10 +191,15 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "note": "清理 input/include 路径空白并校验源码清单，再继续翻译。",
     },
     "quality.untranslated_prose": {
-        "patches": ("split_preserved_prose", "protect_translation_artifacts"),
+        "patches": (
+            "split_preserved_prose",
+            "protect_translation_artifacts",
+            "throttle_latex_chunk_requests",
+            "retry_failed_translation_chunks",
+        ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "扩大正文安全拆分并清理模型回显后重新翻译。",
+        "note": "扩大正文安全拆分、清理模型回显，并串行补齐 429 或中文不足的 chunk 后重新翻译。",
     },
     "compile.latex_error": {
         "patches": ("inspect_first_latex_error",),
