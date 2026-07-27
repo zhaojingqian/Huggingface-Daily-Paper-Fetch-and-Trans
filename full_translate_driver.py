@@ -701,6 +701,7 @@ arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
 
 # 模块级：收集插件运行中所有完整消息（不截断），供 diagnose_failure 分析
 _plugin_msgs_full: list[str] = []
+_last_quality_report: dict = {}
 
 
 def translation_quality_report(workfolder: str) -> dict:
@@ -834,7 +835,9 @@ def check_pdf_integrity(pdf_path: str) -> bool:
 
 
 def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
+    global _last_quality_report
     report = translation_quality_report(workfolder)
+    _last_quality_report = report
     if not report.get("ok"):
         print(
             f"[driver] ❌ 翻译覆盖率检查失败: {arxiv_id_} "
@@ -1303,7 +1306,9 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
-    new_text, total = _ltf.separate_custom_macro_cjk_glue(text)
+    new_text, total = _ltf.repair_duplicated_macro_initials(text)
+    new_text, separated = _ltf.separate_custom_macro_cjk_glue(new_text)
+    total += separated
     new_text, spaced = _ltf.collapse_spaced_cjk_characters(new_text)
     total += spaced
     if total:
@@ -1684,6 +1689,18 @@ def patch_packages_in_documentclass_options(trans_tex_path):
     return total
 
 
+def patch_pdftex_graphics_driver(trans_tex_path):
+    """Let XeLaTeX select the correct graphicx backend."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.remove_pdftex_graphics_driver(text)
+    if total:
+        with open(trans_tex_path, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+        print(f"[driver] 🔧 patch_pdftex_graphics_driver: 移除 {total} 处 pdftex graphicx driver", flush=True)
+    return total
+
+
 def patch_duplicate_end_environments(trans_tex_path):
     """Remove accidental duplicated environment endings produced by translation."""
     import re as _re
@@ -1699,10 +1716,41 @@ def patch_duplicate_end_environments(trans_tex_path):
         return r'\end{' + m.group(1) + '}'
 
     new_text = _re.sub(r'\\end\{(proof|lemma|theorem|proposition|corollary)\}\s*\\end\{\1\}', _replace, text)
+    new_text, unmatched = _ltf.remove_unmatched_environment_endings(
+        new_text,
+        ("tcolorbox",),
+    )
+    total += unmatched
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
         print(f"[driver] 🔧 patch_duplicate_end_environments: 移除了 {total} 个重复 end 环境", flush=True)
+    return total
+
+
+def patch_tikz_matrix_node_linebreaks(trans_tex_path):
+    """Avoid TikZ matrix row-parser confusion from inline node line breaks."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.normalize_tikz_matrix_node_linebreaks(text)
+    if not total:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print(f"[driver] 🔧 patch_tikz_matrix_node_linebreaks: 修复 {total} 处节点换行", flush=True)
+    return total
+
+
+def patch_fragile_tikz_matrix_legends(trans_tex_path):
+    """Omit explicit-command legends that break TikZ matrix parsing."""
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    new_text, total = _ltf.disable_fragile_tikz_matrix_legends(text)
+    if not total:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print(f"[driver] 🔧 patch_fragile_tikz_matrix_legends: 省略 {total} 个不兼容图例", flush=True)
     return total
 
 
@@ -2003,6 +2051,82 @@ def patch_local_pdftex_primitives(workfolder):
         total += count
     if total:
         print(f"[driver] 🔧 patch_local_pdftex_primitives: guard {total} 处本地 pdfTeX primitive", flush=True)
+    return total
+
+
+def patch_local_xelatex_compatibility_fallbacks(workfolder):
+    """Apply early font-command compatibility to local class/style files."""
+    total = 0
+    targets = (
+        glob.glob(os.path.join(workfolder, '**/*.cls'), recursive=True)
+        + glob.glob(os.path.join(workfolder, '**/*.sty'), recursive=True)
+    )
+    for path in sorted(set(targets)):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+        fixed, count = _ltf.add_xelatex_compatibility_fallbacks(text)
+        if not count:
+            continue
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(fixed)
+        total += count
+    if total:
+        print(f"[driver] 🔧 patch_local_xelatex_compatibility_fallbacks: 补充 {total} 处本地兼容命令", flush=True)
+    return total
+
+
+def patch_local_textls_fallback(workfolder, trans_tex_path):
+    """Expose a main-document textls fallback for local report styles."""
+    uses_textls = False
+    for path in glob.glob(os.path.join(workfolder, '**/*.sty'), recursive=True):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                if r'\textls' in f.read():
+                    uses_textls = True
+                    break
+        except Exception:
+            continue
+    if not uses_textls:
+        return 0
+
+    with open(trans_tex_path, encoding='utf-8') as f:
+        text = f.read()
+    if r'\providecommand{\textls}' in text:
+        return 0
+    insertion = (
+        r'% paper-trans fallback for unavailable microtype tracking'
+        '\n'
+        r'\providecommand{\textls}[2][]{#2}'
+    )
+    new_text, ok = _insert_before_begin_document(text, insertion)
+    if not ok:
+        return 0
+    with open(trans_tex_path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    print("[driver] 🔧 patch_local_textls_fallback: 补充本地样式 textls fallback", flush=True)
+    return 1
+
+
+def patch_local_sourcesans3_family(workfolder):
+    """Map SourceSans3 to the compatible SourceSansPro fonts in TeX Live."""
+    total = 0
+    for path in glob.glob(os.path.join(workfolder, '**/*.sty'), recursive=True):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+        except Exception:
+            continue
+        fixed, count = _ltf.fallback_sourcesans3_family(text)
+        if not count:
+            continue
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(fixed)
+        total += count
+    if total:
+        print(f"[driver] 🔧 patch_local_sourcesans3_family: 回退 {total} 处 SourceSans3 字体族", flush=True)
     return total
 
 
@@ -2720,12 +2844,16 @@ def patch_and_recompile(workfolder, arxiv_id_):
     print(f"[driver] 🔧 检测到编译失败但翻译已完成，尝试 verbatim 修补+重编译...", flush=True)
     patch_body_endinput(trans_tex)
     patch_packages_in_documentclass_options(trans_tex)
+    patch_pdftex_graphics_driver(trans_tex)
     fix_label_ref_emdash(trans_tex)
     patch_tcolorbox_opening_options(trans_tex, orig_tex)
     patch_tcolorbox_small_groups(trans_tex)
     patch_fontawesome_legacy_aliases(trans_tex)
     patch_declare_unicode_character_fallback(trans_tex)
     patch_xelatex_compatibility_fallbacks(trans_tex)
+    patch_local_xelatex_compatibility_fallbacks(workfolder)
+    patch_local_textls_fallback(workfolder, trans_tex)
+    patch_local_sourcesans3_family(workfolder)
     patch_missing_math_aliases(trans_tex)
     patch_local_pdftex_primitives(workfolder)
     patch_pdftex_primitives_for_xelatex(trans_tex)
@@ -2757,6 +2885,8 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_missing_graphics(trans_tex)
     patch_fragile_cleveref_references(trans_tex)
     patch_duplicate_end_environments(trans_tex)
+    patch_fragile_tikz_matrix_legends(trans_tex)
+    patch_tikz_matrix_node_linebreaks(trans_tex)
     patch_undefined_unique_ref_labels(trans_tex)
     patch_dangling_href_commands(trans_tex, orig_tex)
     clean_latex_intermediates(workfolder)
@@ -2832,6 +2962,20 @@ def patch_and_recompile(workfolder, arxiv_id_):
     except Exception as e:
         print(f"[driver] ⚠️  LaTeX/BibTeX 执行异常: {e}", flush=True)
         return None
+
+    if (
+        check_pdf_integrity(output_pdf)
+        and not latex_compile_health_ok(workfolder, arxiv_id_, strict=False)
+    ):
+        print("[driver] 🔁 xelatex 产物含真实编译错误，切换 lualatex 做兼容重编译", flush=True)
+        clean_latex_intermediates(workfolder)
+        synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
+        if synthesized_bbl:
+            patch_bibliography_to_generated_bbl(workfolder, trans_tex)
+        try:
+            _run_latex_cmds(_latex_cmds('lualatex', synthesized_bbl))
+        except Exception as e:
+            print(f"[driver] ⚠️  lualatex 兼容重编译失败: {e}", flush=True)
 
     if check_pdf_integrity(output_pdf):
         kb = os.path.getsize(output_pdf) // 1024
@@ -2943,7 +3087,16 @@ def diagnose_failure(workfolder, arxiv_id_):
 
     # ── 3. 稳定分类 + 可执行重试策略 ──────────────────────────────────────
     diagnostic_text = '\n'.join(errors_raw + [tex_log_tail])
-    classified = classify_failure(phase, diagnostic_text, plugin_error_full)
+    if phase == "compile" and _last_quality_report and not _last_quality_report.get("ok"):
+        quality_evidence = (
+            "翻译覆盖率检查失败: "
+            f"cjk_pct={_last_quality_report.get('cjk_pct', 0):.1f}% "
+            f"long_english_lines={_last_quality_report.get('long_english_lines', 0)} "
+            f"prose_lines={_last_quality_report.get('prose_lines', 0)}"
+        )
+        classified = classify_failure("compile", quality_evidence, plugin_error_full)
+    else:
+        classified = classify_failure(phase, diagnostic_text, plugin_error_full)
 
     diag = {
         'arxiv_id':          arxiv_id_,

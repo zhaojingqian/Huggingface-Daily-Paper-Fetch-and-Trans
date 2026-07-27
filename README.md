@@ -89,9 +89,22 @@ python3 scripts/summarize_failures.py
 python3 scripts/summarize_failures.py --json
 ```
 
+已安装的 Codex skill 为 `$paper-trans-repair`（本机路径
+`/root/.codex/skills/paper-trans-repair`）。后续可直接要求“用
+`$paper-trans-repair` 修复近两周论文并沉淀 patch”；skill 会覆盖
+daily、weekly、monthly、manual 和递归 topic 索引，串行修复 PDF，
+按 taxonomy 登记通用 patch，并在更新文档、测试和 push 前执行审计。
+skill 自带的近窗审计命令为：
+
+```bash
+/root/.pyenv/versions/3.10.13/bin/python3 \
+  /root/.codex/skills/paper-trans-repair/scripts/recent_audit.py \
+  --repo /root/workspace/paper-trans --days 14 --json
+```
+
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。失败诊断会同时写入便于阅读的 `logs/pdf_errors/<id>.log` 和便于程序处理的 `<id>.json`，稳定字段包括 `phase`、`category`、`family`、`retry_strategy`、`repair_action` 和 `evidence`。`reuse_translation` 表示保留中文 tex、定向修补后重编译；只有明确分类为 `retry_translation` 才会清缓存再次调用 GPT，未知驱动异常也不会自动浪费一次全文重译。若没有翻译 tex 且源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 翻译/编译。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：已有 PDF 但 JSON 仍为 failed 时回写 `ok`；slim index 标记 `ok` 但 PDF 实体缺失时自动降级进入重试。
 
-失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的宏递归、资源缺失、依赖缺失、旧式 CJK 环境、pdfTeX 原语、未定义命令、结构损坏、数值/单位语法、数学/表格、verbatim、资源耗尽、翻译覆盖率和普通 LaTeX 错误。`paperhub/patch_catalog.py` 为每个结构化类别登记 patch、来源和策略；`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
+失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的模型序列化残留、字体族缺失、引擎/driver 不匹配、pdfTeX 原语、环境失配、TikZ matrix 图例、宏首字母重复、未定义命令、结构损坏、数学/表格、verbatim、资源耗尽和普通 LaTeX 错误；翻译覆盖不足固定归入独立的 `quality.untranslated_prose`，不会再误报为 `compile.unknown`。`paperhub/patch_catalog.py` 为每个结构化类别登记 patch、来源和策略；`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
 
 topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套分类式 PDF retry 逻辑。paper store 的完整翻译缓存要求中文标题和中文总结同时有效；只残留标题的历史条目会重新抓取元数据并补译，同时保留原 `pdf_status`。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 

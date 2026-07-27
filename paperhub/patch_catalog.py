@@ -41,6 +41,58 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "strategy": "retry_translation",
         "note": "检查翻译输出是否为空、被截断或包含模型回显后再重试。",
     },
+    "translate.summary_response_format": {
+        "patches": (
+            "normalize_chat_completion_content",
+            "repair_odd_json_backslashes",
+            "recover_truncated_summary_from_tex",
+        ),
+        "source": "translate_arxiv.py",
+        "strategy": "retry_translation",
+        "note": "兼容网关字段、截断 JSON 和 LaTeX 反斜杠，并从成功中文 TeX 回填摘要。",
+    },
+    "compile.model_response_leak": {
+        "patches": ("strip_serialized_translation_artifact",),
+        "source": "latex_translation_filters.py / full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "移除独立成行的序列化 translation JSON/list，保留中文 TeX 直接重编译。",
+    },
+    "compile.font_family_missing": {
+        "patches": ("fallback_sourcesans3_family", "patch_local_textls_fallback"),
+        "source": "latex_translation_filters.py / full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "将 SourceSans3 映射到镜像内 SourceSansPro，并补本地样式 textls fallback。",
+    },
+    "compile.engine_driver_mismatch": {
+        "patches": ("remove_pdftex_graphics_driver",),
+        "source": "latex_translation_filters.py / full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "移除 graphicx 的 pdftex 强制 driver，让 XeLaTeX 自动选择正确后端。",
+    },
+    "compile.engine_specific": {
+        "patches": ("fallback_lualatex_on_xelatex_health_failure",),
+        "source": "full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "XeLaTeX 生成带真实错误的 PDF 时，清理中间文件并用 LuaLaTeX 兼容重编译。",
+    },
+    "compile.unmatched_environment": {
+        "patches": ("remove_unmatched_environment_ending",),
+        "source": "latex_translation_filters.py / full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "使用环境栈删除无匹配 begin 的 tcolorbox 结束标签。",
+    },
+    "compile.tikz_matrix_legend": {
+        "patches": ("disable_fragile_tikz_matrix_legends",),
+        "source": "latex_translation_filters.py / full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "仅省略被显式 node/draw 破坏的 matrix 图例，保留主图、数据和图注。",
+    },
+    "compile.duplicated_macro_initial": {
+        "patches": ("repair_duplicated_macro_initials",),
+        "source": "latex_translation_filters.py / full_translate_driver.py",
+        "strategy": "reuse_translation",
+        "note": "依据原始 TeX 的已定义宏，恢复被翻译重复的宏名首字母。",
+    },
     "compile.asset_missing": {
         "patches": ("patch_missing_graphics",),
         "source": "full_translate_driver.py",

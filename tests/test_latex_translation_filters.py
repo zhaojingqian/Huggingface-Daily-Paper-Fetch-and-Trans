@@ -86,6 +86,22 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertNotIn("Certainly!", stripped)
         self.assertNotIn("Please provide", stripped)
 
+    def test_strip_serialized_translation_artifacts(self):
+        text = (
+            "正文。\n"
+            '  "translation": "\\\\section{引言}\\\\n伪造内容。"\n'
+            '["\\\\section{数据处理}\\\\n伪造内容。"]\n'
+            "后文。"
+        )
+
+        stripped, count = filters.strip_llm_translation_artifacts(text)
+
+        self.assertEqual(count, 2)
+        self.assertIn("正文。", stripped)
+        self.assertIn("后文。", stripped)
+        self.assertNotIn('"translation"', stripped)
+        self.assertNotIn("数据处理", stripped)
+
     def test_separate_custom_macro_cjk_glue(self):
         text = (
             r"\newcommand{\methodshort}{Data2Story}" "\n"
@@ -106,6 +122,18 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn(r"\methodshort ，", fixed)
         self.assertIn(r"\yespart 标记", fixed)
         self.assertIn(r"\witharg中文", fixed)
+
+    def test_repairs_duplicated_macro_initial(self):
+        text = (
+            r"\newcommand{\ndiffbase}{9--51\%}" "\n"
+            r"结果为\nndiffbase的提升。"
+        )
+
+        fixed, count = filters.repair_duplicated_macro_initials(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\ndiffbase的提升", fixed)
+        self.assertNotIn(r"\nndiffbase", fixed)
 
     def test_separate_custom_macro_empty_group_cjk_glue(self):
         text = (
@@ -144,17 +172,19 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             r"\pdfgentounicode =1" "\n"
             r"\pdfinfoomitdate=1" "\n"
             r"  \pdfmapline{+font < font.ttf < enc.enc}" "\n"
+            r"\pdfinclusioncopyfonts=1" "\n"
             r"\ifdefined\pdfinfo\pdfinfo{/Title(Test)}\fi" "\n"
             r"\section{正文}"
         )
 
         fixed, count = filters.guard_pdftex_primitive_lines(text)
 
-        self.assertEqual(count, 4)
+        self.assertEqual(count, 5)
         self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfgentounicode\pdfgentounicode =1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfinfoomitdate\pdfinfoomitdate=1\fi", fixed)
         self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
+        self.assertIn(r"\ifdefined\pdfinclusioncopyfonts\pdfinclusioncopyfonts=1\fi", fixed)
         self.assertEqual(fixed.count(r"\ifdefined\pdfinfo\pdfinfo"), 1)
 
     def test_replace_bare_citation_commands_glued_to_cjk(self):
@@ -225,6 +255,18 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual(fixed, "\\AtBeginDocument{\\relax}\n\\relax")
 
+    def test_disable_microtype_loads_provides_textls_fallback(self):
+        text = (
+            r"\RequirePackage[tracking]{microtype}" "\n"
+            r"\newcommand{\heading}{\textls[18]{Title}}"
+        )
+
+        fixed, count = filters.disable_microtype_package_loads(text)
+
+        self.assertGreaterEqual(count, 2)
+        self.assertIn(r"\providecommand{\textls}[2][]{#2}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\textls}"), fixed.index(r"\textls[18]"))
+
     def test_normalize_tex_include_target_strips_harmless_whitespace(self):
         self.assertEqual(filters.normalize_tex_include_target(" 6_conclusion \n"), "6_conclusion")
 
@@ -254,6 +296,63 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn("boxsep=1.5mm, attach boxed title to top left", fixed)
         self.assertIn("正文", fixed)
 
+    def test_remove_unmatched_tcolorbox_ending(self):
+        text = (
+            r"\begin{tcolorbox}外层"
+            r"\begin{tcolorbox}内层\end{tcolorbox}"
+            r"\end{tcolorbox}"
+            r"\end{tcolorbox}"
+        )
+
+        fixed, count = filters.remove_unmatched_environment_endings(text)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(fixed.count(r"\begin{tcolorbox}"), 2)
+        self.assertEqual(fixed.count(r"\end{tcolorbox}"), 2)
+
+    def test_normalizes_tikz_matrix_node_linebreak(self):
+        text = (
+            r"\matrix [matrix of nodes] at (current bounding box.north east) {"
+            "\n"
+            r"\node {Pareto-Performance\\Frontier}; & \node {Value}; \\"
+            "\n"
+            r"};"
+        )
+
+        fixed, count = filters.normalize_tikz_matrix_node_linebreaks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn("Pareto-Performance Frontier", fixed)
+        self.assertIn(r"\node {Value}; \\", fixed)
+
+    def test_disables_fragile_tikz_matrix_legend(self):
+        text = (
+            r"\begin{tikzpicture}" "\n"
+            r"\matrix [matrix of nodes] at (current bounding box.north east) {" "\n"
+            r"\node {Value}; & \draw (0,0) -- (1,0); \\" "\n"
+            r"};" "\n"
+            r"\draw (0,0) -- (2,2);" "\n"
+            r"\end{tikzpicture}"
+        )
+
+        fixed, count = filters.disable_fragile_tikz_matrix_legends(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn("omitted incompatible TikZ matrix legend", fixed)
+        self.assertIn(r"\draw (0,0) -- (2,2);", fixed)
+
+    def test_keeps_main_tikz_matrix_diagram(self):
+        text = (
+            r"\matrix (graph) [matrix of nodes] {" "\n"
+            r"\node {A}; & \node {B}; \\" "\n"
+            r"};"
+        )
+
+        fixed, count = filters.disable_fragile_tikz_matrix_legends(text)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(fixed, text)
+
     def test_relocate_packages_from_documentclass_options(self):
         text = "\\documentclass[\n\\usepackage{ctex}\n  11pt,\n]{article}\n正文"
 
@@ -263,6 +362,37 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn("11pt,", fixed)
         self.assertGreater(fixed.index(r"\usepackage{ctex}"), fixed.index(r"]{article}"))
         self.assertNotIn("\\documentclass[\n\\usepackage", fixed)
+
+    def test_remove_pdftex_graphics_driver(self):
+        text = (
+            r"\usepackage[pdftex]{graphicx}" "\n"
+            r"\RequirePackage[pdftex,demo]{graphicx}" "\n"
+            r"\usepackage[demo]{graphicx}"
+        )
+
+        fixed, count = filters.remove_pdftex_graphics_driver(text)
+
+        self.assertEqual(count, 2)
+        self.assertIn(r"\usepackage{graphicx}", fixed)
+        self.assertIn(r"\RequirePackage[demo]{graphicx}", fixed)
+        self.assertEqual(fixed.count(r"\usepackage[demo]{graphicx}"), 1)
+
+    def test_fallback_sourcesans3_family(self):
+        fixed, count = filters.fallback_sourcesans3_family(
+            r"\newfontfamily\sourcesans{SourceSans3}"
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn("{SourceSansPro}", fixed)
+
+    def test_adds_textls_fallback_for_local_style(self):
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(
+            r"\newcommand{\heading}{\textls[18]{Title}}"
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\textls}[2][]{#2}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\textls}"), fixed.index(r"\textls[18]"))
 
     def test_demote_structural_commands_in_captions(self):
         text = (

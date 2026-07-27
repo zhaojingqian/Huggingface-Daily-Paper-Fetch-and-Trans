@@ -2,6 +2,17 @@
 
 ---
 
+## v4.35 — 2026-07-27
+
+### 近两周全模式修复、skill 化与失败分类收口
+
+- **审计范围**：覆盖 `2026-07-14` 至 `2026-07-27` 的 58 个 daily、weekly、manual、topic 索引，共 125 篇唯一论文；补齐 `2606.19927`、`2607.14485`、`2607.18293` 的 paper store 中文元数据，最终 `missing_store=0`、`missing_translation=0`、`ok_missing_pdf=0`。
+- **PDF 恢复**：12 篇失败论文通过复用中文 TeX、定向通用 patch 或一次受控重译恢复：`2605.09635`、`2606.22830`、`2606.26397`、`2606.27369`、`2606.30851`、`2607.07820`、`2607.14506`、`2607.17250`、`2607.17423`、`2607.18955`、`2607.19232`、`2607.19395`。
+- **通用 patch**：新增模型 JSON/list 残留清理、SourceSans3 字体回退、错误 pdftex graphicx driver 移除、pdfTeX primitive guard、无匹配环境结束清理、本地 class/style 字体兼容、TikZ matrix 脆弱图例降级和重复宏首字母恢复；摘要翻译兼容 list content、`reasoning_content`、奇数 JSON 反斜杠、截断响应及成功 TeX 回填。
+- **分类与效率**：旧 sidecar 为 `compile.unknown` 时会从完整驱动日志重分类；显式覆盖率失败固定为 `quality.untranslated_prose`，并以有界证据避免对 10–20MB 日志执行全量正则，近窗分类耗时由约 50 秒降至约 5 秒。
+- **Codex skill**：新增并验证本机 `$paper-trans-repair`，固化近两周全模式审计、串行重试、taxonomy/patch catalog/test 闭环、文档更新和 release gate。root crontab 保持每周日 02:00 调用 `scripts/repair_weekly_current.py`，等待 weekly 索引和共享锁后沉淀运行历史。
+- **明确剩余**：`2606.28562`、`2606.30339`、`2607.13399`、`2607.14614`、`2607.15161` 已完成一次受控全文重译且 LaTeX 可编译，但中文覆盖率仅 1.8%–30.1%，被质量门禁拒绝发布；它们统一保留为 `quality.untranslated_prose / retry_translation`，不再混入编译故障。
+
 ## v4.34 — 2026-07-20
 
 ### 周末当前周修复调度与通用补丁沉淀

@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from paperhub import paper_store
-from paperhub.paths import PAPER_STORE_DIR
+from paperhub.paths import PAPER_STORE_DIR, TEX_BACKUP_DIR
 
 # 读取 gpt-academic 配置
 GPT_ACADEMIC_CONFIG = "/root/workspace/gpt-academic/config_private.py"
@@ -160,7 +160,62 @@ def load_api_config():
     return config
 
 
-def call_llm(messages, config, max_tokens=4000, max_retries=3):
+def _extract_chat_completion_text(response_payload):
+    """Normalize text from OpenAI-compatible chat completion responses."""
+    choices = response_payload.get("choices") if isinstance(response_payload, dict) else None
+    if not choices or not isinstance(choices[0], dict):
+        raise ValueError("LLM 响应缺少 choices")
+
+    choice = choices[0]
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+    content = message.get("content")
+
+    if isinstance(content, str) and content.strip():
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, dict):
+                text = text.get("value")
+            if isinstance(text, str):
+                parts.append(text)
+        combined = "\n".join(part for part in parts if part.strip())
+        if combined:
+            return combined
+
+    # Some OpenAI-compatible gateways place the generated answer in a
+    # compatibility field while leaving message.content empty.
+    for value in (message.get("reasoning_content"), choice.get("text")):
+        if isinstance(value, str) and value.strip():
+            return value
+
+    raise ValueError("LLM 响应不含可用文本")
+
+
+def _repair_json_backslashes(value):
+    """Make odd LaTeX backslash runs safe without changing valid JSON escapes."""
+    source = value or ""
+
+    def replace(match):
+        run = match.group(0)
+        if len(run) % 2 == 0:
+            return run
+        tail = source[match.end():]
+        if re.match(r'^(?:["\\/bfnrt]|u[0-9a-fA-F]{4})', tail):
+            return run
+        return run + "\\"
+
+    return re.sub(r"(?<!\\)\\+", replace, source)
+
+
+def call_llm(messages, config, max_tokens=4000, max_retries=3, response_format=None):
     """调用 LLM API，带指数退避重试（代理失败自动切直连）"""
     url = config["api_base"]
     if not url.endswith("/chat/completions"):
@@ -177,6 +232,8 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3):
         "max_tokens": max_tokens,
         "temperature": 0.3,
     }
+    if response_format:
+        payload["response_format"] = response_format
 
     proxies = {"http": PROXY, "https": PROXY}
     last_exc = None
@@ -186,7 +243,7 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3):
             resp = requests.post(url, headers=headers, json=payload,
                                  proxies=proxies, timeout=120)
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            return _extract_chat_completion_text(resp.json())
         except requests.exceptions.ProxyError:
             if proxies.get("https"):
                 print("  ⚠️ LLM 代理失败，切换直连重试...", flush=True)
@@ -302,20 +359,58 @@ def translate_paper(meta, config, max_retries=3):
     ]
 
     empty = {"title_zh": "", "abstract_zh": "", "keywords_zh": [], "summary_zh": ""}
+    best_partial = dict(empty)
 
     for attempt in range(max_retries):
         try:
-            result = call_llm(messages, config, max_tokens=2000)
+            result = call_llm(
+                messages,
+                config,
+                max_tokens=2000,
+                response_format={"type": "json_object"},
+            )
             json_match = re.search(r'\{.*\}', result, re.DOTALL)
             if not json_match:
-                print(f"  ⚠️ 翻译响应不含 JSON (尝试 {attempt+1}/{max_retries})", flush=True)
+                # Preserve completed fields from a token-truncated JSON object.
+                # A long/repetitive abstract must not discard a valid title.
+                for field in ("title_zh", "abstract_zh", "summary_zh"):
+                    match = re.search(
+                        r'"' + field + r'"\s*:\s*"((?:\\.|[^"\\])*)"',
+                        result,
+                        re.DOTALL,
+                    )
+                    if not match:
+                        continue
+                    try:
+                        value = json.loads('"' + match.group(1) + '"')
+                    except json.JSONDecodeError:
+                        continue
+                    if _has_chinese(value):
+                        best_partial[field] = value
+                recovered = _complete_translation_from_tex(
+                    meta.get("arxiv_id", ""),
+                    best_partial,
+                )
+                if (
+                    _has_chinese(recovered.get("title_zh", ""))
+                    and _has_chinese(recovered.get("summary_zh", ""))
+                ):
+                    return recovered
+                preview = re.sub(r"\s+", " ", result).strip()[:240]
+                print(
+                    f"  ⚠️ 翻译响应不含 JSON (尝试 {attempt+1}/{max_retries}, "
+                    f"长度={len(result)}, 预览={preview!r})",
+                    flush=True,
+                )
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                 continue
             json_str = json_match.group()
             # 修复 LLM 返回的 JSON 中由 LaTeX/数学符号引入的非法转义序列
-            # 合法的 JSON escape: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
-            json_str = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
+            # 合法的 JSON escape: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX。
+            # Do not treat every ``\u`` prefix as valid: LaTeX commands such
+            # as ``\underbrace`` otherwise survive and break json.loads.
+            json_str = _repair_json_backslashes(json_str)
             parsed = json.loads(json_str)
             # 校验：title_zh 必须含中文字符
             if not _has_chinese(parsed.get("title_zh", "")):
@@ -325,7 +420,12 @@ def translate_paper(meta, config, max_retries=3):
                 continue
             return parsed
         except json.JSONDecodeError as e:
-            print(f"  ⚠️ JSON 解析失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
+            context = json_str[max(0, e.pos - 40):e.pos + 40] if "json_str" in locals() else ""
+            print(
+                f"  ⚠️ JSON 解析失败 (尝试 {attempt+1}/{max_retries}): {e}; "
+                f"上下文={context!r}",
+                flush=True,
+            )
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
         except Exception as e:
@@ -334,7 +434,57 @@ def translate_paper(meta, config, max_retries=3):
                 time.sleep(2 ** attempt)
 
     print(f"  ❌ 翻译最终失败（已重试 {max_retries} 次）", flush=True)
-    return empty
+    return best_partial
+
+
+def _plain_text_from_latex(text):
+    """Convert a small translated abstract fragment to readable cache text."""
+    value = text or ""
+    value = re.sub(
+        r"\*?\{\\scriptsize\\textbf\{警告：.*?禁止移除或修改此警告。\}\}\s*\\\\?",
+        "",
+        value,
+        flags=re.DOTALL,
+    )
+    value = re.sub(r"\\(?:url|href)\{([^{}]*)\}(?:\{([^{}]*)\})?", lambda m: m.group(2) or m.group(1), value)
+    value = re.sub(r"\\(?:textbf|textit|emph|texttt|small|footnotesize)\{([^{}]*)\}", r"\1", value)
+    value = re.sub(r"\\(?:cite|citep|citet)\{[^{}]*\}", "", value)
+    value = re.sub(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?", "", value)
+    value = value.replace("{", "").replace("}", "")
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _complete_translation_from_tex(arxiv_id, translation):
+    """Fill truncated summary responses from a successful translated TeX cache."""
+    result = dict(translation or {})
+    tex_path = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
+    if not os.path.exists(tex_path):
+        return result
+    try:
+        with open(tex_path, encoding="utf-8", errors="replace") as handle:
+            tex = handle.read()
+    except OSError:
+        return result
+
+    match = re.search(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", tex, re.DOTALL)
+    abstract_zh = _plain_text_from_latex(match.group(1)) if match else ""
+    if abstract_zh and _has_chinese(abstract_zh):
+        result.setdefault("abstract_zh", "")
+        if not _has_chinese(result["abstract_zh"]):
+            result["abstract_zh"] = abstract_zh
+        if not _has_chinese(result.get("summary_zh", "")):
+            sentences = [part.strip() for part in re.split(r"(?<=[。！？])", abstract_zh) if part.strip()]
+            result["summary_zh"] = "".join(sentences[:2]) or abstract_zh[:240]
+
+    if not result.get("keywords_zh"):
+        keywords = re.search(r"\\keywords\{([^{}]+)\}", tex, re.DOTALL)
+        if keywords:
+            result["keywords_zh"] = [
+                _plain_text_from_latex(item).strip()
+                for item in re.split(r"\\and|[,，;；]", keywords.group(1))
+                if _plain_text_from_latex(item).strip()
+            ][:8]
+    return result
 
 
 def generate_html(meta, translation, rank, week_str, pdf_zh=None):
@@ -642,6 +792,7 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None,
 
         print(f"  🌐 翻译中...", flush=True)
         translation = translate_paper(meta, config)
+        translation = _complete_translation_from_tex(arxiv_id, translation)
 
         if translation.get("title_zh"):
             print(f"  ✅ 译文: {translation['title_zh'][:50]}...", flush=True)

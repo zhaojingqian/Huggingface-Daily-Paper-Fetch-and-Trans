@@ -23,6 +23,30 @@ def load_failure_records(error_dir: str) -> List[Dict[str, object]]:
         data = read_json(str(path), {})
         if isinstance(data, dict):
             aid = str(data.get("arxiv_id") or path.stem)
+            # Older sidecars could only see the final compile result and therefore
+            # labelled a translation-coverage rejection as compile.unknown. Prefer
+            # the richer driver log when it can turn an unknown into a stable class.
+            if data.get("category") in {"compile.unknown", "unknown.unstructured"}:
+                log_path = base / f"{path.stem}.log"
+                if log_path.is_file():
+                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    coverage_pos = log_text.find("翻译覆盖率检查失败")
+                    if coverage_pos < 0:
+                        coverage_pos = log_text.lower().find("translation coverage")
+                    # Coverage failures are explicit and may live in multi-megabyte
+                    # driver logs. Classify the bounded evidence instead of running
+                    # every fallback regex across the entire transcript.
+                    evidence = (
+                        log_text[max(0, coverage_pos - 120):coverage_pos + 360]
+                        if coverage_pos >= 0 else log_text
+                    )
+                    refined = classify_failure("compile", evidence)
+                    if refined.get("category") != "compile.unknown":
+                        preserved = {
+                            key: value for key, value in data.items()
+                            if key not in refined and key not in {"category", "family"}
+                        }
+                        data = {**preserved, **refined, "reclassified_from": data.get("category")}
             data["arxiv_id"] = aid
             records[aid] = data
 
@@ -50,4 +74,3 @@ def summarize_failures(records: List[Dict[str, object]]) -> Dict[str, object]:
         "by_retry_strategy": dict(sorted(strategies.items())),
         "papers": records,
     }
-

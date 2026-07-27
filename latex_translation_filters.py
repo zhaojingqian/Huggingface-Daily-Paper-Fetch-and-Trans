@@ -114,6 +114,16 @@ def verbatim_restore_envs(*contents: str, extra_envs: Iterable[str] = ()) -> Set
 
 
 LLM_ARTIFACT_PATTERNS = (
+    # Occasionally the model leaks a serialized response as a standalone TeX
+    # line. These synthetic payloads are not paper content, and literal ``\n``
+    # escapes inside them break compilation.
+    re.compile(
+        r'(?m)^[ \t]*"translation"\s*:\s*"(?:\\.|[^"\\])*"\s*,?[ \t]*$'
+    ),
+    re.compile(
+        r'(?m)^[ \t]*\[\s*"(?:\\.|[^"\\])*"'
+        r'(?:\s*,\s*"(?:\\.|[^"\\])*")*\s*\][ \t]*$'
+    ),
     re.compile(
         r"\n\\section\{引言\}\s*\n\s*在过去的几十年中.*?"
         r"我们希望本工作能够为相关领域提供新的思路和工具。\s*",
@@ -309,6 +319,83 @@ def restore_environment_opening_options(
     return fixed, len(replacements)
 
 
+def remove_unmatched_environment_endings(
+    text: str,
+    environments: Iterable[str] = ("tcolorbox",),
+) -> Tuple[str, int]:
+    """Remove closing tags that have no matching earlier opening tag."""
+    source = text or ""
+    allowed = set(environments)
+    depths = {name: 0 for name in allowed}
+    removals = []
+    pattern = re.compile(r"\\(?P<kind>begin|end)\{(?P<name>[^{}]+)\}")
+    for match in pattern.finditer(source):
+        name = match.group("name")
+        if name not in allowed:
+            continue
+        if match.group("kind") == "begin":
+            depths[name] += 1
+        elif depths[name]:
+            depths[name] -= 1
+        else:
+            removals.append((match.start(), match.end()))
+
+    fixed = source
+    for start, end in reversed(removals):
+        fixed = fixed[:start] + fixed[end:]
+    return fixed, len(removals)
+
+
+def normalize_tikz_matrix_node_linebreaks(text: str) -> Tuple[str, int]:
+    """Replace inline ``\\`` inside TikZ matrix node text with a safe space."""
+    source = text or ""
+    pattern = re.compile(
+        r"\\matrix\b.*?^[ \t]*\};[ \t]*$",
+        re.DOTALL | re.MULTILINE,
+    )
+    total = 0
+
+    def replace_block(match):
+        nonlocal total
+        block, count = re.subn(
+            r"(?<=[A-Za-z0-9)])\\\\(?=[A-Za-z0-9(])",
+            " ",
+            match.group(0),
+        )
+        total += count
+        return block
+
+    return pattern.sub(replace_block, source), total
+
+
+def disable_fragile_tikz_matrix_legends(text: str) -> Tuple[str, int]:
+    """Omit matrix-of-nodes legends that embed explicit node/draw commands."""
+    pattern = re.compile(
+        r"\\matrix\b.*?^[ \t]*\};[ \t]*$",
+        re.DOTALL | re.MULTILINE,
+    )
+
+    total = 0
+
+    def replace(match):
+        nonlocal total
+        block = match.group(0)
+        if "matrix of nodes" not in block:
+            return block
+        # A matrix-of-nodes is also a valid way to build the main diagram.
+        # Restrict this lossy fallback to blocks positioned as legends around
+        # the current picture bounding box (or explicitly named as a legend).
+        lowered = block.lower()
+        if "current bounding box" not in lowered and "legend" not in lowered:
+            return block
+        if r"\node" not in block and r"\draw" not in block:
+            return block
+        total += 1
+        return "% paper-trans: omitted incompatible TikZ matrix legend"
+
+    return pattern.sub(replace, text or ""), total
+
+
 def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
     """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
     source = text or ""
@@ -344,6 +431,10 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         r"\xspace" in source
         and not _latex_command_defined(source, "xspace")
         and not _latex_package_loaded(source, "xspace")
+    )
+    needs_textls_fallback = (
+        r"\textls" in source
+        and not _latex_command_defined(source, "textls")
     )
     needs_abscontent_fallback = (
         r"\abscontent" in source
@@ -422,6 +513,14 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\xspace}{}",
         ])
         source, changed = _insert_latex_preamble_snippet(source, insertion, ["xspace"])
+        total += int(changed)
+
+    if needs_textls_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for unavailable microtype tracking",
+            r"\providecommand{\textls}[2][]{#2}",
+        ])
+        source, changed = _insert_latex_preamble_snippet(source, insertion, ["textls"])
         total += int(changed)
 
     if needs_abscontent_fallback:
@@ -615,6 +714,28 @@ def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
     return new_text, total
 
 
+def repair_duplicated_macro_initials(text: str) -> Tuple[str, int]:
+    r"""Repair undefined ``\nname`` when the defined zero-arg macro is ``\name``."""
+    source = text or ""
+    macro_names = {
+        (match.group(1) or match.group(2))
+        for match in ZERO_ARG_COMMAND_DEF_RE.finditer(source)
+        if match.group(3) in (None, "0") and (match.group(1) or match.group(2))
+    }
+    total = 0
+    for name in sorted(macro_names, key=len, reverse=True):
+        duplicated = name[0] + name
+        if duplicated in macro_names:
+            continue
+        source, count = re.subn(
+            r"\\" + re.escape(duplicated) + r"(?![A-Za-z@])",
+            r"\\" + name,
+            source,
+        )
+        total += count
+    return source, total
+
+
 def strip_redundant_macro_empty_groups(text: str, macro_names: Set[str]) -> Tuple[str, int]:
     """Drop ``\\name{}`` before CJK text when ``\\name`` is zero-argument."""
     if not macro_names:
@@ -691,6 +812,15 @@ def disable_microtype_package_loads(text: str) -> Tuple[str, int]:
     for pattern in command_patterns:
         source, count = pattern.subn(r"\\relax", source)
         total += count
+    if r"\textls" in source and not _latex_command_defined(source, "textls"):
+        source, changed = _insert_latex_preamble_snippet(
+            source,
+            r"% paper-trans fallback after disabling microtype"
+            "\n"
+            r"\providecommand{\textls}[2][]{#2}",
+            ("textls",),
+        )
+        total += int(changed)
     return source, total
 
 
@@ -713,6 +843,37 @@ def relocate_packages_from_documentclass_options(text: str) -> Tuple[str, int]:
         return match.group("head") + cleaned + match.group("tail") + "\n" + "\n".join(packages)
 
     return pattern.sub(replace, text or "", count=1), total
+
+
+def remove_pdftex_graphics_driver(text: str) -> Tuple[str, int]:
+    """Remove an explicit pdfTeX graphicx driver from an XeLaTeX document."""
+    pattern = re.compile(
+        r"\\(?P<command>usepackage|RequirePackage)"
+        r"\[(?P<options>[^\]]*)\]\{graphicx\}"
+    )
+
+    total = 0
+
+    def replace(match) -> str:
+        nonlocal total
+        raw_options = [option.strip() for option in match.group("options").split(",")]
+        if not any(option.lower() == "pdftex" for option in raw_options):
+            return match.group(0)
+        options = [
+            option
+            for option in raw_options
+            if option.strip() and option.strip().lower() != "pdftex"
+        ]
+        option_text = "[" + ",".join(options) + "]" if options else ""
+        total += 1
+        return "\\" + match.group("command") + option_text + "{graphicx}"
+
+    return pattern.sub(replace, text or ""), total
+
+
+def fallback_sourcesans3_family(text: str) -> Tuple[str, int]:
+    """Use the SourceSansPro family shipped by the slim TeX image."""
+    return re.subn(r"\{SourceSans3\}", "{SourceSansPro}", text or "")
 
 
 PDFTEX_PRIMITIVE_NAMES = (
@@ -738,6 +899,7 @@ PDFTEX_PRIMITIVE_NAMES = (
     "pdfsavepos",
     "pdfliteral",
     "pdfpageattr",
+    "pdfinclusioncopyfonts",
 )
 
 PDFTEX_PRIMITIVE_LINE_RE = re.compile(

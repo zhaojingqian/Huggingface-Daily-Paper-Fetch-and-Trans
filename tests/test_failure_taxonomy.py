@@ -32,6 +32,42 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertEqual(result["category"], "compile.legacy_cjk_environment")
         self.assertEqual(result["retry_strategy"], "reuse_translation")
 
+    def test_recent_repair_categories_are_specific(self):
+        leak = classify_failure(
+            "compile",
+            'Undefined control sequence. "translation": "\\\\section{引言}\\\\n正文"',
+        )
+        font = classify_failure(
+            "compile",
+            'Package fontspec Error: The font "SourceSans3-RegularIt" cannot be found.',
+        )
+        driver = classify_failure(
+            "compile",
+            r"Undefined control sequence. \ifnum \pdfshellescape >0",
+        )
+        environment = classify_failure(
+            "compile",
+            r"Undefined control sequence. \endtcolorbox ->\tcb@insert@after@part",
+        )
+
+        self.assertEqual(leak["category"], "compile.model_response_leak")
+        self.assertEqual(font["category"], "compile.font_family_missing")
+        self.assertEqual(driver["category"], "compile.engine_driver_mismatch")
+        self.assertEqual(environment["category"], "compile.unmatched_environment")
+
+    def test_tikz_and_duplicated_macro_failures_are_specific(self):
+        tikz = classify_failure(
+            "compile",
+            r"Undefined control sequence. \pgf@matrix@last@nextcell@options",
+        )
+        duplicated = classify_failure(
+            "compile",
+            r"Undefined control sequence. l.72 \nndiff{\theta}",
+        )
+
+        self.assertEqual(tikz["category"], "compile.tikz_matrix_legend")
+        self.assertEqual(duplicated["category"], "compile.duplicated_macro_initial")
+
     def test_translation_categories_distinguish_auth_and_timeout(self):
         auth = classify_failure("translate", plugin_error="401 Unauthorized: invalid API key")
         timeout = classify_failure("translate", plugin_error="Connection timed out")
@@ -39,6 +75,15 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertEqual(auth["category"], "translate.api_auth")
         self.assertFalse(auth["retryable"])
         self.assertEqual(timeout["retry_strategy"], "retry_translation")
+
+    def test_timeout_configuration_does_not_mask_quality_failure(self):
+        result = classify_failure(
+            "compile",
+            "[driver] timeout=600\n"
+            "[driver] 翻译覆盖率检查失败: cjk_pct=2.3% long_english_lines=101",
+        )
+
+        self.assertEqual(result["category"], "quality.untranslated_prose")
 
     def test_missing_relative_compile_workdir_is_runtime_not_auth(self):
         result = classify_failure(
@@ -66,6 +111,25 @@ class FailureTaxonomyTest(unittest.TestCase):
 
             self.assertEqual(summary["total"], 2)
             self.assertEqual(summary["by_category"]["compile.undefined_command"], 1)
+
+    def test_unknown_sidecar_is_refined_from_driver_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_json_atomic(
+                os.path.join(tmp, "2607.00003.json"),
+                {
+                    "arxiv_id": "2607.00003",
+                    "category": "compile.unknown",
+                    "retry_strategy": "manual_review",
+                },
+            )
+            with open(os.path.join(tmp, "2607.00003.log"), "w", encoding="utf-8") as handle:
+                handle.write("[driver] 翻译覆盖率检查失败: cjk_pct=2.3% long_english_lines=42")
+
+            record = load_failure_records(tmp)[0]
+
+            self.assertEqual(record["category"], "quality.untranslated_prose")
+            self.assertEqual(record["retry_strategy"], "retry_translation")
+            self.assertEqual(record["reclassified_from"], "compile.unknown")
 
 
 if __name__ == "__main__":

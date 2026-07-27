@@ -100,14 +100,56 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
             "旧模板使用未加载的 CJK/CJK* 环境；补 XeLaTeX 兼容定义后复用翻译重编译。",
             _evidence(latex, r"Environment CJK\*? undefined|Undefined control sequence.*?endCJK\*?"),
         )
+    if re.search(r'"translation"\s*:\s*"\\\\section|\[\s*"\\\\section', latex, re.I):
+        return _result(
+            "compile.model_response_leak", "translation_artifact", "reuse_translation",
+            "strip_serialized_translation_artifact",
+            "模型序列化响应泄漏进 TeX；清除整行 JSON/list 残留后复用翻译重编译。",
+            _evidence(latex, r'"translation"\s*:\s*"\\\\section|\[\s*"\\\\section'),
+        )
+    if re.search(r'fontspec Error: The font "SourceSans3-', latex, re.I):
+        return _result(
+            "compile.font_family_missing", "latex_font", "reuse_translation",
+            "fallback_sourcesans3_family",
+            "slim 镜像缺少 SourceSans3 字体族；映射到兼容 SourceSansPro 字体后重编译。",
+            _evidence(latex, r'fontspec Error: The font "SourceSans3-'),
+        )
+    if re.search(r"Undefined control sequence.*?\\(?:pdfshellescape|pdfcolorstack)", latex, re.I | re.S):
+        return _result(
+            "compile.engine_driver_mismatch", "latex_engine", "reuse_translation",
+            "remove_pdftex_graphics_driver",
+            "graphicx 被强制为 pdftex driver；移除错误 driver 选项后由 XeLaTeX 自动选择。",
+            _evidence(latex, r"Undefined control sequence"),
+        )
     if re.search(
-        r"Undefined control sequence.*?\\pdf(?:infoomitdate|trailerid|suppressptexinfo|gentounicode|output)",
+        r"Undefined control sequence.*?\\pdf(?:infoomitdate|trailerid|suppressptexinfo|gentounicode|output|inclusioncopyfonts)",
         latex,
         re.I | re.S,
     ):
         return _result(
             "compile.pdftex_primitive", "latex_engine", "reuse_translation", "guard_pdftex_primitive",
             "模板调用了 XeLaTeX 不支持的 pdfTeX 原语；加引擎 guard 后重编译。",
+            _evidence(latex, r"Undefined control sequence"),
+        )
+    if re.search(r"Undefined control sequence.*?\\endtcolorbox", latex, re.I | re.S):
+        return _result(
+            "compile.unmatched_environment", "latex_structure", "reuse_translation",
+            "remove_unmatched_environment_ending",
+            "存在无对应 begin 的环境结束标签；按环境栈移除多余结束标签后重编译。",
+            _evidence(latex, r"Undefined control sequence.*?\\endtcolorbox"),
+        )
+    if re.search(r"\\pgf@matrix@last@nextcell@options|matrix of nodes", latex, re.I):
+        return _result(
+            "compile.tikz_matrix_legend", "latex_structure", "reuse_translation",
+            "disable_fragile_tikz_matrix_legends",
+            "TikZ matrix 图例混入显式 node/draw 后破坏单元格解析；省略图例并保留主图与图注。",
+            _evidence(latex, r"\\pgf@matrix@last@nextcell@options|matrix of nodes"),
+        )
+    if re.search(r"Undefined control sequence.*?\\([A-Za-z])\1[A-Za-z@]+", latex, re.I | re.S):
+        return _result(
+            "compile.duplicated_macro_initial", "translation_artifact", "reuse_translation",
+            "repair_duplicated_macro_initials",
+            "翻译结果把宏名首字母重复；仅在原文存在对应单首字母宏时恢复宏名。",
             _evidence(latex, r"Undefined control sequence"),
         )
     if re.search(r"Undefined control sequence", latex, re.I):
@@ -140,17 +182,26 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
             "代码或 verbatim 环境被翻译破坏；从原文恢复保护块后重编译。",
             _evidence(latex, r"tcblisting|lstlisting|minted|verbatim"),
         )
-    if re.search(r"out of memory|cannot allocate memory|killed|segmentation fault|timeout", combined, re.I):
-        return _result(
-            "compile.resource_exhaustion", "runtime_resource", "retry_later", "reduce_compile_resources",
-            "编译资源不足或超时；清理缓存、降低资源压力后重试。",
-            _evidence(combined, r"out of memory|cannot allocate memory|killed|segmentation fault|timeout"),
-        )
     if re.search(r"翻译覆盖率检查失败|translation coverage.*failed", combined, re.I):
         return _result(
             "quality.untranslated_prose", "translation_quality", "retry_translation", "protect_examples_or_retranslate",
             "普通正文翻译覆盖不足；先排除代码/数据示例，再重新翻译真实英文正文。",
             _evidence(combined, r"翻译覆盖率检查失败|translation coverage.*failed"),
+        )
+    if re.search(
+        r"out of memory|cannot allocate memory|(?:process |compile )killed|"
+        r"segmentation fault|(?:compile|compilation|command) timed? ?out",
+        combined,
+        re.I,
+    ):
+        return _result(
+            "compile.resource_exhaustion", "runtime_resource", "retry_later", "reduce_compile_resources",
+            "编译资源不足或超时；清理缓存、降低资源压力后重试。",
+            _evidence(
+                combined,
+                r"out of memory|cannot allocate memory|(?:process |compile )killed|"
+                r"segmentation fault|(?:compile|compilation|command) timed? ?out",
+            ),
         )
     if re.search(r"LaTeX Error|Package .* Error|Fatal error", latex, re.I):
         return _result(

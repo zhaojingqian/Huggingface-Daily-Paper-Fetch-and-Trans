@@ -30,6 +30,7 @@ Paper Hub 是一个面向 AI 论文阅读和归档的自动化系统：抓取 Hu
 | 系统状态 | 完成 | `/status` |
 | PDF wrapper | 完成 | `/view/<arxiv_id>` |
 | 行为合约测试 | 完成 | `tests/test_web_server_contract.py` |
+| 论文修复 skill | 完成 | `$paper-trans-repair` |
 
 ---
 
@@ -176,6 +177,9 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 抽象 `latex_translation_filters.py`，统一 splitter、质量门禁和 fallback 的环境筛选/过滤条件，并支持环境变量扩展。
 - [x] 修复 retry-pdf slim 默认容器、精确容器检查、容器内翻译缓存复用和缓存失败后的 no-cache fallback。
 - [x] 加固 fallback 编译：安全 aux、直接接入生成 bbl、不安全 citation key 规范化、LuaLaTeX segfault fallback、algorithm2e/FontAwesome 兼容和更多 LLM artifact 过滤。
+- [x] 将模型序列化残留、字体族、engine driver、环境失配、TikZ matrix 图例和重复宏首字母归入稳定 taxonomy，并为每类登记通用 patch。
+- [x] 摘要翻译兼容 OpenAI-compatible 多形态 content、截断/非法反斜杠 JSON，并可从已成功中文 TeX 回填缺失字段。
+- [ ] 针对 `quality.untranslated_prose` 增加 chunk 级语言验证与局部重译，避免整篇模型回显英文后再次全量消耗。
 
 ### Phase D — 运维体验
 
@@ -183,6 +187,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 为失败队列增加 category / retry strategy / repair action 轻量摘要日志。
 - [x] 增加周日 02:00 当前 ISO 周串行 repair runner，等待当前周 index.json 出现并等待 weekly 抓取锁后修复翻译和 PDF 编译问题。
 - [x] 建立通用 patch catalog 与 `logs/repair_history/weekly-<key>.json`，沉淀每周失败类别、匹配补丁和剩余失败。
+- [x] 将全模式近窗审计、串行修复、patch 沉淀、验证、文档和 push 约定整理为 `$paper-trans-repair` Codex skill。
+- [x] 对旧 `compile.unknown` sidecar 增加日志重分类，并对大日志使用有界证据，缩短后续定位时间。
 - [x] 修复 `run_repair.py --post` 对当前周期的跳过边界，确保首次 cron 触发后可补抓临时网络失败的 daily/weekly/monthly。
 - [x] 补齐生产 root crontab 的 topic 调度：每天 01:30 `run_topic.py --all`，06:30 `run_repair.py --retry-pdf --mode topic --days 7`，并补跑 `2026-07-06` 主题结果。
 - [x] 修复 weekly cleanup 的 topic 引用漏扫：孤立 PDF 统计递归覆盖 topic 两层索引，避免 topic-only PDF 被误删。
