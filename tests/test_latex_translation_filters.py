@@ -1,4 +1,7 @@
+import io
 import os
+import tarfile
+import tempfile
 import unittest
 from unittest import mock
 
@@ -6,6 +9,64 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_force_no_tex_shell_escape_handles_paths_quotes_and_conflicts(self):
+        self.assertEqual(
+            filters.force_no_tex_shell_escape(
+                "/usr/bin/pdflatex -shell-escape -interaction=batchmode x.tex"
+            ),
+            "/usr/bin/pdflatex -no-shell-escape -interaction=batchmode x.tex",
+        )
+        self.assertEqual(
+            filters.force_no_tex_shell_escape(
+                '"xelatex" --enable-write18 -no-shell-escape x.tex'
+            ),
+            '"xelatex" -no-shell-escape x.tex',
+        )
+        self.assertEqual(
+            filters.force_no_tex_shell_escape(
+                "latexdiff a.tex b.tex > diff.tex"
+            ),
+            "latexdiff a.tex b.tex > diff.tex",
+        )
+
+    def test_source_tar_safety_rejects_traversal_and_escaping_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            safe_path = os.path.join(tmp, "safe.tar")
+            with tarfile.open(safe_path, "w") as archive:
+                root = tarfile.TarInfo(".")
+                root.type = tarfile.DIRTYPE
+                archive.addfile(root)
+                payload = b"\\documentclass{article}"
+                member = tarfile.TarInfo("paper/main.tex")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+                link = tarfile.TarInfo("paper/current.tex")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "main.tex"
+                archive.addfile(link)
+            self.assertEqual(filters.source_tar_safety_error(safe_path), "")
+
+            traversal_path = os.path.join(tmp, "traversal.tar")
+            with tarfile.open(traversal_path, "w") as archive:
+                member = tarfile.TarInfo("../../config_private.py")
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+            self.assertIn(
+                "unsafe archive member path",
+                filters.source_tar_safety_error(traversal_path),
+            )
+
+            symlink_path = os.path.join(tmp, "symlink.tar")
+            with tarfile.open(symlink_path, "w") as archive:
+                link = tarfile.TarInfo("paper/secret")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../config_private.py"
+                archive.addfile(link)
+            self.assertIn(
+                "unsafe archive symlink",
+                filters.source_tar_safety_error(symlink_path),
+            )
+
     def test_hard_env_policy_recognizes_code_trace_names(self):
         self.assertTrue(filters.is_hard_protected_env("climode"))
         self.assertTrue(filters.is_hard_protected_env("trajactGUI"))
@@ -59,6 +120,81 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             with self.subTest(env=env):
                 self.assertTrue(filters.is_dynamic_hard_env(env))
         self.assertTrue(filters.is_hard_protected_env("comment"))
+
+    def test_semantic_source_data_protection_is_instance_scoped(self):
+        protected = (
+            (
+                "tcolorbox",
+                r"\begin{tcolorbox}[casebox=yellow!5, title=1. User Query]",
+            ),
+            (
+                "tcolorbox",
+                r"\begin{tcolorbox}[promptbox,title={Coarse CoT Template}]",
+            ),
+            (
+                "custombox",
+                r"\begin{custombox}[title=Judge Prompt]",
+            ),
+            (
+                "examplebox",
+                r"\begin{examplebox}[title={(1) Personality Attribution}]",
+            ),
+            (
+                "casebox",
+                r"\begin{casebox}{successbg}{successframe}{成功案例}",
+            ),
+            (
+                "mdframed",
+                r"\begin{mdframed}[frametitle={Problem-Solving Prompt}]",
+            ),
+        )
+        for env, opening in protected:
+            with self.subTest(env=env):
+                self.assertTrue(
+                    filters.is_semantic_source_data_opening(env, opening)
+                )
+
+        # Environment classes remain translatable unless a concrete instance
+        # declares prompt/trace/example/source-data semantics.
+        self.assertFalse(filters.is_hard_protected_env("tcolorbox"))
+        self.assertFalse(filters.is_semantic_source_data_opening(
+            "tcolorbox",
+            r"\begin{tcolorbox}[title=Key Insight]",
+        ))
+        self.assertFalse(filters.is_semantic_source_data_opening(
+            "custombox",
+            r"\begin{custombox}[title=Main Theorem]",
+        ))
+        self.assertFalse(filters.is_semantic_source_data_opening(
+            "mdframed",
+            r"\begin{mdframed}[frametitle={Implementation Details}]",
+        ))
+        self.assertFalse(filters.is_semantic_source_data_opening(
+            "mdframed",
+            r"\begin{mdframed}[frametitle={IMO 2025 Problem 1}]",
+        ))
+
+    def test_custom_box_question_field_promotes_only_that_instance(self):
+        self.assertTrue(filters.is_semantic_source_data_content(
+            "custombox",
+            r"\textbf{Question:} What is the benchmark answer?",
+        ))
+        self.assertTrue(filters.is_semantic_source_data_content(
+            "custombox",
+            r"\textbf{Correct Answer:} The published reference answer.",
+        ))
+        self.assertTrue(filters.is_semantic_source_data_content(
+            "tcolorbox",
+            r"\textbf{Task:} Classify the agent trajectory.",
+        ))
+        self.assertFalse(filters.is_semantic_source_data_content(
+            "custombox",
+            "This box explains the main theorem in ordinary paper prose.",
+        ))
+        self.assertFalse(filters.is_semantic_source_data_content(
+            "mdframed",
+            r"\textbf{Question:} This heading is not a source-data marker here.",
+        ))
 
     def test_strip_llm_translation_artifacts(self):
         text = (
@@ -151,6 +287,404 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             r"\section{GPT-4o}",
         ))
 
+    def test_rejects_mixed_chinese_response_with_english_prose_clause(self):
+        source = (
+            "The system significantly outperforms independent generators and "
+            "the agentic baseline on every benchmark."
+        )
+        partial = (
+            "该系统显著优于独立生成器和 the agentic baseline on "
+            "所有基准测试。"
+        )
+
+        self.assertTrue(filters.mixed_untranslated_english_clauses(partial))
+        self.assertTrue(filters.llm_translation_response_untranslated(
+            source,
+            partial,
+        ))
+
+    def test_mixed_clause_gate_keeps_names_quotes_and_code(self):
+        source = "This sentence must be translated into Chinese."
+        for response in (
+            "我们遵循 Values in the Wild 和 LongBench v2 的评估设置。",
+            "系统使用 \\textit{first care, then order, then the business of the day} 作为示例。",
+            "调用 \\texttt{book_table(restaurant_id, date, time, guests)} 完成操作。",
+            "\\fbresult{score from JSON-schema validation failure on a single field.}",
+            "下面规则必须严格执行：Do NOT renumber the documents as 1,2,3,...; use their original ids.\\\\",
+        ):
+            with self.subTest(response=response):
+                self.assertFalse(
+                    filters.mixed_untranslated_english_clauses(response)
+                )
+                self.assertFalse(filters.llm_translation_response_untranslated(
+                    source,
+                    response,
+                ))
+
+    def test_rejects_task_echo_before_merging_prompt_box_chunk(self):
+        source = r"""
+\begin{tcolorbox}[promptbox,title={Coarse CoT Template}]
+\begin{itemize}
+\item Follow rule one~\citep{rule_one}.
+\item Follow rule two.
+\end{itemize}
+\end{tcolorbox}
+"""
+        corrupted = r"""
+\section{引言}
+深度学习在图像分类任务中取得了显著进展~\citep{invented}。
+Classification: Academic Translation
+Task: English to Chinese
+Language: Chinese
+"""
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, corrupted),
+            "translation_task_echo",
+        )
+
+    def test_rejects_latex_structure_or_citation_loss_before_merge(self):
+        source = r"""
+\begin{itemize}
+\item Keep the cited rule~\citep{rule_one}.
+\item Keep the second rule.
+\end{itemize}
+"""
+        self.assertEqual(
+            filters.llm_translation_response_invalid(
+                source,
+                r"\section{引言}这是一个虚构段落。",
+            ),
+            "critical_latex_structure_mismatch",
+        )
+        self.assertEqual(
+            filters.llm_translation_response_invalid(
+                source,
+                r"""\begin{itemize}
+\item 保留第一条规则。
+\item 保留第二条规则。
+\end{itemize}""",
+            ),
+            "citation_structure_mismatch",
+        )
+
+    def test_citation_structure_allows_reordering_but_preserves_multiset(self):
+        source = (
+            r"VERL~\citep[see][p.~1]{verl} is compared with "
+            r"SGLang~\citep{sglang}."
+        )
+        reordered = (
+            r"我们比较 SGLang~\citep{sglang} 与 "
+            r"VERL~\citep[see][p.~1]{verl}。"
+        )
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, reordered),
+            "",
+        )
+        for corrupted in (
+            r"仅保留 SGLang~\citep{sglang}。",
+            reordered + r" 重复~\citep{sglang}。",
+            (
+                r"SGLang~\citep{sglang} 与 "
+                r"VERL~\citet[see][p.~1]{verl}。"
+            ),
+            (
+                r"SGLang~\citep{sglang} 与 "
+                r"VERL~\citep[see][p.~2]{verl}。"
+            ),
+        ):
+            with self.subTest(corrupted=corrupted):
+                self.assertEqual(
+                    filters.llm_translation_response_invalid(
+                        source,
+                        corrupted,
+                    ),
+                    "citation_structure_mismatch",
+                )
+
+    def test_structure_evidence_exposes_later_paragraph_loss(self):
+        # This is the shape that made 2606.05553 look harmless in a 180-char
+        # preview: the subsection/label and first paragraph matched, while a
+        # later paragraph was absent.  The gate must still reject it, and the
+        # diagnostic must make the difference immediately visible.
+        source = (
+            r"\subsection{Evaluation validation\label{sec:judge-agreement}} "
+            r"\paragraph{Human-anchored judge plausibility.} First result. "
+            r"\paragraph{Cross-judge replication.} Second result."
+        )
+        response = (
+            r"\subsection{评估验证\label{sec:judge-agreement}} "
+            r"\paragraph{基于人工的评审合理性。} 第一个结果。"
+        )
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, response),
+            "critical_latex_structure_mismatch",
+        )
+        evidence = filters.llm_translation_structure_evidence(source, response)
+        self.assertEqual(
+            evidence["source_commands"],
+            ("subsection", "label", "paragraph", "paragraph"),
+        )
+        self.assertEqual(
+            evidence["response_commands"],
+            ("subsection", "label", "paragraph"),
+        )
+        self.assertEqual(evidence["source_citations_only"], ())
+        self.assertEqual(evidence["response_citations_only"], ())
+
+    def test_structure_evidence_reports_directional_citation_multiset_diff(self):
+        source = r"Prior work~\citep{alpha} and~\citep{beta}."
+        response = r"已有工作~\citep{alpha} 和~\citep{gamma}."
+
+        evidence = filters.llm_translation_structure_evidence(source, response)
+
+        self.assertEqual(
+            evidence["source_commands"], evidence["response_commands"]
+        )
+        self.assertEqual(
+            evidence["source_citations_only"], ((r"\citep{beta}", 1),)
+        )
+        self.assertEqual(
+            evidence["response_citations_only"], ((r"\citep{gamma}", 1),)
+        )
+
+    def test_normalizes_single_heading_wrapper_around_bare_caption_argument(self):
+        source = r"Cold-start Trajectory Generation for \ourmethod{}"
+        response = r"\section{针对\ourmethod{}的冷启动轨迹生成}"
+        payload = ["translate_zh segment-17", response]
+
+        changed = filters.normalize_llm_translation_payload(
+            payload,
+            [source],
+        )
+
+        self.assertEqual(changed, [0])
+        self.assertEqual(payload[1], r"针对\ourmethod{}的冷启动轨迹生成")
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, payload[1]),
+            "",
+        )
+
+    def test_normalizes_one_bare_hallucinated_section_command(self):
+        source = (
+            r"With TinyLoRA, we can compress the learned policy update to as "
+            r"few as one trainable scalar \cite{morris2026learning}. This "
+            "extreme parameterization forms the architectural basis."
+        )
+        response = (
+            r"通过 TinyLoRA，我们可以将策略更新压缩到一个可训练标量 "
+            r"\cite{morris2026learning}。这种参数化构成了架构基础（第 "
+            r"\section）。"
+        )
+
+        normalized = filters.normalize_llm_translation_response(source, response)
+
+        self.assertIn("第 章节", normalized)
+        self.assertNotIn(r"\section", normalized)
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
+
+    def test_bare_heading_normalizer_rejects_multiple_or_real_commands(self):
+        source = r"See the section for details."
+        multiple = r"见第 \section 和 \subsection。"
+        real_source = r"\section{Method}"
+        real_response = r"\section"
+
+        self.assertEqual(
+            filters.normalize_llm_translation_response(source, multiple),
+            multiple,
+        )
+        self.assertEqual(
+            filters.normalize_llm_translation_response(real_source, real_response),
+            real_response,
+        )
+
+    def test_heading_wrapper_normalizer_rejects_extra_text_or_commands(self):
+        source = r"Cold-start Trajectory Generation for \ourmethod{}"
+        malicious = (
+            r"\section{针对\ourmethod{}的冷启动轨迹生成}"
+            "\n额外伪造正文。"
+        )
+        multiple = (
+            r"\section{针对\ourmethod{}的冷启动轨迹生成}"
+            r"\subsection{额外标题}"
+        )
+        lost_citation = r"\section{冷启动轨迹生成}"
+        cited_source = source + r"~\citep{cold_start}"
+
+        for value in (malicious, multiple):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    filters.normalize_llm_translation_response(source, value),
+                    value,
+                )
+                self.assertEqual(
+                    filters.llm_translation_response_invalid(source, value),
+                    "critical_latex_structure_mismatch",
+                )
+        self.assertEqual(
+            filters.normalize_llm_translation_response(
+                cited_source,
+                lost_citation,
+            ),
+            lost_citation,
+        )
+
+    def test_heading_wrapper_normalizer_never_strips_real_caption_command(self):
+        source = r"\caption{Cold-start Trajectory Generation for \ourmethod{}}"
+        response = r"\section{针对\ourmethod{}的冷启动轨迹生成}"
+
+        self.assertEqual(
+            filters.normalize_llm_translation_response(source, response),
+            response,
+        )
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, response),
+            "critical_latex_structure_mismatch",
+        )
+
+    def test_short_ref_translation_ignores_reference_key_for_language_ratio(self):
+        source = (
+            r"Substituting into Eq.~\ref{eq:small_beta_teacher_gain_app} gives"
+        )
+        translated = r"代入式~\ref{eq:small_beta_teacher_gain_app} 得到"
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, translated),
+            "",
+        )
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, translated)
+        )
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(source, source)
+        )
+
+    def test_bracketed_key_value_options_are_structural_not_untranslated(self):
+        options = (
+            r"[fontsize=\small, breaklines=true, breakanywhere=true, "
+            r"breakindent=2em]"
+        )
+
+        self.assertTrue(filters.is_bracketed_key_value_option_list(options))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(options, options)
+        )
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(options, "")
+        )
+
+    def test_bracketed_english_prose_is_not_misclassified_as_options(self):
+        prose_label = (
+            "[This English prose label explains the complete evaluation "
+            "procedure used for every benchmark.]"
+        )
+        prose_value = (
+            "[label=This English prose should remain translated in the paper, "
+            "mode=true]"
+        )
+
+        for value in (prose_label, prose_value):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    filters.is_bracketed_key_value_option_list(value)
+                )
+                self.assertTrue(
+                    filters.llm_translation_response_untranslated(value, value)
+                )
+
+    def test_untranslated_check_allows_citation_backed_name_catalog(self):
+        catalog = (
+            r"Qwen2.5-Omni-7B~\citep{qwen2.5omni}, "
+            r"Step-Audio-2-mini~\citep{stepaudio2}, "
+            r"Voxtral-Mini-3B~\citep{voxtral}, "
+            r"Kimi-Audio-7B~\citep{Kimi-Audio}, "
+            r"Gemini-3-Flash~\citep{}, "
+            r"Seed-ASR~\citep{seedasr}, "
+        )
+
+        self.assertTrue(
+            filters.is_citation_heavy_proper_name_catalog(catalog)
+        )
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(catalog, catalog)
+        )
+
+    def test_citation_catalog_check_does_not_hide_explanatory_prose(self):
+        prose = (
+            r"This study compares Qwen-Omni~\citep{qwen}, "
+            r"Step-Audio~\citep{step}, Voxtral~\citep{voxtral}, and "
+            r"Kimi-Audio~\citep{kimi} across difficult speech benchmarks."
+        )
+
+        self.assertFalse(
+            filters.is_citation_heavy_proper_name_catalog(prose)
+        )
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(prose, prose)
+        )
+
+    def test_untranslated_check_ignores_upstream_english_prompt(self):
+        prompt = (
+            "Below is a section from an English academic paper, translate it "
+            "into Chinese. Do not modify any latex command. "
+            "Answer me only with the translated text:\n\n"
+            r"\section{GPT-4o}"
+        )
+        self.assertEqual(
+            filters.extract_translation_fragment(prompt),
+            r"\section{GPT-4o}",
+        )
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            prompt,
+            r"\section{GPT-4o}",
+        ))
+        structural = (
+            r"\begin{tcolorbox}[colback=gray!5, colframe=gray!60, "
+            r"boxrule=0.4pt, left=4pt, right=4pt, top=2pt, bottom=2pt]"
+        )
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            structural,
+            structural,
+        ))
+        item_label = (
+            r"\item[This English prose explains the complete evaluation "
+            r"procedure used for every benchmark.]"
+        )
+        self.assertTrue(filters.llm_translation_response_untranslated(
+            item_label,
+            item_label,
+        ))
+        code_list = (
+            r"\texttt{get\_weather(location, units)}, "
+            r"\texttt{book\_table(restaurant\_id, date, time, guests)}, "
+            r"\texttt{check\_schedule(user\_email, date)}"
+        )
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            code_list,
+            code_list,
+        ))
+        url_line = (
+            r"L1: URL: https://media.example.com/connector?cmd=file\&target="
+            r"v1\_XFNjaGVkdWxlc1xUUl9sb25nX3BheWxvYWQ="
+        )
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            url_line,
+            url_line,
+        ))
+        json_code = (
+            r'\smalltt{\{"query": "three albums", "topn": 10, '
+            r'"source": "news"\}}'
+        )
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            json_code,
+            json_code,
+        ))
+
     def test_coalesces_adjacent_translation_fragments(self):
         fragments = [
             ("First sentence. ", False),
@@ -166,6 +700,23 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             ("First sentence. Second sentence.\n", False),
             (r"\begin{equation}" "\n", True),
             ("Following paragraph.", False),
+        ])
+
+    def test_coalescer_forces_pure_option_list_to_preserve(self):
+        options = (
+            r"[fontsize=\small, breaklines=true, breakanywhere=true, "
+            r"breakindent=2em]"
+        )
+        prose = "This ordinary English sentence still needs translation."
+
+        merged = filters.coalesce_translation_fragments([
+            (options, False),
+            (prose, False),
+        ])
+
+        self.assertEqual(merged, [
+            (options, True),
+            (prose, False),
         ])
 
     def test_coalesces_whitespace_between_prose_with_size_cap(self):
@@ -193,6 +744,77 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             ("B" * 40, False),
         ])
 
+    def test_absorbs_short_citation_prose_into_neighboring_translation(self):
+        fragments = [
+            ("Prior work explains the main result", False),
+            (r" \cite{alpha}, including ", True),
+            ("the strongest baseline.", False),
+            (r"\section{Method}", True),
+        ]
+
+        absorbed = filters.coalesce_translation_fragments(
+            filters.absorb_short_prose_bridges(fragments)
+        )
+
+        self.assertEqual(absorbed, [
+            (
+                r"Prior work explains the main result \cite{alpha}, including "
+                "the strongest baseline.",
+                False,
+            ),
+            (r"\section{Method}", True),
+        ])
+
+    def test_short_prose_bridge_keeps_structural_or_overflow_fragments(self):
+        structural = r"\end{abstract} including"
+        fragments = [
+            ("A" * 20, False),
+            (structural, True),
+            ("following prose", False),
+        ]
+
+        self.assertEqual(
+            filters.absorb_short_prose_bridges(fragments, max_translate_chars=25),
+            fragments,
+        )
+
+    def test_bounded_splitter_keeps_paren_and_bracket_math_balanced(self):
+        line = (
+            "A" * 220
+            + r" \(\text{inside. math; stays together}\) "
+            + "B" * 220
+            + ". "
+            + "C" * 220
+            + r" \[\text{display. math; stays together}\] "
+            + "D" * 220
+        )
+
+        parts = filters.split_translation_line_bounded(
+            line,
+            max_translate_chars=360,
+            min_sentence_chars=120,
+        )
+
+        self.assertEqual("".join(parts), line)
+        self.assertGreater(len(parts), 2)
+        for part in parts:
+            self.assertEqual(part.count(r"\("), part.count(r"\)"))
+            self.assertEqual(part.count(r"\["), part.count(r"\]"))
+
+    def test_bounded_splitter_caps_unpunctuated_prose(self):
+        for line in (
+            ("ordinaryword " * 500).strip(),
+            "A" * 5000,
+        ):
+            with self.subTest(has_spaces=" " in line):
+                parts = filters.split_translation_line_bounded(
+                    line,
+                    max_translate_chars=600,
+                )
+                self.assertEqual("".join(parts), line)
+                self.assertGreater(len(parts), 1)
+                self.assertTrue(all(len(part) <= 600 for part in parts))
+
     def test_separate_custom_macro_cjk_glue(self):
         text = (
             r"\newcommand{\methodshort}{Data2Story}" "\n"
@@ -213,6 +835,49 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn(r"\methodshort ，", fixed)
         self.assertIn(r"\yespart 标记", fixed)
         self.assertIn(r"\witharg中文", fixed)
+
+    def test_separate_builtin_layout_command_from_ascii_prose(self):
+        text = (
+            r"\parFrom (A)-(C), the result follows." "\n"
+            r"\noindentThis paragraph is retained." "\n"
+            r"\smallskipNext paragraph." "\n"
+            r"\parTherefore\par"
+        )
+
+        fixed, count = filters.separate_builtin_layout_ascii_glue(text)
+
+        self.assertEqual(count, 4)
+        self.assertIn(r"\par From (A)-(C)", fixed)
+        self.assertIn(r"\noindent This paragraph", fixed)
+        self.assertIn(r"\smallskip Next paragraph", fixed)
+        self.assertIn(r"\par Therefore\par", fixed)
+
+    def test_builtin_layout_ascii_glue_preserves_real_or_ambiguous_commands(self):
+        text = (
+            r"\newcommand{\parFrom}{custom}" "\n"
+            r"\parFrom (A)-(C) stays custom." "\n"
+            r"\paragraph{Heading}" "\n"
+            r"\parbox{2cm}{Box}" "\n"
+            r"\parUSA remains ambiguous." "\n"
+            r"% example only: \noindentThis must stay literal." "\n"
+            r"\begin{verbatim}" "\n"
+            r"\parFrom (A)-(C)" "\n"
+            r"\end{verbatim}"
+        )
+
+        fixed, count = filters.separate_builtin_layout_ascii_glue(text)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(fixed, text)
+
+        external_use = r"\parFrom (A)-(C) is supplied by the class."
+        external_definition = r"\DeclareRobustCommand{\parFrom}{custom}"
+        fixed, count = filters.separate_builtin_layout_ascii_glue(
+            external_use,
+            external_definition,
+        )
+        self.assertEqual(count, 0)
+        self.assertEqual(fixed, external_use)
 
     def test_repairs_duplicated_macro_initial(self):
         text = (
@@ -265,18 +930,108 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             r"  \pdfmapline{+font < font.ttf < enc.enc}" "\n"
             r"\pdfinclusioncopyfonts=1" "\n"
             r"\ifdefined\pdfinfo\pdfinfo{/Title(Test)}\fi" "\n"
+            r"\pdfinfo{" "\n"
+            r"/TemplateVersion (2027.1)" "\n"
+            r"}" "\n"
             r"\section{正文}"
         )
 
         fixed, count = filters.guard_pdftex_primitive_lines(text)
 
-        self.assertEqual(count, 5)
+        self.assertEqual(count, 6)
         self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfgentounicode\pdfgentounicode =1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfinfoomitdate\pdfinfoomitdate=1\fi", fixed)
         self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
         self.assertIn(r"\ifdefined\pdfinclusioncopyfonts\pdfinclusioncopyfonts=1\fi", fixed)
-        self.assertEqual(fixed.count(r"\ifdefined\pdfinfo\pdfinfo"), 1)
+        self.assertEqual(fixed.count(r"\ifdefined\pdfinfo\pdfinfo"), 2)
+        self.assertIn(
+            "\\ifdefined\\pdfinfo\\pdfinfo{\n"
+            "/TemplateVersion (2027.1)\n"
+            "}\\fi",
+            fixed,
+        )
+
+    def test_unique_label_replacement_handles_translated_long_form(self):
+        labels = {
+            "tab:sens-bcp-tau",
+            "tab:sens-dapo-tau",
+            "tab:sens-dapo-gbs",
+            "tab:trainconfig",
+        }
+        self.assertEqual(
+            filters.unique_label_replacement(
+                "tab:sens-browsecomp-tau",
+                labels,
+                original_refs={
+                    "tab:trainconfig",
+                    "tab:sens-bcp-tau",
+                    "tab:sens-dapo-tau",
+                    "tab:sens-dapo-gbs",
+                },
+            ),
+            "tab:sens-bcp-tau",
+        )
+        self.assertIsNone(filters.unique_label_replacement(
+            "tab:sens-browsecomp-tau",
+            labels,
+        ))
+        self.assertIsNone(filters.unique_label_replacement(
+            "tab:sens-unknown",
+            labels,
+            original_refs=labels,
+        ))
+        self.assertIsNone(filters.unique_label_replacement(
+            "tab:sens-bcp-tau,tab:sens-dapo-tau",
+            labels,
+            original_refs=labels,
+        ))
+
+    def test_splits_multilabel_references_after_cleveref_demotion(self):
+        source = (
+            "\\label{sec:experiments}\n"
+            "\\label{sec:moe}\n"
+            "\\label{sec:agent}\n"
+            "\\label{sec:datapath}\n"
+            r"See \Cref{sec:experiments,sec:moe} and "
+            r"\ref{sec:agent,sec:datapath}."
+        )
+        demoted, demoted_count = filters.demote_cleveref_commands(source)
+        fixed, split_count = filters.split_multilabel_references(demoted)
+        self.assertEqual(demoted_count, 1)
+        self.assertEqual(split_count, 2)
+        self.assertIn(r"\ref{sec:experiments}, \ref{sec:moe}", fixed)
+        self.assertIn(r"\ref{sec:agent}, \ref{sec:datapath}", fixed)
+
+    def test_multilabel_split_preserves_real_comma_label_and_unknown_parts(self):
+        source = (
+            "\\label{sec:a,b}\n"
+            "\\label{sec:a}\n"
+            r"Keep \ref{sec:a,b}; unknown \ref{sec:a,sec:missing}."
+        )
+
+        fixed, split_count = filters.split_multilabel_references(source)
+
+        self.assertEqual(split_count, 0)
+        self.assertIn(r"\ref{sec:a,b}", fixed)
+        self.assertIn(r"\ref{sec:a,sec:missing}", fixed)
+
+    def test_repairs_first_generation_multiline_pdfinfo_guard(self):
+        text = (
+            "\\ifdefined\\pdfinfo\\pdfinfo{\\fi\n"
+            "/TemplateVersion (2027.1)\n"
+            "}\n"
+            "\\begin{document}\n"
+        )
+        fixed, count = filters.guard_pdftex_primitive_lines(text)
+        self.assertEqual(count, 1)
+        self.assertIn(
+            "\\ifdefined\\pdfinfo\\pdfinfo{\n"
+            "/TemplateVersion (2027.1)\n"
+            "}\\fi",
+            fixed,
+        )
+        self.assertNotIn("\\pdfinfo{\\fi", fixed)
 
     def test_replace_bare_citation_commands_glued_to_cjk(self):
         text = r"测试定义如\cite中所述；正常引用见\cite{smith2026}。"
@@ -288,12 +1043,13 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn(r"\cite{smith2026}", fixed)
 
     def test_separate_declaration_command_cjk_glue(self):
-        text = r"这是{\em去中心化}策略，且 \textit{正常命令} 不变。"
+        text = r"这是{\em去中心化}策略，\tbv\xspace与另一项策略，且 \textit{正常命令} 不变。"
 
         fixed, count = filters.separate_declaration_command_cjk_glue(text)
 
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 2)
         self.assertIn(r"{\em 去中心化}", fixed)
+        self.assertIn(r"\tbv\xspace 与另一项策略", fixed)
         self.assertIn(r"\textit{正常命令}", fixed)
 
     def test_remove_spurious_cjk_command_escapes(self):
@@ -367,6 +1123,69 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(
             filters.fontawesome_command_names(text),
             ("faCheckCircle", "faRobot"),
+        )
+
+    def test_fontawesome_fallback_is_inserted_before_enclosing_macro(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage{fontawesome5}" "\n"
+            r"\newcommand{\homepage}[1]{" "\n"
+            r"  \faVideo\ #1 -- \faGamepad" "\n"
+            r"}" "\n"
+            r"\begin{document}\homepage{x}\end{document}" "\n"
+        )
+
+        fixed, count = filters.add_fontawesome_legacy_aliases(text)
+
+        self.assertEqual(count, 2)
+        marker = "% paper-trans fallback for fontawesome5 legacy aliases"
+        self.assertEqual(fixed.count(marker), 1)
+        self.assertLess(fixed.index(marker), fixed.index(r"\newcommand{\homepage}"))
+        self.assertGreater(fixed.index(marker), fixed.index(r"\usepackage{fontawesome5}"))
+        self.assertIn(r"\providecommand{\faVideo}{\textbullet}", fixed)
+        self.assertIn(r"\providecommand{\faGamepad}{\textbullet}", fixed)
+
+    def test_fontawesome_fallback_migrates_historical_nested_block(self):
+        marker = "% paper-trans fallback for fontawesome5 legacy aliases"
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\newcommand{\homepage}[1]{" "\n"
+            + marker + "\n"
+            r"\providecommand{\faVideo}{\textbullet}" "\n"
+            r"\providecommand{\faGamepad}{\textbullet}" "\n"
+            r"\faVideo\ #1 -- \faGamepad" "\n"
+            r"}" "\n"
+            r"\begin{document}\homepage{x}\end{document}" "\n"
+        )
+
+        fixed, count = filters.add_fontawesome_legacy_aliases(text)
+        stable, second_count = filters.add_fontawesome_legacy_aliases(fixed)
+
+        self.assertGreaterEqual(count, 2)
+        self.assertEqual(fixed.count(marker), 1)
+        self.assertLess(fixed.index(marker), fixed.index(r"\newcommand{\homepage}"))
+        self.assertEqual(stable, fixed)
+        self.assertEqual(second_count, 0)
+
+    def test_preamble_snippet_never_enters_multiline_macro_body(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\newcommand{\homepage}[1]{" "\n"
+            r"  prefix \faVideo\ #1" "\n"
+            r"}" "\n"
+            r"\begin{document}\homepage{x}\end{document}" "\n"
+        )
+
+        fixed, changed = filters.insert_latex_preamble_snippet(
+            text,
+            r"\providecommand{\faVideo}{\textbullet}",
+            ("faVideo",),
+        )
+
+        self.assertTrue(changed)
+        self.assertLess(
+            fixed.index(r"\providecommand{\faVideo}"),
+            fixed.index(r"\newcommand{\homepage}"),
         )
 
     def test_restore_tcolorbox_opening_options_from_original(self):
@@ -679,6 +1498,47 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertIn(r"\providecommand{\toprule}{\hline}", fixed)
         self.assertIn(r"\providecommand{\multirow}[4][]{#4}", fixed)
         self.assertNotIn(r"\cmidrule", fixed)
+
+    def test_preamble_fallback_ignores_tokens_inside_comments(self):
+        source = (
+            "\\NeedsTeXFormat{LaTeX2e}\n"
+            "% Outer hook fires during \\\\begin{document} processing.\n"
+            "% Example only: \\\\citep{ignored}\n"
+            "\\AtBeginDocument{\\\\citep{real}}\n"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(source)
+
+        marker = r"% paper-trans fallback for missing natbib citation commands"
+        self.assertGreaterEqual(count, 1)
+        self.assertIn(marker, fixed)
+        self.assertLess(fixed.index(marker), fixed.index(r"\AtBeginDocument"))
+        self.assertIn(
+            "% Outer hook fires during \\\\begin{document} processing.\n",
+            fixed,
+        )
+
+    def test_repairs_historical_fallback_inserted_inside_comment(self):
+        broken = (
+            "% Outer hook fires during "
+            "% paper-trans fallback for missing natbib citation commands\n"
+            "\\providecommand{\\citep}[2][]{\\cite{#2}}\n"
+            "\\providecommand{\\citet}[2][]{\\cite{#2}}\n"
+            "\\begin{document} processing;\n"
+            "\\AtBeginDocument{\\citep{real}}\n"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(broken)
+
+        self.assertGreaterEqual(count, 1)
+        self.assertIn(
+            r"% Outer hook fires during \begin{document} processing;",
+            fixed,
+        )
+        self.assertNotIn(
+            r"% Outer hook fires during % paper-trans fallback",
+            fixed,
+        )
 
     def test_reset_acm_baselinestretch_before_end_document(self):
         text = (

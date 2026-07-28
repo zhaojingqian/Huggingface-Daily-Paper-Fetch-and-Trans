@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Paper Hub Web Server — 端口 18080"""
 
+import hmac
 import html as html_lib
 import http.server, os, json, re, threading, subprocess, sys, time
+from contextlib import contextmanager
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from datetime import datetime, date
 import urllib.request
@@ -12,9 +14,20 @@ import requests
 from paperhub import paper_store, topic_store
 from paperhub.env_config import admin_token
 from paperhub.json_io import write_json_atomic
+from paperhub.publication_lock import (
+    LOCK_EXCLUSIVE,
+    PublicationBusyError,
+    PublicationLock,
+    catalog_lock_path,
+    index_lock_path,
+    index_publication_lock,
+    paper_lock_path,
+)
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DATA_DIR,
+    LOCK_DIR,
+    LOGS_DIR,
     PAPER_STORE_DIR,
     BOOKMARKS_FILE,
     MANUAL_DIR,
@@ -30,6 +43,32 @@ PORT            = 18080
 _bm_lock   = threading.Lock()
 _topic_lock = threading.Lock()
 _topic_jobs = {}
+_publication_thread_lock = threading.RLock()
+_search_snapshot_lock = threading.Lock()
+_search_snapshot = None
+_search_snapshot_built_at = 0.0
+_SEARCH_SNAPSHOT_TTL_SECONDS = 20.0
+_index_failure_snapshot_lock = threading.Lock()
+_index_failure_snapshot = None
+_index_failure_snapshot_built_at = 0.0
+_index_failure_snapshot_root = None
+_INDEX_FAILURE_SNAPSHOT_TTL_SECONDS = 2.0
+_PDF_ERROR_DIR = os.path.join(LOGS_DIR, "pdf_errors")
+
+_DELETE_MODES = ("daily", "weekly", "monthly", "manual")
+_ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
+_PAPER_PDF_NAME_RE = re.compile(r"^(\d{4}\.\d{4,5})_zh\.pdf$")
+_BOOKMARK_BODY_MAX_BYTES = 16 * 1024
+_BOOKMARK_ACTIONS = frozenset({
+    "toggle", "create_list", "delete_list", "rename_list", "remove", "move",
+})
+_BOOKMARK_LIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+_BOOKMARK_DATE_KEY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_BOOKMARK_WEEK_KEY_RE = re.compile(r"^\d{4}-W\d{2}$")
+_BOOKMARK_MONTH_KEY_RE = re.compile(r"^\d{4}-\d{2}$")
+_BOOKMARK_TOPIC_KEY_RE = re.compile(
+    r"^[a-z0-9][a-z0-9_-]{0,127}/\d{4}-\d{2}-\d{2}$"
+)
 
 # 部署路径前缀，如 /paper（nginx strip-prefix 模式）
 # 通过环境变量注入：Environment=BASE_PATH=/paper
@@ -76,10 +115,115 @@ def _request_admin_token(headers, payload=None):
 
 
 def _admin_ok(headers, payload=None):
-    expected = admin_token()
+    expected = str(admin_token() or "")
     if not expected:
         return True
-    return _request_admin_token(headers, payload) == expected
+    provided = str(_request_admin_token(headers, payload) or "")
+    return hmac.compare_digest(provided, expected)
+
+
+def _destructive_admin_ok(headers, payload=None):
+    """Require an explicitly configured token for destructive operations."""
+    expected = str(admin_token() or "")
+    provided = str(_request_admin_token(headers, payload) or "")
+    return bool(expected) and hmac.compare_digest(provided, expected)
+
+
+def _bookmark_text(value, field, *, required=False, max_length=256):
+    """Validate one bookmark API text field without coercing hostile values."""
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    value = value.strip()
+    if required and not value:
+        raise ValueError(f"{field} required")
+    if len(value) > max_length:
+        raise ValueError(f"{field} too long")
+    if re.search(r"[\x00-\x1f\x7f]", value):
+        raise ValueError(f"{field} contains control characters")
+    return value
+
+
+def _bookmark_list_id(value, field="list_id"):
+    value = _bookmark_text(value, field, required=True, max_length=80)
+    if not _BOOKMARK_LIST_ID_RE.fullmatch(value):
+        raise ValueError(f"invalid {field}")
+    return value
+
+
+def _bookmark_arxiv_id(value):
+    value = _bookmark_text(value, "arxiv_id", required=True, max_length=10)
+    if not _ARXIV_ID_RE.fullmatch(value):
+        raise ValueError("invalid arxiv_id")
+    return value
+
+
+def _bookmark_location(mode_value, key_value):
+    mode = _bookmark_text(mode_value, "mode", max_length=16)
+    key = _bookmark_text(key_value, "key", max_length=160)
+    if mode == "paper":
+        if key:
+            raise ValueError("invalid key")
+        return mode, key
+    patterns = {
+        "daily": _BOOKMARK_DATE_KEY_RE,
+        "manual": _BOOKMARK_DATE_KEY_RE,
+        "weekly": _BOOKMARK_WEEK_KEY_RE,
+        "monthly": _BOOKMARK_MONTH_KEY_RE,
+        "topic": _BOOKMARK_TOPIC_KEY_RE,
+    }
+    pattern = patterns.get(mode)
+    if pattern is None or not pattern.fullmatch(key):
+        raise ValueError("invalid bookmark location")
+    return mode, key
+
+
+def _validate_bookmark_request(req):
+    """Return a normalized bookmark mutation request or raise ValueError."""
+    action = _bookmark_text(
+        req.get("action"), "action", required=True, max_length=24
+    )
+    if action not in _BOOKMARK_ACTIONS:
+        raise ValueError("unknown action")
+
+    clean = {"action": action}
+    if action in {"toggle", "delete_list", "rename_list", "remove"}:
+        clean["list_id"] = _bookmark_list_id(req.get("list_id"))
+    if action == "move":
+        clean["from_list"] = _bookmark_list_id(
+            req.get("from_list"), "from_list"
+        )
+        clean["to_list"] = _bookmark_list_id(req.get("to_list"), "to_list")
+        if clean["from_list"] == clean["to_list"]:
+            raise ValueError("source and destination must differ")
+    if action in {"toggle", "remove", "move"}:
+        clean["arxiv_id"] = _bookmark_arxiv_id(req.get("arxiv_id"))
+    if action in {"create_list", "rename_list"}:
+        clean["name"] = _bookmark_text(
+            req.get("name"), "name", required=True, max_length=120
+        )
+    if action in {"toggle", "create_list"}:
+        optional_aid = req.get("arxiv_id")
+        if action == "toggle" or optional_aid not in (None, ""):
+            clean["arxiv_id"] = _bookmark_arxiv_id(optional_aid)
+            clean["mode"], clean["key"] = _bookmark_location(
+                req.get("mode"), req.get("key")
+            )
+    return clean
+
+
+def _invalidate_search_snapshot():
+    global _search_snapshot, _search_snapshot_built_at
+    global _index_failure_snapshot, _index_failure_snapshot_built_at
+    global _index_failure_snapshot_root
+    with _search_snapshot_lock:
+        _search_snapshot = None
+        _search_snapshot_built_at = 0.0
+    with _index_failure_snapshot_lock:
+        _index_failure_snapshot = None
+        _index_failure_snapshot_built_at = 0.0
+        _index_failure_snapshot_root = None
 
 
 def enqueue_topic_run(slug, force=False, refresh_terms=False, no_full=False):
@@ -125,6 +269,7 @@ def enqueue_topic_run(slug, force=False, refresh_terms=False, no_full=False):
 _submit_lock     = threading.Lock()
 _submit_queue    = []
 _submit_running  = False
+_submit_cancelled_ids = set()
 
 os.makedirs(MANUAL_DIR, exist_ok=True)
 
@@ -226,23 +371,46 @@ def _upsert_manual_index(mode, key, paper_entry):
     idx_dir  = mode_key_dir(mode, key)
     idx_file = os.path.join(idx_dir, "index.json")
     os.makedirs(idx_dir, exist_ok=True)
-    try:
-        with open(idx_file, encoding="utf-8") as f:
-            idx = json.load(f)
-    except Exception:
-        idx = {"mode": mode, "key": key, "generated_at": "", "total": 0, "papers": []}
-    papers = idx.get("papers", [])
-    aid = paper_entry.get("arxiv_id", "")
-    for i, p in enumerate(papers):
-        if p.get("arxiv_id") == aid:
-            papers[i] = paper_entry
-            break
-    else:
-        papers.insert(0, paper_entry)
-    idx["papers"] = papers
-    idx["total"]  = len(papers)
-    idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    write_json_atomic(idx_file, idx)
+    with index_publication_lock(
+        mode,
+        key,
+        lock_dir=LOCK_DIR,
+        timeout=0,
+    ):
+        if os.path.exists(idx_file):
+            try:
+                with open(idx_file, encoding="utf-8") as f:
+                    idx = json.load(f)
+            except (OSError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    f"manual index 读取失败，拒绝覆盖: {exc}"
+                ) from exc
+            if (
+                not isinstance(idx, dict)
+                or not isinstance(idx.get("papers"), list)
+            ):
+                raise RuntimeError("manual index 内容无效，拒绝覆盖")
+        else:
+            idx = {
+                "mode": mode,
+                "key": key,
+                "generated_at": "",
+                "total": 0,
+                "papers": [],
+            }
+        papers = idx["papers"]
+        aid = paper_entry.get("arxiv_id", "")
+        for i, p in enumerate(papers):
+            if isinstance(p, dict) and p.get("arxiv_id") == aid:
+                papers[i] = paper_entry
+                break
+        else:
+            papers.insert(0, paper_entry)
+        idx["papers"] = papers
+        idx["total"] = len(papers)
+        idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        write_json_atomic(idx_file, idx)
+    _invalidate_search_snapshot()
 
 
 def _do_submit_job(arxiv_id):
@@ -285,9 +453,15 @@ def _do_submit_job(arxiv_id):
         from translate_full import translate_full
         r = translate_full(arxiv_id=arxiv_id, output_dir=papers_dir,
                            no_cache=False, timeout=3600)
-        if r.get("pdf_path"):
+        with _submit_lock:
+            cancelled = arxiv_id in _submit_cancelled_ids
+        if cancelled:
+            _update_job(arxiv_id, status="error", msg="已手动终止")
+        elif r.get("pdf_path"):
             # 将 PDF 统一归档到 paper store，与 daily/weekly/monthly 保持一致
             paper_store.save_pdf(arxiv_id, r["pdf_path"])
+            if not paper_store.mark_pdf_verified(arxiv_id):
+                raise RuntimeError("PDF 已生成但 paper store 状态提交失败")
             paper_entry["pdf_zh"] = "papers/" + arxiv_id + "_zh.pdf"
             _upsert_manual_index(mode, key, paper_entry)
             _update_job(arxiv_id, status="done", msg="完成",
@@ -299,6 +473,7 @@ def _do_submit_job(arxiv_id):
         _update_job(arxiv_id, status="error", msg=str(e))
     finally:
         with _submit_lock:
+            _submit_cancelled_ids.discard(arxiv_id)
             _submit_running = False
         _drain_submit_queue()
 
@@ -325,6 +500,7 @@ def enqueue_submit(arxiv_id):
             "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         _save_jobs(jobs)
+        _submit_cancelled_ids.discard(arxiv_id)
         _submit_queue.append(arxiv_id)
     _drain_submit_queue()
     return True, "已加入队列"
@@ -371,6 +547,81 @@ def _pdf_display_filename(arxiv_id, title):
     return name
 
 
+def _entry_blocks_pdf(entry):
+    """Return whether one index/store row explicitly blocks publication."""
+    return bool(
+        isinstance(entry, dict)
+        and (
+            str(entry.get("pdf_status", "")).strip().lower() == "failed"
+            or entry.get("pdf_zh_failed") is True
+            # A quality taint is durable failure truth.  ``update_pdf_status``
+            # normally refuses to set it back to ok, but direct legacy JSON
+            # writes must never make a known pseudo-translation publishable.
+            or entry.get(paper_store.PDF_QUALITY_TAINT_FIELD) is True
+        )
+    )
+
+
+def _quality_failure_active(arxiv_id):
+    """Treat an active quality sidecar as a hard publication gate."""
+    if not _ARXIV_ID_RE.fullmatch(str(arxiv_id or "")):
+        return False
+    path = os.path.join(_PDF_ERROR_DIR, f"{arxiv_id}.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return False
+    category = str(report.get("category", "")).strip().lower()
+    return category.startswith("quality.")
+
+
+def _scan_index_failed_pdf_ids():
+    """Collect paper IDs explicitly marked failed by any repository index."""
+    failed = set()
+    for idx_file in _iter_data_index_files() or ():
+        try:
+            with open(idx_file, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            continue
+        papers = payload.get("papers", []) if isinstance(payload, dict) else []
+        if not isinstance(papers, list):
+            continue
+        for row in papers:
+            if isinstance(row, dict) and _entry_blocks_pdf(row):
+                arxiv_id = row.get("arxiv_id")
+                if _ARXIV_ID_RE.fullmatch(str(arxiv_id or "")):
+                    failed.add(arxiv_id)
+    return failed
+
+
+def _index_failed_pdf_ids():
+    """Return a short-lived failed-index snapshot for direct PDF routes."""
+    global _index_failure_snapshot, _index_failure_snapshot_built_at
+    global _index_failure_snapshot_root
+    now = time.monotonic()
+    root = os.path.realpath(DATA_DIR)
+    with _index_failure_snapshot_lock:
+        if (
+            _index_failure_snapshot is not None
+            and _index_failure_snapshot_root == root
+            and now - _index_failure_snapshot_built_at
+            < _INDEX_FAILURE_SNAPSHOT_TTL_SECONDS
+        ):
+            return set(_index_failure_snapshot)
+        failed = _scan_index_failed_pdf_ids()
+        _index_failure_snapshot = frozenset(failed)
+        _index_failure_snapshot_built_at = time.monotonic()
+        _index_failure_snapshot_root = root
+        return failed
+
+
+def _index_blocks_pdf(arxiv_id):
+    """Check every referencing index for an explicit failed publication row."""
+    return arxiv_id in _index_failed_pdf_ids()
+
+
 def _merge_paper_entry(stored, slim):
     """合并 paper store 与 index：非空 index 字段覆盖，空字段不覆盖完整数据。"""
     entry = dict(stored or {})
@@ -397,23 +648,49 @@ def js_str(value):
     return json.dumps("" if value is None else str(value), ensure_ascii=False)
 
 
-def paper_pdf_state(entry, pdir=None, aid=None):
-    """Return normalized PDF state for a merged paper entry."""
+def paper_pdf_state(entry, pdir=None, aid=None, source_entries=None,
+                    scan_indexes=False, index_failed_ids=None):
+    """Return the publication-safe PDF state for a paper.
+
+    A structurally valid old PDF is not publishable while either the paper
+    store, any supplied index row, a repository index (for direct routes), or
+    an active quality sidecar marks the paper failed.
+    """
     aid = aid or entry.get("arxiv_id", "")
     pdf_status = entry.get("pdf_status")
     local_pdf = bool(
         entry.get("pdf_zh") and pdir and
         os.path.exists(os.path.join(pdir, entry["pdf_zh"].replace("papers/", "", 1)))
     )
-    has_pdf = bool(aid and _paper_pdf_exists(aid)) or local_pdf
-    if has_pdf:
+    has_physical_pdf = bool(aid and _paper_pdf_exists(aid)) or local_pdf
+    stored = _read_paper_store(aid) if aid else {}
+    candidates = [entry, stored]
+    candidates.extend(source_entries or ())
+    status_blocked = any(_entry_blocks_pdf(candidate) for candidate in candidates)
+    if index_failed_ids is not None and aid:
+        status_blocked = status_blocked or aid in index_failed_ids
+    elif scan_indexes and aid:
+        status_blocked = status_blocked or _index_blocks_pdf(aid)
+    quality_blocked = bool(aid and _quality_failure_active(aid))
+    publication_blocked = status_blocked or quality_blocked
+    has_pdf = has_physical_pdf and not publication_blocked
+    if publication_blocked:
+        pdf_status = "failed"
+    elif has_pdf:
         pdf_status = "ok"
     pdf_failed = (
-        entry.get("pdf_zh_failed", False)
+        publication_blocked
+        or entry.get("pdf_zh_failed", False)
         or pdf_status == "failed"
         or (not has_pdf and entry.get("title_zh", "") and pdf_status not in ("ok", "none"))
     )
-    return {"has_pdf": has_pdf, "pdf_failed": pdf_failed, "pdf_status": pdf_status}
+    return {
+        "has_pdf": has_pdf,
+        "pdf_failed": pdf_failed,
+        "pdf_status": pdf_status,
+        "publication_blocked": publication_blocked,
+        "quality_blocked": quality_blocked,
+    }
 
 
 def enrich_paper_entry(slim, mode, key):
@@ -422,7 +699,9 @@ def enrich_paper_entry(slim, mode, key):
     stored = _read_paper_store(aid) if aid else {}
     entry = _merge_paper_entry(stored, slim or {})
     entry.setdefault("arxiv_id", aid)
-    state = paper_pdf_state(entry, papers_dir(mode, key), aid)
+    state = paper_pdf_state(
+        entry, papers_dir(mode, key), aid, source_entries=(stored, slim or {})
+    )
     if state["has_pdf"]:
         entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
         entry.pop("pdf_zh_failed", None)
@@ -483,7 +762,10 @@ def get_paper_entry(mode, key, arxiv_id):
     stored = _read_paper_store(arxiv_id)
     entry = _merge_paper_entry(stored, slim)
     entry.setdefault("arxiv_id", arxiv_id)
-    state = paper_pdf_state(entry, papers_dir(mode, key), arxiv_id)
+    state = paper_pdf_state(
+        entry, papers_dir(mode, key), arxiv_id,
+        source_entries=(stored, slim),
+    )
     if state["has_pdf"]:
         entry["pdf_zh"] = f"papers/{arxiv_id}_zh.pdf"
         entry.pop("pdf_zh_failed", None)
@@ -525,8 +807,7 @@ def count_pdfs(mode, key, index):
         aid = p.get("arxiv_id", "")
         if not aid:
             continue
-        status = p.get("pdf_status")
-        if status == "ok" or _paper_pdf_exists(aid):
+        if paper_pdf_state(p, papers_dir(mode, key), aid)["has_pdf"]:
             count += 1
     return count
 
@@ -711,10 +992,58 @@ BM_JS = r"""
 const BM = {
   data: {lists: {}},
 
+  adminHeaders() {
+    let token = localStorage.getItem('paperHubAdminToken') || '';
+    if (!token) {
+      token = (prompt('请输入管理员口令') || '').trim();
+      if (token) localStorage.setItem('paperHubAdminToken', token);
+    }
+    return {
+      'Content-Type': 'application/json',
+      'X-Topic-Admin-Token': token
+    };
+  },
+
+  validData(data) {
+    return !!data && typeof data === 'object' && !Array.isArray(data) &&
+      !!data.lists && typeof data.lists === 'object' &&
+      !Array.isArray(data.lists);
+  },
+
+  async readJsonResponse(response) {
+    let data;
+    try {
+      data = await response.json();
+    } catch (_) {
+      throw new Error('服务器返回了无效 JSON');
+    }
+    if (!response.ok) {
+      throw new Error((data && (data.error || data.msg)) ||
+                      `请求失败（HTTP ${response.status}）`);
+    }
+    if (!BM.validData(data)) throw new Error('服务器返回的收藏数据无效');
+    return data;
+  },
+
+  async mutate(payload) {
+    try {
+      const response = await fetch((window.BP||'') + '/api/bookmarks', {
+        method: 'POST', headers: BM.adminHeaders(),
+        body: JSON.stringify(payload)
+      });
+      const data = await BM.readJsonResponse(response);
+      BM.data = data;
+      return data;
+    } catch (error) {
+      alert('收藏操作失败：' + (error.message || error));
+      return null;
+    }
+  },
+
   async init() {
     try {
       const r = await fetch((window.BP||'') + '/api/bookmarks');
-      BM.data = await r.json();
+      BM.data = await BM.readJsonResponse(r);
     } catch(e) { BM.data = {lists: {}}; }
     BM.refreshButtons();
   },
@@ -775,12 +1104,9 @@ const BM = {
 
   /* ── 切换收藏状态 ── */
   async toggle(lid) {
-    const r = await fetch((window.BP||'') + '/api/bookmarks', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({action:'toggle', list_id:lid,
-                            arxiv_id:BM._aid, mode:BM._mode, key:BM._key})
-    });
-    BM.data = await r.json();
+    const data = await BM.mutate({action:'toggle', list_id:lid,
+                                  arxiv_id:BM._aid, mode:BM._mode, key:BM._key});
+    if (!data) return;
     BM.renderItems();
     BM.refreshButtons();
   },
@@ -793,12 +1119,9 @@ const BM = {
   async confirmCreate() {
     const name = document.getElementById('bm-new-name').value.trim();
     if (!name) return;
-    const r = await fetch((window.BP||'') + '/api/bookmarks', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({action:'create_list', name,
-                            arxiv_id:BM._aid, mode:BM._mode, key:BM._key})
-    });
-    BM.data = await r.json();
+    const data = await BM.mutate({action:'create_list', name,
+                                  arxiv_id:BM._aid, mode:BM._mode, key:BM._key});
+    if (!data) return;
     BM.renderItems();
     BM.refreshButtons();
     document.getElementById('bm-new-row').style.display = 'none';
@@ -808,42 +1131,32 @@ const BM = {
   /* ── 收藏页操作（通过 data 属性在页面元素上触发）── */
   async deleteList(lid) {
     if (!confirm('确认删除收藏列表？其中的论文记录也会清除。')) return;
-    const r = await fetch((window.BP||'') + '/api/bookmarks', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({action:'delete_list', list_id:lid})
-    });
-    BM.data = await r.json();
+    const data = await BM.mutate({action:'delete_list', list_id:lid});
+    if (!data) return;
     location.reload();
   },
 
   async renameList(lid, oldName) {
     const name = prompt('新列表名称：', oldName);
     if (!name || name === oldName) return;
-    const r = await fetch((window.BP||'') + '/api/bookmarks', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({action:'rename_list', list_id:lid, name})
-    });
-    BM.data = await r.json();
+    const data = await BM.mutate({action:'rename_list', list_id:lid, name});
+    if (!data) return;
     location.reload();
   },
 
   async removePaper(arxivId, lid) {
-    const r = await fetch((window.BP||'') + '/api/bookmarks', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({action:'remove', arxiv_id:arxivId, list_id:lid})
-    });
-    BM.data = await r.json();
+    const data = await BM.mutate(
+      {action:'remove', arxiv_id:arxivId, list_id:lid}
+    );
+    if (!data) return;
     document.getElementById('bm-paper-' + arxivId)?.remove();
   },
 
   async movePaper(arxivId, fromLid, toLid) {
     if (!toLid || toLid === fromLid) return;
-    const r = await fetch((window.BP||'') + '/api/bookmarks', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({action:'move', arxiv_id:arxivId,
-                            from_list:fromLid, to_list:toLid})
-    });
-    BM.data = await r.json();
+    const data = await BM.mutate({action:'move', arxiv_id:arxivId,
+                                  from_list:fromLid, to_list:toLid});
+    if (!data) return;
     document.getElementById('bm-paper-' + arxivId)?.remove();
   }
 };
@@ -857,10 +1170,16 @@ document.getElementById('bm-new-name').addEventListener('keydown', e => {
 });
 
 async function deletePaper(mode, key, aid) {
-  if (!confirm('确定删除这篇论文？\n将同时删除本地 HTML/PDF 文件及收藏记录，不可恢复。')) return;
+  if (!confirm('确定删除这篇论文？\n将删除当前索引的 HTML 与收藏；仅在无其他索引引用时删除共享 PDF。')) return;
+  let token = localStorage.getItem('paperHubAdminToken') || '';
+  if (!token) {
+    token = (prompt('请输入管理员口令') || '').trim();
+    if (!token) return;
+    localStorage.setItem('paperHubAdminToken', token);
+  }
   const r = await fetch((window.BP||'') + '/api/paper/delete', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-Topic-Admin-Token': token},
     body: JSON.stringify({mode, key, arxiv_id: aid})
   });
   const d = await r.json();
@@ -1093,30 +1412,152 @@ def build_papers_page(mode, key):
     return page(key, body, active_tab=mode)
 
 
-def _delete_paper(mode, key, arxiv_id):
-    """删除一篇论文：本地文件 + index.json 条目 + 收藏记录"""
-    import glob as _glob
+def _contained_path(root, candidate, label):
+    """Return the resolved candidate, rejecting paths that escape root."""
+    root_real = os.path.realpath(root)
+    candidate_real = os.path.realpath(candidate)
+    try:
+        contained = os.path.commonpath([root_real, candidate_real]) == root_real
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError("%s 路径越界" % label)
+    return candidate_real
 
-    # 1. 删 paper store 中的 PDF（JSON 不删，其他 mode 可能还在引用）
-    store_pdf = paper_store.pdf_path(arxiv_id)
-    if os.path.exists(store_pdf):
+
+def _validated_delete_location(mode, key, arxiv_id):
+    mode = str(mode or "").strip()
+    key = str(key or "").strip()
+    arxiv_id = str(arxiv_id or "").strip()
+    if mode not in _DELETE_MODES:
+        raise ValueError("无效的 mode")
+    if not _ARXIV_ID_RE.match(arxiv_id):
+        raise ValueError("无效的 arXiv ID")
+
+    formats = {
+        "daily": ("%Y-%m-%d", key),
+        "manual": ("%Y-%m-%d", key),
+        "weekly": ("%G-W%V", key),
+        "monthly": ("%Y-%m", key),
+    }
+    fmt, value = formats[mode]
+    try:
+        suffix = "-1" if mode == "weekly" else ("-01" if mode == "monthly" else "")
+        parse_fmt = fmt + ("-%u" if mode == "weekly" else ("-%d" if mode == "monthly" else ""))
+        parsed = datetime.strptime(value + suffix, parse_fmt)
+        if parsed.strftime(fmt) != value:
+            raise ValueError
+    except ValueError:
+        raise ValueError("无效的 %s key" % mode)
+
+    mode_root = _contained_path(DATA_DIR, mode_dir(mode), "mode")
+    idx_file = _contained_path(mode_root, mode_index_path(mode, key), "index")
+    papers_root = _contained_path(mode_root, mode_papers_dir(mode, key), "papers")
+    html_file = _contained_path(papers_root, os.path.join(papers_root, arxiv_id + ".html"), "HTML")
+    return mode, key, arxiv_id, idx_file, html_file
+
+
+def _iter_data_index_files():
+    """Yield trusted index.json files recursively, without following symlinks."""
+    if not os.path.isdir(DATA_DIR):
+        return
+    data_root = os.path.realpath(DATA_DIR)
+    for current, dirs, files in os.walk(DATA_DIR, followlinks=False):
+        dirs.sort()
+        if "index.json" not in files:
+            continue
+        candidate = os.path.join(current, "index.json")
         try:
-            os.remove(store_pdf)
-        except Exception:
-            pass
+            yield _contained_path(data_root, candidate, "index")
+        except ValueError:
+            continue
 
-    # 2. 从 index.json 移除条目
-    idx_file = mode_index_path(mode, key)
-    if os.path.exists(idx_file):
+
+def _index_reference_labels(arxiv_id):
+    """Return (reference locations, unreadable indexes) for arxiv_id."""
+    labels = []
+    unreadable = []
+    data_root = os.path.realpath(DATA_DIR)
+    for idx_file in _iter_data_index_files() or ():
         try:
             with open(idx_file, encoding="utf-8") as f:
                 idx = json.load(f)
-            idx["papers"] = [p for p in idx.get("papers", [])
-                             if p.get("arxiv_id") != arxiv_id]
-            idx["total"] = len(idx["papers"])
-            write_json_atomic(idx_file, idx)
-        except Exception:
-            pass
+        except (OSError, ValueError, TypeError):
+            rel = os.path.relpath(os.path.dirname(idx_file), data_root)
+            unreadable.append(rel.replace(os.sep, "/"))
+            continue
+        if not isinstance(idx, dict) or not isinstance(idx.get("papers", []), list):
+            rel = os.path.relpath(os.path.dirname(idx_file), data_root)
+            unreadable.append(rel.replace(os.sep, "/"))
+            continue
+        if not any(p.get("arxiv_id") == arxiv_id for p in idx.get("papers", [])
+                   if isinstance(p, dict)):
+            continue
+        rel = os.path.relpath(os.path.dirname(idx_file), data_root)
+        labels.append(rel.replace(os.sep, "/"))
+    return labels, unreadable
+
+
+@contextmanager
+def _publication_lock(mode, key, arxiv_id=None):
+    """Freeze the index catalog, target index, and optional shared paper."""
+    lock_specs = [
+        (catalog_lock_path(LOCK_DIR), LOCK_EXCLUSIVE),
+        (index_lock_path(mode, key, lock_dir=LOCK_DIR), LOCK_EXCLUSIVE),
+    ]
+    if arxiv_id:
+        lock_specs.append(
+            (paper_lock_path(arxiv_id, lock_dir=LOCK_DIR), LOCK_EXCLUSIVE)
+        )
+    with _publication_thread_lock:
+        try:
+            with PublicationLock(lock_specs, timeout=0):
+                yield
+        except PublicationBusyError as exc:
+            raise PublicationBusyError(
+                "索引正在由定时任务发布，请稍后重试删除"
+            ) from exc
+
+
+def _delete_paper_locked(mode, key, arxiv_id, idx_file, html_file):
+    """Delete under a held publication lock."""
+    if not os.path.isfile(idx_file):
+        raise FileNotFoundError("index 不存在")
+    try:
+        with open(idx_file, encoding="utf-8") as f:
+            idx = json.load(f)
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError("index 读取失败: %s" % exc)
+    if not isinstance(idx, dict):
+        raise RuntimeError("index 内容无效")
+
+    papers = idx.get("papers", [])
+    if not isinstance(papers, list):
+        raise RuntimeError("index papers 字段无效")
+    kept = [
+        p for p in papers
+        if not isinstance(p, dict) or p.get("arxiv_id") != arxiv_id
+    ]
+    if len(kept) == len(papers):
+        raise FileNotFoundError("论文不在该 index 中")
+    idx["papers"] = kept
+    idx["total"] = len(kept)
+    write_json_atomic(idx_file, idx)
+
+    html_deleted = False
+    if os.path.isfile(html_file):
+        os.remove(html_file)
+        html_deleted = True
+
+    remaining_references, reference_scan_errors = _index_reference_labels(arxiv_id)
+    pdf_deleted = False
+    if not remaining_references and not reference_scan_errors:
+        store_pdf = _contained_path(
+            PAPER_STORE_DIR, paper_store.pdf_path(arxiv_id), "paper-store PDF"
+        )
+        if os.path.isfile(store_pdf):
+            os.remove(store_pdf)
+            pdf_deleted = True
 
     # 3. 从 bookmarks.json 移除对应条目
     with _bm_lock:
@@ -1138,6 +1579,30 @@ def _delete_paper(mode, key, arxiv_id):
             if arxiv_id in jobs:
                 del jobs[arxiv_id]
                 _save_jobs(jobs)
+
+    return {
+        "removed_from_index": True,
+        "html_deleted": html_deleted,
+        "pdf_deleted": pdf_deleted,
+        "remaining_references": remaining_references,
+        "reference_scan_errors": reference_scan_errors,
+    }
+
+
+def _delete_paper(mode, key, arxiv_id):
+    """Delete one index reference and only remove shared files when unreferenced."""
+    try:
+        validated = _validated_delete_location(mode, key, arxiv_id)
+        with _publication_lock(
+            validated[0],
+            validated[1],
+            validated[2],
+        ):
+            return _delete_paper_locked(*validated)
+    finally:
+        # A failure may happen after the atomic index replacement.  Never leave
+        # the in-memory search snapshot serving the pre-delete publication set.
+        _invalidate_search_snapshot()
 
 
 def _enrich_slim_papers(slim_list, mode, key, limit=None):
@@ -1305,6 +1770,33 @@ def _topic_display_name(profile):
     return (profile.get("display_name") or profile.get("query") or profile.get("slug") or "").strip()
 
 
+def _topic_history_html(slug, keys, recent_limit=12):
+    """Render recent topic dates plus an expandable complete history."""
+    keys = list(keys or [])
+
+    def links(values):
+        return " ".join(
+            f'<a class="btn btn-detail" '
+            f'href="/topic/{h_attr(slug)}/{h_attr(key)}">{h_text(key)}</a>'
+            for key in values
+        )
+
+    recent = links(keys[:recent_limit])
+    older = keys[recent_limit:]
+    if not older:
+        return recent
+    return (
+        f"{recent}"
+        f'<details style="margin-top:10px">'
+        f'<summary style="cursor:pointer;color:#cbd5e1">'
+        f'更早 {len(older)} 天（最早 {h_text(older[-1])}）'
+        f"</summary>"
+        f'<div class="btns" style="margin-top:8px;max-height:180px;'
+        f'overflow:auto">{links(older)}</div>'
+        f"</details>"
+    )
+
+
 def _topic_admin_js():
     return """
 function topicToken() {
@@ -1411,10 +1903,7 @@ def build_topic_detail(slug, key=None):
     cards_html = "".join(paper_card(p, "topic", f"{slug}/{key}", pdir) for p in papers)
     if not cards_html:
         cards_html = '<div class="empty"><div class="empty-icon">📭</div><p>今天还没有命中足够新的论文</p></div>'
-    history = " ".join(
-        f'<a class="btn btn-detail" href="/topic/{h_attr(slug)}/{h_attr(k)}">{h_text(k)}</a>'
-        for k in keys[:12]
-    )
+    history = _topic_history_html(slug, keys)
     terms = profile.get("generated_terms", {})
     must = "\n".join(terms.get("must", []))
     should = "\n".join(terms.get("should", []))
@@ -1456,7 +1945,10 @@ def build_topic_detail(slug, key=None):
       </div>
     </details>
   </div>
-  <div style="margin-bottom:14px;color:#94a3b8;font-size:13px">当前日期：{h_text(key or '尚未生成')} &nbsp; 历史：{history}</div>
+  <div style="margin-bottom:14px;color:#94a3b8;font-size:13px">
+    <div>当前日期：{h_text(key or '尚未生成')} &nbsp; 历史：</div>
+    <div class="btns" style="margin-top:8px">{history}</div>
+  </div>
   <div class="cards">{cards_html}</div>
 </div>
 <script>
@@ -1723,22 +2215,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── /api/paper/delete  删除论文 ────────────────────
         if raw == "/api/paper/delete":
-            length = int(self.headers.get("Content-Length", 0))
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                self.send_json({"error": "bad content length"}, 400); return
+            if length < 0 or length > 65536:
+                self.send_json({"error": "request too large"}, 413); return
             try:
                 req = json.loads(self.rfile.read(length).decode("utf-8"))
             except Exception:
                 self.send_json({"error": "bad json"}, 400); return
+            if not isinstance(req, dict):
+                self.send_json({"error": "bad json"}, 400); return
+            if not _destructive_admin_ok(self.headers, req):
+                self.send_json({"error": "forbidden"}, 403); return
             mode     = req.get("mode", "")
             key      = req.get("key", "")
-            arxiv_id = req.get("arxiv_id", "").strip()
+            arxiv_id = req.get("arxiv_id", "")
             if not (mode and key and arxiv_id):
                 self.send_json({"error": "缺少参数"}, 400); return
             try:
-                _delete_paper(mode, key, arxiv_id)
-                self.send_json({"ok": True})
+                result = _delete_paper(mode, key, arxiv_id)
+                result["ok"] = True
+                self.send_json(result)
+            except PublicationBusyError as e:
+                self.send_json({"error": str(e)}, 409)
+            except ValueError as e:
+                self.send_json({"error": str(e)}, 400)
+            except FileNotFoundError as e:
+                self.send_json({"error": str(e)}, 404)
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
             return
+
+        # ── /api/status/kill  终止当前翻译任务（仅 POST）──
+        if raw == "/api/status/kill":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                self.send_json({"error": "bad content length"}, 400); return
+            if length < 0 or length > 65536:
+                self.send_json({"error": "request too large"}, 413); return
+            req = {}
+            if length:
+                try:
+                    req = json.loads(self.rfile.read(length).decode("utf-8"))
+                except Exception:
+                    self.send_json({"error": "bad json"}, 400); return
+                if not isinstance(req, dict):
+                    self.send_json({"error": "bad json"}, 400); return
+            if not _destructive_admin_ok(self.headers, req):
+                self.send_json({"error": "forbidden"}, 403); return
+            arxiv_id = str(req.get("arxiv_id", "") or "").strip()
+            if arxiv_id:
+                return self.send_json(kill_current_translation(arxiv_id))
+            return self.send_json(kill_current_translation())
 
         # ── /api/submit  手动提交 arxiv_id ─────────────────
         if raw == "/api/submit":
@@ -1823,15 +2354,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if raw != "/api/bookmarks":
             self.send_json({"error": "not found"}, 404)
             return
-        length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self.send_json({"error": "bad content length"}, 400)
+            return
+        if length < 0 or length > _BOOKMARK_BODY_MAX_BYTES:
+            self.send_json({"error": "request too large"}, 413)
+            return
+        body = self.rfile.read(length)
         try:
             req = json.loads(body.decode("utf-8"))
         except Exception:
             self.send_json({"error": "bad json"}, 400)
             return
+        if not isinstance(req, dict):
+            self.send_json({"error": "bad json"}, 400)
+            return
+        if not _admin_ok(self.headers, req):
+            self.send_json({"error": "forbidden"}, 403)
+            return
+        try:
+            req = _validate_bookmark_request(req)
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
+            return
 
-        action = req.get("action", "")
+        action = req["action"]
         with _bm_lock:
             bm = load_bookmarks()
             lists = bm.setdefault("lists", {})
@@ -1844,7 +2393,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if lid not in lists:
                     self.send_json({"error": "list not found"}, 404); return
                 papers = lists[lid].setdefault("papers", [])
-                idx    = next((i for i, p in enumerate(papers) if p["arxiv_id"] == aid), -1)
+                idx = next(
+                    (i for i, p in enumerate(papers)
+                     if p.get("arxiv_id") == aid),
+                    -1,
+                )
                 if idx >= 0:
                     papers.pop(idx)          # 已有 → 移除
                 else:
@@ -1852,13 +2405,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "added": datetime.now().strftime("%Y-%m-%d")})
 
             elif action == "create_list":
-                name = req.get("name", "").strip()
-                if not name:
-                    self.send_json({"error": "name required"}, 400); return
-                lid = re.sub(r'[^a-z0-9_-]', '', name.lower().replace(" ", "_")) or \
-                      f"list_{len(lists)}"
-                if lid in lists:
-                    lid = lid + f"_{len(lists)}"
+                name = req["name"]
+                base_lid = (
+                    re.sub(
+                        r"[^a-z0-9_-]", "", name.lower().replace(" ", "_")
+                    )[:64]
+                    or f"list_{len(lists)}"
+                )
+                lid = base_lid
+                suffix = len(lists)
+                while lid in lists:
+                    suffix += 1
+                    lid = f"{base_lid[:70]}_{suffix}"
                 lists[lid] = {
                     "name": name,
                     "created": datetime.now().strftime("%Y-%m-%d"),
@@ -1869,7 +2427,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if aid:
                     lists[lid]["papers"].append({
                         "arxiv_id": aid,
-                        "mode": req.get("mode",""), "key": req.get("key",""),
+                        "mode": req.get("mode", ""), "key": req.get("key", ""),
                         "added": datetime.now().strftime("%Y-%m-%d")
                     })
 
@@ -1889,7 +2447,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if lid in lists:
                     lists[lid]["papers"] = [
                         p for p in lists[lid].get("papers", [])
-                        if p["arxiv_id"] != aid
+                        if p.get("arxiv_id") != aid
                     ]
 
             elif action == "move":
@@ -1898,16 +2456,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 aid      = req.get("arxiv_id", "")
                 if from_lid in lists and to_lid in lists:
                     entry = next((p for p in lists[from_lid].get("papers",[])
-                                  if p["arxiv_id"] == aid), None)
+                                  if p.get("arxiv_id") == aid), None)
                     if entry:
                         lists[from_lid]["papers"] = [
-                            p for p in lists[from_lid]["papers"] if p["arxiv_id"] != aid
+                            p for p in lists[from_lid]["papers"]
+                            if p.get("arxiv_id") != aid
                         ]
-                        if not any(p["arxiv_id"] == aid
+                        if not any(p.get("arxiv_id") == aid
                                    for p in lists[to_lid].get("papers",[])):
                             lists[to_lid].setdefault("papers", []).append(entry)
-            else:
-                self.send_json({"error": "unknown action"}, 400); return
 
             save_bookmarks(bm)
         self.send_json(bm)
@@ -1939,8 +2496,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json(get_system_status())
 
         # ── /api/status/kill  终止当前翻译任务 ───────────
-        if raw.startswith("/api/status/kill"):
-            return self.send_json(kill_current_translation())
+        if raw == "/api/status/kill":
+            return self.send_json({"error": "POST only"}, 405)
 
         # ── /search  搜索页面 ─────────────────────────────
         if raw == "/search":
@@ -1998,11 +2555,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             arxiv_id = parts[1]
             if re.match(r'^\d{4}\.\d+$', arxiv_id):
                 fp = paper_store.pdf_path(arxiv_id)
-                if os.path.exists(fp):
-                    meta = _read_paper_store(arxiv_id)
+                meta = _read_paper_store(arxiv_id)
+                state = paper_pdf_state(
+                    meta, aid=arxiv_id, scan_indexes=True
+                )
+                if state["has_pdf"] and os.path.exists(fp):
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
                     return self.send_file(fp, _pdf_display_filename(arxiv_id, title_zh))
-                return self.send_404(f"{arxiv_id} PDF 不存在")
+                return self.send_404(f"{arxiv_id} PDF 尚未通过发布门禁")
             return self.send_404(f"{arxiv_id} 未找到")
 
         # ── /detail/<arxiv_id>  全局详情页（不依赖 daily/weekly/monthly 索引）──
@@ -2019,10 +2579,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # ── /papers/<file>  paper store 静态文件回退（nginx 未接管时使用）────
         if len(parts) == 2 and parts[0] == "papers":
             name = parts[1]
-            if re.match(r'^[A-Za-z0-9._-]+$', name):
-                fp = os.path.join(PAPER_STORE_DIR, name)
-                if os.path.isfile(fp):
-                    return self.send_file(fp)
+            pdf_match = _PAPER_PDF_NAME_RE.fullmatch(name)
+            if not pdf_match:
+                return self.send_404(f"{name} 不存在")
+            arxiv_id = pdf_match.group(1)
+            state = paper_pdf_state(
+                _read_paper_store(arxiv_id),
+                aid=arxiv_id,
+                scan_indexes=True,
+            )
+            if not state["has_pdf"]:
+                return self.send_404(
+                    f"{arxiv_id} PDF 尚未通过发布门禁"
+                )
+            fp = os.path.join(PAPER_STORE_DIR, name)
+            if os.path.isfile(fp):
+                return self.send_file(fp)
             return self.send_404(f"{name} 不存在")
 
 
@@ -2031,8 +2603,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             arxiv_id = parts[1]
             if re.match(r'^\d{4}\.\d+$', arxiv_id):
                 fp = paper_store.pdf_path(arxiv_id)
-                if os.path.exists(fp):
-                    meta = _read_paper_store(arxiv_id)
+                meta = _read_paper_store(arxiv_id)
+                state = paper_pdf_state(
+                    meta, aid=arxiv_id, scan_indexes=True
+                )
+                if state["has_pdf"] and os.path.exists(fp):
                     title_zh = meta.get("title_zh") or meta.get("title") or arxiv_id
                     pdf_version = int(os.path.getmtime(fp))
                     pdf_src = f"{BASE_PATH}/papers/{arxiv_id}_zh.pdf?v={pdf_version}"
@@ -2048,7 +2623,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 <iframe src="{pdf_src}#view=FitH" title="{safe_title}"></iframe>
 </body></html>"""
                     return self.send_html(html, cache_control="no-store")
-                return self.send_404(f"{arxiv_id} PDF 不存在")
+                return self.send_404(f"{arxiv_id} PDF 尚未通过发布门禁")
 
         # ── /  首页 ──────────────────────────────────────
         if not parts:
@@ -2227,15 +2802,10 @@ async function submitId(aid) {{ document.getElementById('aid-input').value=aid; 
     return page("手动添加", body, active_tab="submit")
 
 
-def search_papers(query, limit=60):
-    """在所有 index.json 里模糊搜索，按 arXiv ID 去重返回 paper dict 列表。"""
-    q = query.lower().strip()
-    if not q:
-        return []
-
-    results_by_aid = {}
-    modes = ["daily", "weekly", "monthly", "manual"]
-    for mode in modes:
+def _ordered_search_index_files():
+    """Yield regular modes first, then every other recursive index."""
+    seen = set()
+    for mode in _DELETE_MODES:
         mode_path = mode_dir(mode)
         if not os.path.isdir(mode_path):
             continue
@@ -2244,47 +2814,123 @@ def search_papers(query, limit=60):
             if not os.path.isfile(idx_file):
                 continue
             try:
-                with open(idx_file, encoding="utf-8") as f:
-                    idx = json.load(f)
-            except Exception:
+                trusted = _contained_path(DATA_DIR, idx_file, "index")
+            except ValueError:
                 continue
-            for slim in idx.get("papers", []):
-                aid = slim.get("arxiv_id", "")
-                if not aid:
-                    continue
-                stored = _read_paper_store(aid)
-                p = _merge_paper_entry(stored, slim)
-                fields = " ".join([
-                    aid,
-                    p.get("title", ""),
-                    p.get("title_zh", ""),
-                    p.get("summary_zh", ""),
-                    p.get("authors", ""),
-                    " ".join(p.get("keywords_zh", []) or []),
-                ]).lower()
-                if q in fields:
-                    if aid not in results_by_aid:
-                        hit = dict(p)
-                        hit["_mode"] = mode
-                        hit["_key"]  = key
-                        hit["_detail_href"] = f"/detail/{aid}"
-                        hit["_hide_delete"] = True
-                        hit["_locations"] = []
-                        results_by_aid[aid] = hit
-                    results_by_aid[aid]["_locations"].append((mode, key))
+            seen.add(trusted)
+            yield trusted
+    for idx_file in _iter_data_index_files() or ():
+        if idx_file not in seen:
+            yield idx_file
 
-    results = list(results_by_aid.values())
-    for hit in results:
-        locs = hit.get("_locations", [])
-        labels = [f"{mode}/{key}" for mode, key in locs]
+
+def _search_location(idx_file, idx):
+    rel_dir = os.path.relpath(os.path.dirname(idx_file), os.path.realpath(DATA_DIR))
+    parts = rel_dir.split(os.sep)
+    mode = str(idx.get("mode") or (parts[0] if parts else "paper"))
+    key = str(idx.get("key") or (parts[-1] if parts else ""))
+    if parts and parts[0] == "topic" and len(parts) >= 3:
+        return "topic/%s/%s" % (parts[1], key), "paper", ""
+    if mode in _DELETE_MODES:
+        return "%s/%s" % (mode, key), mode, key
+    return rel_dir.replace(os.sep, "/"), "paper", ""
+
+
+def _searchable_text(value):
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item) for item in value)
+    return str(value or "")
+
+
+def _build_search_snapshot():
+    entries = {}
+    locations = {}
+    preferred = {}
+    for idx_file in _ordered_search_index_files():
+        try:
+            with open(idx_file, encoding="utf-8") as f:
+                idx = json.load(f)
+        except (OSError, ValueError, TypeError):
+            continue
+        if not isinstance(idx, dict) or not isinstance(idx.get("papers", []), list):
+            continue
+        label, card_mode, card_key = _search_location(idx_file, idx)
+        for slim in idx.get("papers", []):
+            if not isinstance(slim, dict):
+                continue
+            aid = str(slim.get("arxiv_id", "")).strip()
+            if not _ARXIV_ID_RE.match(aid):
+                continue
+            if aid not in entries:
+                entries[aid] = dict(slim)
+                preferred[aid] = (card_mode, card_key)
+                locations[aid] = []
+            else:
+                entries[aid] = _merge_paper_entry(entries[aid], slim)
+            if label not in locations[aid]:
+                locations[aid].append(label)
+
+    snapshot = []
+    for aid, slim in entries.items():
+        stored = _read_paper_store(aid)
+        if not isinstance(stored, dict):
+            stored = {}
+        paper = _merge_paper_entry(stored, slim)
+        paper.setdefault("arxiv_id", aid)
+        paper["_mode"], paper["_key"] = preferred[aid]
+        paper["_detail_href"] = "/detail/%s" % aid
+        paper["_hide_delete"] = True
+        paper["_locations"] = list(locations[aid])
+        fields = [
+            aid,
+            paper.get("title", ""),
+            paper.get("title_zh", ""),
+            paper.get("summary_zh", ""),
+            paper.get("authors", ""),
+            paper.get("keywords_zh", []),
+        ]
+        snapshot.append({
+            "paper": paper,
+            "search_text": " ".join(_searchable_text(value) for value in fields).lower(),
+        })
+    return snapshot
+
+
+def _get_search_snapshot():
+    global _search_snapshot, _search_snapshot_built_at
+    now = time.monotonic()
+    with _search_snapshot_lock:
+        if (_search_snapshot is not None and
+                now - _search_snapshot_built_at < _SEARCH_SNAPSHOT_TTL_SECONDS):
+            return _search_snapshot
+        _search_snapshot = _build_search_snapshot()
+        _search_snapshot_built_at = time.monotonic()
+        return _search_snapshot
+
+
+def search_papers(query, limit=60):
+    """Search a short-lived all-index snapshot, deduplicated by arXiv ID."""
+    q = query.lower().strip()
+    if not q:
+        return []
+    results = []
+    for record in _get_search_snapshot():
+        if q not in record["search_text"]:
+            continue
+        hit = dict(record["paper"])
+        labels = list(hit.get("_locations", []))
+        hit["_locations"] = labels
         if len(labels) > 1:
             shown = "、".join(labels[:3])
             if len(labels) > 3:
-                shown += f" 等 {len(labels)} 个索引"
+                shown += " 等 %s 个索引" % len(labels)
             hit["_source_note"] = shown
         elif labels:
             hit["_source_note"] = labels[0]
-    return results[:limit]
+        results.append(hit)
+        if len(results) >= limit:
+            break
+    return results
 
 
 def build_search_page():
@@ -2343,8 +2989,28 @@ def get_system_status():
 
     with _submit_lock:
         jobs = _load_jobs()
-    job_list = sorted(jobs.values(),
-                      key=lambda j: j.get("submitted_at", ""), reverse=True)
+    index_failed_ids = _index_failed_pdf_ids()
+    job_list = []
+    for raw_job in sorted(
+        jobs.values(),
+        key=lambda item: item.get("submitted_at", ""),
+        reverse=True,
+    ):
+        job = dict(raw_job)
+        arxiv_id = str(job.get("arxiv_id", "") or "")
+        if _ARXIV_ID_RE.fullmatch(arxiv_id):
+            state = paper_pdf_state(
+                _read_paper_store(arxiv_id),
+                aid=arxiv_id,
+                index_failed_ids=index_failed_ids,
+            )
+            if state["publication_blocked"]:
+                job.pop("pdf_zh", None)
+                job["pdf_status"] = "failed"
+                if job.get("status") in ("done", "done_no_pdf"):
+                    job["status"] = "error"
+                    job["msg"] = "PDF 未通过翻译质量或编译发布门禁"
+        job_list.append(job)
 
     total, used, free = shutil.disk_usage("/")
     disk = {
@@ -2369,8 +3035,15 @@ def get_system_status():
             cmd  = parts[10] if len(parts) > 10 else ""
             if "defunct" in cmd or "Z" in stat:
                 zombie_count += 1
-            elif "full_translate_driver" in cmd:
-                arxiv_id = cmd.strip().split()[-1] if cmd.strip().split() else ""
+            else:
+                driver_match = re.search(
+                    r"(?:^|\s)python3\s+/tmp/full_translate_driver\.py\s+"
+                    r"(\d{4}\.\d{4,5})(?:\s|$)",
+                    cmd,
+                )
+                if not driver_match:
+                    continue
+                arxiv_id = driver_match.group(1)
                 docker_procs.append({
                     "arxiv_id": arxiv_id,
                     "cpu": parts[2], "mem": parts[3],
@@ -2389,31 +3062,75 @@ def get_system_status():
     }
 
 
-def kill_current_translation():
-    """终止容器内当前正在运行的翻译进程"""
+def kill_current_translation(arxiv_id=None):
+    """只终止指定（或唯一）论文的完整容器进程树。"""
+    if arxiv_id and not _ARXIV_ID_RE.fullmatch(arxiv_id):
+        return {"ok": False, "msg": "无效的 arXiv ID"}
     try:
-        out = subprocess.check_output(
-            ["docker", "exec", GPT_ACADEMIC_CONTAINER,
-             "sh", "-c", "pgrep -f full_translate_driver || echo ''"],
-            timeout=5, stderr=subprocess.DEVNULL
-        ).decode().strip()
-        if not out:
+        from translate_full import (
+            list_container_drivers,
+            terminate_container_driver_tree,
+        )
+
+        drivers = list_container_drivers(
+            container_name=GPT_ACADEMIC_CONTAINER,
+        )
+        active_ids = sorted({
+            item.get("arxiv_id", "")
+            for item in drivers
+            if _ARXIV_ID_RE.fullmatch(str(item.get("arxiv_id", "")))
+        })
+        if arxiv_id:
+            if arxiv_id not in active_ids:
+                return {
+                    "ok": False,
+                    "msg": f"论文 {arxiv_id} 没有正在运行的翻译进程",
+                }
+            target_id = arxiv_id
+        elif not active_ids:
             return {"ok": False, "msg": "没有正在运行的翻译进程"}
-        pids = out.split()
-        for pid in pids:
-            subprocess.call(
-                ["docker", "exec", GPT_ACADEMIC_CONTAINER, "kill", "-9", pid],
-                timeout=5, stderr=subprocess.DEVNULL
-            )
+        elif len(active_ids) > 1:
+            return {
+                "ok": False,
+                "msg": "检测到多个翻译任务，请指定 arxiv_id，未执行终止",
+                "arxiv_ids": active_ids,
+            }
+        else:
+            target_id = active_ids[0]
+
+        cleanup = terminate_container_driver_tree(
+            target_id,
+            container_name=GPT_ACADEMIC_CONTAINER,
+        )
+        if not cleanup.get("found"):
+            return {
+                "ok": False,
+                "msg": f"论文 {target_id} 的翻译进程已结束，无需终止",
+            }
+        if not cleanup.get("verified"):
+            return {
+                "ok": False,
+                "msg": f"论文 {target_id} 的进程树清理未完全验证",
+                "arxiv_id": target_id,
+                "survivors": cleanup.get("survivors", []),
+            }
+
         with _submit_lock:
+            _submit_cancelled_ids.add(target_id)
             jobs = _load_jobs()
-            for j in jobs.values():
-                if j.get("status") in ("full_pdf", "abstract", "fetching"):
-                    j["status"] = "error"
-                    j["msg"] = "已手动终止"
-                    j["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            _save_jobs(jobs)
-        return {"ok": True, "msg": "已终止 PID: " + ", ".join(pids)}
+            job = jobs.get(target_id)
+            if job and job.get("status") in ("full_pdf", "abstract", "fetching"):
+                job["status"] = "error"
+                job["msg"] = "已手动终止"
+                job["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                _save_jobs(jobs)
+        return {
+            "ok": True,
+            "msg": f"已终止 {target_id} 的完整进程树",
+            "arxiv_id": target_id,
+            "driver_pids": cleanup.get("driver_pids", []),
+            "target_pids": cleanup.get("target_pids", []),
+        }
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -2558,9 +3275,11 @@ def build_status_page():
         'function manualRefresh(){location.reload();}\n'
         'async function killJob(){\n'
         '  if(!confirm("确定终止当前翻译任务？")) return;\n'
-        '  const r=await fetch((window.BP||"")+"/api/status/kill",{method:"POST"});\n'
+        '  let token=localStorage.getItem("paperHubAdminToken")||"";\n'
+        '  if(!token){token=(prompt("请输入管理员口令")||"").trim();if(!token)return;localStorage.setItem("paperHubAdminToken",token);}\n'
+        '  const r=await fetch((window.BP||"")+"/api/status/kill",{method:"POST",headers:{"X-Topic-Admin-Token":token}});\n'
         '  const d=await r.json();\n'
-        '  alert(d.ok?"✅ "+d.msg:"❌ "+d.msg);\n'
+        '  alert(d.ok?"✅ "+d.msg:"❌ "+(d.msg||d.error||"未知错误"));\n'
         '  setTimeout(()=>location.reload(),1000);\n'
         '}\n'
         '</script>'

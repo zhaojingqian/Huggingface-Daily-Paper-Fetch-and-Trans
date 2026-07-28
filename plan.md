@@ -31,6 +31,8 @@ Paper Hub 是一个面向 AI 论文阅读和归档的自动化系统：抓取 Hu
 | PDF wrapper | 完成 | `/view/<arxiv_id>` |
 | 行为合约测试 | 完成 | `tests/test_web_server_contract.py` |
 | 论文修复 skill | 完成 | `$paper-trans-repair` |
+| 统一翻译质量门禁 | 完成 | `paperhub.translation_quality` |
+| 当前周五模式 repair | 完成 | `scripts/repair_weekly_current.py` |
 
 ---
 
@@ -48,10 +50,13 @@ translate_arxiv.py
 data/papers/<arxiv_id>.json
     ↓
 translate_full.py
-    ↓ docker exec
+    ↓ locks/full-translation.lock
+    ↓ serialized docker exec
 full_translate_driver.py
+    ↓ chunk v11 + shared translation quality gate
     ↓
 data/papers/<arxiv_id>_zh.pdf
+    ↓ PDF header + EOF gate / quality taint
     ↓
 web_server.py
     ↓
@@ -76,12 +81,23 @@ paper_card() / detail page / bookmark page
 - `enrich_paper_entry()`：统一元数据合并。
 - `render_paper_actions()`：统一按钮链接生成。
 - `h_text()` / `h_attr()` / `js_str()`：统一输出转义。
+- `_get_search_snapshot()`：20 秒 TTL 的递归全索引搜索快照，按 arXiv ID 去重。
+- `_validated_delete_location()` / `_index_reference_labels()`：限制删除路径并保护跨 mode 共享 PDF。
 
 ### 翻译容器
 
 当前生产容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。该镜像默认使用 `GPT_ACADEMIC_SLIM_TEX_PROFILE=full`，继承原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，只裁剪中文翻译不需要的 ML/runtime/cache/doc/source 负载。
 
 2026-06-12 已确认新容器可用，并删除旧容器 `gpt-academic-latex` 和旧镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`；本机不再保留旧 Docker 回滚副本。根分区可用空间从切换前的紧张状态恢复到约 14GB。
+
+所有全文翻译入口在 `translate_full.py` 最底层通过
+`locks/full-translation.lock` 串行化。容器缓存清理和容器重启也竞争同一
+把锁，但采用非阻塞策略：有翻译运行时跳过维护，不排队后突然打断下一篇。
+每篇驱动使用独立 session 和 subreaper supervisor；timeout/Web kill 只按
+精确 arXiv 进程树终止并回收子孙进程。Docker 控制操作也有默认 30 秒的有界
+超时。TeX 子进程统一禁用 shell escape，并使用受限的 openin/openout
+策略。生产、cron、测试固定使用
+`/root/.pyenv/versions/3.10.13/bin/python3`，不支持回退到系统旧 Python。
 
 ---
 
@@ -100,6 +116,10 @@ paper_card() / detail page / bookmark page
 | PDF 文件 | `/papers/<id>_zh.pdf` 保留 `Range` / `206` |
 | 直接 PDF | `/pdf/<id>/<title>.pdf` 保留中文 filename 响应头 |
 | 路径前缀 | `BASE_PATH=/paper` 下内部链接必须正确加前缀，请求入口也必须接受 `/paper/...` |
+| 破坏性 API | `/api/paper/delete`、`/api/status/kill` 仅接受 POST，且必须有显式配置的管理 token |
+| 删除边界 | 校验 mode/key/arXiv ID/真实路径；其他索引仍引用或引用扫描失败时不得删除共享 PDF |
+| 质量封锁 | store/index/quality sidecar 任一失败时，即使旧 PDF 存在也不得展示或直出 |
+| 搜索快照 | 搜索公开；递归覆盖 topic，按 arXiv ID 去重，20 秒 TTL，内部写操作主动失效 |
 
 ---
 
@@ -108,14 +128,15 @@ paper_card() / detail page / bookmark page
 每次修改 Web 路由、按钮、PDF 查看页或部署行为前后都应运行：
 
 ```bash
-python3 -m py_compile \
+/root/.pyenv/versions/3.10.13/bin/python3 -m py_compile \
   web_server.py translate_arxiv.py translate_full.py \
   full_translate_driver.py latex_translation_filters.py \
   run_papers.py run_repair.py \
   tests/test_web_server_contract.py tests/test_latex_translation_filters.py
 
-python3 -m unittest discover -s tests -v
 /root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v
+/root/.pyenv/versions/3.10.13/bin/python3 scripts/audit_project.py --strict
+/root/.pyenv/versions/3.10.13/bin/python3 scripts/queue_quality_repairs.py --json
 ```
 
 线上抽查：
@@ -138,6 +159,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 重建 README / plan / change 文档。
 - [x] 请求入口兼容 `BASE_PATH=/paper` 前缀，避免 `/paper/view/<id>` 与 `/paper/papers/<file>` 404。
 - [x] PDF wrapper iframe 增加 `v=<pdf_mtime>`，避免浏览器缓存旧的重新生成 PDF。
+- [x] 删除论文和终止翻译改为 token 保护的 POST，补齐路径约束与共享 PDF 引用保护。
+- [x] 全局搜索改为覆盖递归 topic 的 20 秒去重快照，避免每次输入重读全库。
 
 ### Phase B — 安全的单文件整理
 
@@ -181,14 +204,43 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 摘要翻译兼容 OpenAI-compatible 多形态 content、截断/非法反斜杠 JSON，并可从已成功中文 TeX 回填缺失字段。
 - [x] 针对 `quality.untranslated_prose` 增加 chunk 级失败响应验证与局部重试；低并发首轮后只串行补偿 429/空响应 chunk，仍失败则拒绝半成品缓存。
 - [x] 增加全量中文 TeX/chunk 英文分布分析，区分普通正文、混合语言与代码/轨迹保护环境，并按 CJK 覆盖和长英文行生成历史严重项队列。
-- [ ] 分批重译全量扫描识别出的历史严重英文残留论文；每批经过覆盖率、编译健康、索引/PDF 一致性门禁后再发布，避免与例行新论文任务争抢模型限额。
-- [ ] API 额度恢复后，优先清空近两周 `quality.untranslated_prose` 五篇队列，再按全量严重项排序分批重译；额度不足固定归类为 `translate.api_quota`，不自动循环。
+- [x] chunk v9 跳过环境结构、纯 option list、citation-heavy 名称目录、inline
+  code、URL、注释和上游 prompt，并对 prompt/trace/example/source-data box 做
+  实例级保护；普通 box 正文仍翻译。每个响应在合并前再校验关键结构/citation
+  签名和高置信中英混合 clause，失败进入单路重试而非写回英文。
+- [x] chunk v11 将 citation/ref 两侧被上游保留的短英文正文接缝有界吸收到
+  相邻翻译 chunk；裸 `\section` 模型幻觉仅在原文无结构命令且 citation
+  多重集不变时归一化，其他结构变化继续拒绝。
+- [x] 将生产发布、repository audit、英文分布和历史质量 queue 收敛到
+  `paperhub.translation_quality` 的同一正文提取与阈值。
+- [x] 为质量失败持久化 store taint，并让 cache hit、卡片、wrapper 和直接
+  PDF 路由一直封锁旧文件，直到新 PDF 完成全门禁验证。
+- [x] PDF 轻量校验增加 `%PDF-` header 与尾部 `%%EOF`，store、Web、repair
+  和审计不再接受只满足大小阈值的残缺文件。
+- [x] 为无 TeX 备份的历史 PDF 增加有界 `pdftotext` fallback 审计与缓存，按
+  持续英文、局部英文、翻译拒绝分别进入
+  `quality.pdf_sustained_untranslated`、`quality.pdf_partial_untranslated`、
+  `quality.translation_refusal`；确认后才通过质量队列预检并原子 taint 全部引用。
+- [x] 全文入口下沉统一全局锁，跨 daily/weekly/monthly/manual/topic/Web 串行使用共享容器。
+- [x] 每篇容器驱动增加独立进程组与 subreaper 回收，Docker 控制操作增加
+  有界 timeout，Web kill 精确终止单篇完整进程树。
+- [x] TeX 编译全路径禁用 shell escape，并限制 openin/openout 文件访问。
+- [x] 索引/store/PDF 发布统一通过 publication lock，PDF 校验+fsync 后原子
+  替换；孤儿清理在锁内复扫引用并给新对象 3 天缓冲，索引/锁错误 fail closed。
+- [ ] 分批处理全量扫描发现的 69 篇 mixed-language 候选：扫描仅统计可回溯 TeX
+  的普通正文同段中英混合 clause，排除表格、代码、引用和 source-data；候选需
+  重译后通过覆盖率、编译健康、索引/PDF 一致性门禁才能从队列移除。目前仍在修复，
+  不以候选数或中间批次成功数宣称全量清零。
+- [ ] 本轮生产修复结束后补录最终篇数和残留 ID；只以 strict audit、共享
+  质量 queue、失败 sidecar/tex 全部归零作为完成条件，不记录中途快照。
 
 ### Phase D — 运维体验
 
 - [x] 将索引/store/PDF 全量审计和失败分类摘要整理成独立脚本。
 - [x] 为失败队列增加 category / retry strategy / repair action 轻量摘要日志。
-- [x] 增加周日 02:00 当前 ISO 周串行 repair runner，等待当前周 index.json 出现并等待 weekly 抓取锁后修复翻译和 PDF 编译问题。
+- [x] 增加周日 02:00 当前 ISO 周五模式 repair runner：等待 weekly index
+  和抓取锁，收集 daily/weekly/monthly/manual/topic 已发布论文，按 arXiv
+  ID 去重修复并同步全部引用索引。
 - [x] 建立通用 patch catalog 与 `logs/repair_history/weekly-<key>.json`，沉淀每周失败类别、匹配补丁和剩余失败。
 - [x] 将全模式近窗审计、串行修复、patch 沉淀、验证、文档和 push 约定整理为 `$paper-trans-repair` Codex skill。
 - [x] 对旧 `compile.unknown` sidecar 增加日志重分类，并对大日志使用有界证据，缩短后续定位时间。
@@ -196,6 +248,16 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 补齐生产 root crontab 的 topic 调度：每天 01:30 `run_topic.py --all`，06:30 `run_repair.py --retry-pdf --mode topic --days 7`，并补跑 `2026-07-06` 主题结果。
 - [x] 修复 weekly cleanup 的 topic 引用漏扫：孤立 PDF 统计递归覆盖 topic 两层索引，避免 topic-only PDF 被误删。
 - [x] 修复一次性翻译驱动输出 RESULT 后被遗留 worker 线程拖住的问题，结果落盘后立即退出容器子进程。
+- [x] repair/refetch/retry 输出真实 attempted/succeeded/failed 和残留 ID；残留非零时 CLI 非零退出。
+- [x] `run_repair.py --key` 改为严格精确范围，post/refetch 不再意外扫描多日。
+- [x] 缓存清理和容器重启复用全文翻译锁；缓存默认保留 30 天，繁忙时跳过。
+- [x] 孤立 PDF 清理增加 3 天发布缓冲，避免 PDF 与 index 分步落盘时发生竞态。
+- [x] weekly cleanup 显式累计每个步骤的失败，索引扫描错误拒绝孤立 PDF
+  删除，任一失败最终非零退出。
+- [x] 将 manual 纳入正式 `CONTENT_MODES`、默认 repair/retry、日期范围和
+  周日当前周修复，不再遗漏 Web 手动提交历史。
+- [x] Nginx `/paper/papers/` 改为反代 Web 应用，不再用静态 alias 绕过 taint
+  与 PDF 完整性检查；健康 PDF 保留 Range/`206`。
 - [ ] 对磁盘低水位、Docker 容器异常、PDF retry 长期失败增加告警入口。
 
 ### Phase E — Docker 镜像瘦身验证
@@ -221,8 +283,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 1. 全文 PDF 翻译强依赖 arXiv LaTeX 源码质量和 gpt-academic 插件行为。
 2. 大 PDF 在不同浏览器中的 viewer 行为不一致，因此 `/view/<id>` 必须保留 HTML wrapper。
 3. 当前 Web 是单文件 HTTP 服务，易部署但代码会继续增长；未来拆分前必须先扩大合约测试。
-4. 搜索是线性扫描全部 index 和 paper store，数据量继续增长后可能需要索引缓存。
-5. 手动提交和自动抓取共享 paper store，删除 PDF 时需要谨慎处理跨 mode 引用。
+4. 搜索快照仍在单进程内存中，外部 cron 写入最多延迟 20 秒可见；数据量显著增长后可再升级为持久化倒排索引。
+5. 手动提交和自动抓取共享 paper store；Web 删除已保护跨 mode 引用，但离线维护脚本仍必须先递归核对全部索引。
 6. 原 full Docker 镜像已从本机删除；如需回滚到上游 full 镜像，需要重新拉取或重新构建。
 
 ---

@@ -14,8 +14,12 @@ import requests
 
 from paperhub import paper_store, topic_store
 from paperhub.env_config import get_env
-from paperhub.json_io import write_json_atomic
-from paperhub.paths import PAPER_STORE_DIR
+from paperhub.json_io import read_json, write_json_atomic
+from paperhub.paths import (
+    LOGS_DIR,
+    PAPER_STORE_DIR,
+    TEX_FAILED_BACKUP_DIR,
+)
 
 
 PROXY = "http://127.0.0.1:7890"
@@ -482,15 +486,56 @@ def _translate_summary(candidate, rank, slug, key):
     )
 
 
+def _topic_pdf_failure_sidecar(arxiv_id):
+    return os.path.join(LOGS_DIR, "pdf_errors", f"{arxiv_id}.json")
+
+
+def _clear_topic_pdf_failure_artifacts(arxiv_id):
+    """Clear diagnostics only after the shared PDF gate verifies success."""
+    paths = [
+        _topic_pdf_failure_sidecar(arxiv_id),
+        os.path.join(LOGS_DIR, "pdf_errors", f"{arxiv_id}.log"),
+        os.path.join(
+            TEX_FAILED_BACKUP_DIR,
+            f"{arxiv_id}_merge_translate_zh.tex",
+        ),
+    ]
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[topic] 清理旧 PDF 失败现场失败 {path}: {exc}", flush=True)
+
+
 def _ensure_pdf(arxiv_id):
-    if paper_store.pdf_hit(arxiv_id):
+    diagnosis = read_json(_topic_pdf_failure_sidecar(arxiv_id), {})
+    quality_tainted = paper_store.pdf_quality_tainted(arxiv_id)
+    force_retranslation = (
+        quality_tainted
+        or (
+            isinstance(diagnosis, dict)
+            and diagnosis.get("retry_strategy") == "retry_translation"
+        )
+    )
+    if paper_store.pdf_hit(arxiv_id) and not force_retranslation:
         paper_store.update_pdf_status(arxiv_id, "ok")
+        _clear_topic_pdf_failure_artifacts(arxiv_id)
         return True
     from translate_full import translate_full
 
-    result = translate_full(arxiv_id=arxiv_id, output_dir=PAPER_STORE_DIR, no_cache=False, timeout=3600)
-    if result.get("pdf_path"):
-        paper_store.update_pdf_status(arxiv_id, "ok")
+    result = translate_full(
+        arxiv_id=arxiv_id,
+        output_dir=PAPER_STORE_DIR,
+        no_cache=force_retranslation,
+        timeout=3600,
+    )
+    if result.get("pdf_path") and paper_store.pdf_hit(arxiv_id):
+        if not paper_store.mark_pdf_verified(arxiv_id):
+            paper_store.update_pdf_status(arxiv_id, "failed")
+            return False
+        _clear_topic_pdf_failure_artifacts(arxiv_id)
         return True
     paper_store.update_pdf_status(arxiv_id, "failed")
     return False
@@ -605,12 +650,13 @@ def _write_topic_index(slug, key, idx):
     path = topic_store.index_path(slug, key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    write_json_atomic(path, idx)
+    with topic_store.publication_lock(slug, key):
+        write_json_atomic(path, idx)
 
 
-def repair_topic(topic=None, key=None, days=None, scan_all=False):
+def repair_topic(topic=None, key=None, days=None, scan_all=False, processed_ids=None):
     """
-    Repair topic summary translations whose paper store entry lacks title_zh/summary_zh.
+    Repair topic summary translations whose paper store entry lacks complete Chinese text.
 
     This mirrors run_papers.repair(): metadata/translation are written to the
     shared paper store, while topic slim indexes stay unchanged.
@@ -619,31 +665,44 @@ def repair_topic(topic=None, key=None, days=None, scan_all=False):
 
     config = load_api_config()
     total_fixed = 0
+    processed = processed_ids if processed_ids is not None else set()
     targets = topic_repair_targets(topic=topic, key=key, days=days, scan_all=scan_all)
     for profile, k in targets:
         slug = profile.get("slug", "")
-        idx = topic_store.load_index(slug, k)
+        try:
+            idx = topic_store.load_index_snapshot(slug, k)
+        except Exception as exc:
+            print(
+                f"[repair-topic] ❌ {slug}/{k} index 无法锁定/读取: {exc}",
+                flush=True,
+            )
+            continue
         changed = False
         for slim in idx.get("papers", []):
             aid = slim.get("arxiv_id", "")
             if not aid:
                 continue
+            if aid in processed:
+                continue
+            processed.add(aid)
             stored = paper_store.read_raw(aid)
-            if stored.get("title_zh") and stored.get("summary_zh"):
+            if paper_store.translation_complete(stored):
                 continue
             print(f"[repair-topic] {slug}/{k} — 重新翻译: {aid}", flush=True)
             try:
-                result = translate_and_save(
+                translate_and_save(
                     arxiv_id=aid,
                     output_dir=PAPER_STORE_DIR,
                     rank=slim.get("rank", 1),
                     week_str=f"topic/{slug}",
                     config=config,
                 )
-                if result.get("title_zh") and result.get("summary_zh"):
+                persisted = paper_store.read_raw(aid)
+                if paper_store.translation_complete(persisted):
                     total_fixed += 1
                     changed = True
-                    print(f"[repair-topic] ✅ {result['title_zh'][:60]}", flush=True)
+                    display_title = str(persisted.get("title_zh") or aid)
+                    print(f"[repair-topic] ✅ {display_title[:60]}", flush=True)
                 else:
                     print(f"[repair-topic] ❌ 仍无完整中文翻译: {aid}", flush=True)
             except Exception as e:
@@ -654,24 +713,58 @@ def repair_topic(topic=None, key=None, days=None, scan_all=False):
     return total_fixed
 
 
-def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False):
+def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False, processed_ids=None):
     """Retry topic pdf_status=failed entries using the same retry logic as daily."""
     from run_papers import retry_failed_pdf_entries
 
     total_ok = 0
     total_fail = 0
+    processed = processed_ids if processed_ids is not None else set()
     targets = topic_repair_targets(topic=topic, key=key, days=days, scan_all=scan_all)
     for profile, k in targets:
         slug = profile.get("slug", "")
-        idx = topic_store.load_index(slug, k)
+        try:
+            idx = topic_store.load_index_snapshot(slug, k)
+        except Exception as exc:
+            print(
+                f"[retry-topic-pdf] ❌ {slug}/{k} index 无法锁定/读取: {exc}",
+                flush=True,
+            )
+            total_fail += 1
+            continue
         papers = idx.get("papers", [])
         if not papers:
             continue
-        result = retry_failed_pdf_entries(papers, label=f"[retry-topic-pdf] {slug}/{k}")
+        before_statuses = {
+            paper.get("arxiv_id"): paper.get("pdf_status")
+            for paper in papers
+            if paper.get("arxiv_id")
+        }
+        result = retry_failed_pdf_entries(
+            papers,
+            label=f"[retry-topic-pdf] {slug}/{k}",
+            processed_ids=processed,
+        )
         total_ok += result["ok"]
         total_fail += result["failed"]
         if result["changed"]:
-            idx["papers"] = papers
-            _write_topic_index(slug, k, idx)
+            updates = {
+                paper.get("arxiv_id"): {
+                    "pdf_status": paper.get("pdf_status")
+                }
+                for paper in papers
+                if paper.get("arxiv_id")
+                and paper.get("pdf_status") in {"ok", "failed", "none"}
+                and before_statuses.get(paper.get("arxiv_id"))
+                != paper.get("pdf_status")
+            }
+            try:
+                topic_store.merge_pdf_statuses(slug, k, updates)
+            except Exception as exc:
+                print(
+                    f"[retry-topic-pdf] ❌ {slug}/{k} 状态合并失败: {exc}",
+                    flush=True,
+                )
+                total_fail += 1
     print(f"[retry-topic-pdf] 完成: 成功={total_ok} 仍失败={total_fail}", flush=True)
     return total_ok

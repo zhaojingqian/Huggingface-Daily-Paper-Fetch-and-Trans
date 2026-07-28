@@ -3,10 +3,17 @@
 
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime
 
+from paperhub import paths
 from paperhub.paths import TOPIC_DIR
 from paperhub.json_io import read_json, write_json_atomic
+from paperhub.publication_lock import (
+    index_publication_lock,
+    merge_index_paper_fields,
+    read_index_snapshot,
+)
 
 
 TOPICS_FILE = os.path.join(TOPIC_DIR, "topics.json")
@@ -140,6 +147,47 @@ def index_path(slug, key):
     return os.path.join(date_dir(slug, key), "index.json")
 
 
+def _topic_lock_dir():
+    if os.path.realpath(TOPIC_DIR) == os.path.realpath(paths.TOPIC_DIR):
+        return paths.LOCK_DIR
+    return os.path.join(os.path.realpath(TOPIC_DIR), "locks")
+
+
+@contextmanager
+def publication_lock(slug, key, timeout=0.0):
+    normalized_slug = slugify(slug)
+    with index_publication_lock(
+        "topic",
+        f"{normalized_slug}/{key}",
+        lock_dir=_topic_lock_dir(),
+        timeout=timeout,
+    ) as acquired:
+        yield acquired
+
+
+def load_index_snapshot(slug, key, timeout=0.0):
+    normalized_slug = slugify(slug)
+    return read_index_snapshot(
+        index_path(normalized_slug, key),
+        mode="topic",
+        key=f"{normalized_slug}/{key}",
+        lock_dir=_topic_lock_dir(),
+        timeout=timeout,
+    )
+
+
+def merge_pdf_statuses(slug, key, updates, timeout=0.0):
+    normalized_slug = slugify(slug)
+    return merge_index_paper_fields(
+        index_path(normalized_slug, key),
+        updates,
+        mode="topic",
+        key=f"{normalized_slug}/{key}",
+        lock_dir=_topic_lock_dir(),
+        timeout=timeout,
+    )
+
+
 def save_index(slug, key, papers, extra=None):
     slim = []
     for p in papers:
@@ -168,7 +216,8 @@ def save_index(slug, key, papers, extra=None):
     if extra:
         payload.update(extra)
     path = index_path(slug, key)
-    _write_json(path, payload)
+    with publication_lock(slug, key):
+        _write_json(path, payload)
     return path
 
 

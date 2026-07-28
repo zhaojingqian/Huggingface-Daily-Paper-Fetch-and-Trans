@@ -17,6 +17,60 @@ def _result(code, family, retry_strategy, repair_action, suggestion, evidence=""
     }
 
 
+QUALITY_FAILURE_SPECS = {
+    "quality.untranslated_prose": {
+        "family": "translation_quality",
+        "retry_strategy": "retry_translation",
+        "repair_action": "protect_examples_or_retranslate",
+        "suggestion": (
+            "普通正文翻译覆盖不足；先排除代码/数据示例，再重新翻译真实英文正文。"
+        ),
+    },
+    "quality.pdf_sustained_untranslated": {
+        "family": "translation_quality",
+        "retry_strategy": "retry_translation",
+        "repair_action": "retranslate_pdf_without_tex",
+        "suggestion": (
+            "PDF 多页连续英文正文占优且没有可复用中文 TeX；重新翻译源码，"
+            "通过 PDF 文本、编译和实体门禁后再发布。"
+        ),
+    },
+    "quality.pdf_partial_untranslated": {
+        "family": "translation_quality",
+        "retry_strategy": "retry_translation",
+        "repair_action": "retranslate_pdf_without_tex",
+        "suggestion": (
+            "PDF 存在高置信局部英文正文或证明且没有可复用中文 TeX；"
+            "按最新 chunk 策略重新翻译并复查命中页。"
+        ),
+    },
+    "quality.translation_refusal": {
+        "family": "translation_quality",
+        "retry_strategy": "retry_translation",
+        "repair_action": "retry_refused_translation",
+        "suggestion": (
+            "PDF 含模型拒绝翻译或无法协助的回显；丢弃该翻译结果并重新翻译，"
+            "确认拒绝文本消失后再发布。"
+        ),
+    },
+}
+
+
+def quality_failure(category: str, evidence: str = "") -> Dict[str, object]:
+    """Build stable metadata for a known translation-quality failure."""
+    spec = QUALITY_FAILURE_SPECS.get(category)
+    if spec is None:
+        raise ValueError(f"unknown quality failure category: {category}")
+    return _result(
+        category,
+        spec["family"],
+        spec["retry_strategy"],
+        spec["repair_action"],
+        spec["suggestion"],
+        evidence,
+    )
+
+
 def _evidence(text: str, pattern: str) -> str:
     match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
     if not match:
@@ -198,10 +252,12 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
             _evidence(latex, r"tcblisting|lstlisting|minted|verbatim"),
         )
     if re.search(r"翻译覆盖率检查失败|translation coverage.*failed", combined, re.I):
-        return _result(
-            "quality.untranslated_prose", "translation_quality", "retry_translation", "protect_examples_or_retranslate",
-            "普通正文翻译覆盖不足；先排除代码/数据示例，再重新翻译真实英文正文。",
-            _evidence(combined, r"翻译覆盖率检查失败|translation coverage.*failed"),
+        return quality_failure(
+            "quality.untranslated_prose",
+            _evidence(
+                combined,
+                r"翻译覆盖率检查失败|translation coverage.*failed",
+            ),
         )
     if re.search(
         r"out of memory|cannot allocate memory|(?:process |compile )killed|"

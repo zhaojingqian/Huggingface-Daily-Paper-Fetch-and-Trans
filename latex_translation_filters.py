@@ -7,14 +7,27 @@ checks, and fallback restoration. Keeping the policy here prevents future fixes
 from being hard-coded in only one of those paths.
 """
 
+import difflib
 import os
 import re
+import tarfile
+from collections import Counter
+from pathlib import PurePosixPath
 from typing import Iterable, List, Optional, Set, Tuple
 
 
 SOFT_TEXT_ENVS = frozenset({
     "tabular", "tabular*", "tabularx", "longtable", "array",
     "algorithmic", "algorithmic*", "algorithm2e",
+})
+
+# These environments are not protected as a class.  A concrete instance is
+# protected only when its opening arguments or first content lines identify it
+# as a prompt, benchmark example, trace, or other verbatim source-data block.
+# Tracking the environments is still necessary so the splitter can preserve
+# their structural begin/end lines while translating ordinary box prose.
+SEMANTIC_SOURCE_DATA_ENVS = frozenset({
+    "tcolorbox", "custombox", "casebox", "examplebox", "mdframed",
 })
 
 BASE_HARD_PROTECTED_ENVS = frozenset({
@@ -44,6 +57,40 @@ DYNAMIC_HARD_ENV_RE = re.compile(
     r"|^(?:toolcall|caseresponse|errorspan|normalspan|templatebubble|ccsxml|paperresources)$"
     r"|(?:listing|verbatim|transcript|trajectory|trace|prompt|codeblock)$"
     r")"
+)
+
+SEMANTIC_SOURCE_DATA_TITLE_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:system|developer|user|judge|agent|translation)[\s_-]*prompt\b"
+    r"|\bprompt[\s_-]*(?:template|example|block)?\b"
+    r"|\b(?:execution|tool|agent|failure|success)[\s_-]*trace\b"
+    r"|\b(?:trajectory|transcript|source[\s_-]*data|benchmark[\s_-]*example)\b"
+    r"|\b(?:user[\s_-]*query|demonstration[\s_-]*example)\b"
+    r")"
+)
+SEMANTIC_SOURCE_DATA_FIELD_RE = re.compile(
+    r"(?i)^\s*\\(?:textbf|textit|emph)\s*\{"
+    r"(?:question|answer|response|correct\s+answer|user\s+query|"
+    r"task|role|instruction|input|output(?:\s+format)?|classification|language)"
+    r"\s*:?\s*\}"
+)
+SEMANTIC_CASE_STYLE_RE = re.compile(
+    r"(?i)(?:"
+    r"\bcasebox\s*="
+    r"|success(?:bg|frame)?"
+    r"|fail(?:ure)?(?:bg|frame)?"
+    r"|成功案例|失败案例"
+    r")"
+)
+
+# A tcolorbox may be styled through a key declared in the document preamble.
+# ``promptbox`` is a style name rather than natural-language title text, so the
+# title-only policy below used to miss real prompt templates such as
+# ``[promptbox,title={Coarse CoT Template}]``.  Keep the rule deliberately
+# narrow: generic theorem/insight boxes are still translated.
+SEMANTIC_PROMPT_BOX_STYLE_RE = re.compile(
+    r"(?i)(?:^|[\[,{\s])(?:system|developer|user|judge|agent|prompt|"
+    r"instruction|template)[_-]?box\b"
 )
 
 
@@ -83,12 +130,173 @@ def is_hard_protected_env(env: Optional[str]) -> bool:
     return env in hard_protected_envs() or is_dynamic_hard_env(env)
 
 
+def is_semantic_source_data_env(env: Optional[str]) -> bool:
+    """Return whether *env* supports instance-level source-data protection."""
+    return bool(env) and env in SEMANTIC_SOURCE_DATA_ENVS
+
+
+def is_semantic_source_data_opening(
+    env: Optional[str],
+    opening_line: str,
+) -> bool:
+    """Classify one environment instance from its ``\\begin`` line.
+
+    This deliberately does not make ``tcolorbox``/``custombox``/``mdframed``
+    globally hard-protected.  Ordinary theorem, insight, and explanatory boxes
+    still need translation.  Only explicit prompt/trace/example/case semantics
+    are treated as verbatim paper source data.
+    """
+    if not is_semantic_source_data_env(env):
+        return False
+    line = str(opening_line or "")
+    if not re.search(rf"\\begin\{{{re.escape(str(env))}\}}", line):
+        return False
+    if env == "examplebox":
+        # The environment name plus an explicit argument/title is an
+        # instance-level declaration that the enclosed material is an example.
+        suffix = line.split(rf"\begin{{{env}}}", 1)[-1]
+        return bool(suffix.strip())
+    if env == "casebox":
+        return bool(SEMANTIC_CASE_STYLE_RE.search(line))
+    if env == "tcolorbox" and SEMANTIC_CASE_STYLE_RE.search(line):
+        return True
+    if env == "tcolorbox" and SEMANTIC_PROMPT_BOX_STYLE_RE.search(line):
+        return True
+    return bool(SEMANTIC_SOURCE_DATA_TITLE_RE.search(line))
+
+
+def is_semantic_source_data_content(
+    env: Optional[str],
+    line: str,
+) -> bool:
+    """Promote a candidate box when its first fields expose source data.
+
+    Benchmark names are open-ended, so a title alone cannot enumerate them
+    safely.  A leading ``Question:``, ``Answer:``, or response field inside a
+    custom box is a precise, reusable signal without hiding ordinary boxes.
+    """
+    if env not in {"tcolorbox", "custombox", "casebox", "examplebox"}:
+        return False
+    return bool(SEMANTIC_SOURCE_DATA_FIELD_RE.search(str(line or "")))
+
+
 def is_tracked_env(env: Optional[str]) -> bool:
-    return is_soft_text_env(env) or is_hard_protected_env(env)
+    return (
+        is_soft_text_env(env)
+        or is_hard_protected_env(env)
+        or is_semantic_source_data_env(env)
+    )
 
 
 def tracked_envs() -> Set[str]:
-    return soft_text_envs() | hard_protected_envs()
+    return (
+        soft_text_envs()
+        | hard_protected_envs()
+        | set(SEMANTIC_SOURCE_DATA_ENVS)
+    )
+
+
+def _archive_target_is_contained(name: str, base: str = "") -> bool:
+    """Return whether a POSIX archive path resolves below its extraction root."""
+    value = str(name or "")
+    if not value or "\x00" in value or "\\" in value:
+        return False
+    path = PurePosixPath(value)
+    if path.is_absolute():
+        return False
+    stack = []
+    for part in PurePosixPath(base).parts + path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not stack:
+                return False
+            stack.pop()
+            continue
+        stack.append(part)
+    return bool(stack)
+
+
+def source_tar_safety_error(
+    path: str,
+    max_members: int = 50_000,
+    max_unpacked_bytes: int = 2 * 1024 * 1024 * 1024,
+) -> str:
+    """Return a reason when an untrusted arXiv tar is unsafe to extract."""
+    try:
+        with tarfile.open(path, mode="r:*") as archive:
+            unpacked = 0
+            member_count = 0
+            for member in archive:
+                member_count += 1
+                if member_count > max_members:
+                    return (
+                        "archive has too many members: "
+                        f"{member_count} > {max_members}"
+                    )
+
+                archive_root_entry = (
+                    member.isdir()
+                    and str(member.name or "").strip("/") in ("", ".")
+                )
+                if (
+                    not archive_root_entry
+                    and not _archive_target_is_contained(member.name)
+                ):
+                    return f"unsafe archive member path: {member.name!r}"
+                if member.isdev() or member.isfifo():
+                    return f"unsupported archive special file: {member.name!r}"
+                if member.isfile():
+                    unpacked += max(0, int(member.size or 0))
+                    if unpacked > max_unpacked_bytes:
+                        return (
+                            "archive unpacked size exceeds limit: "
+                            f"{unpacked} > {max_unpacked_bytes}"
+                        )
+                if member.issym():
+                    parent = str(PurePosixPath(member.name).parent)
+                    if not _archive_target_is_contained(
+                        member.linkname,
+                        base=parent,
+                    ):
+                        return (
+                            f"unsafe archive symlink: {member.name!r} -> "
+                            f"{member.linkname!r}"
+                        )
+                elif member.islnk():
+                    if not _archive_target_is_contained(member.linkname):
+                        return (
+                            f"unsafe archive hardlink: {member.name!r} -> "
+                            f"{member.linkname!r}"
+                        )
+    except (OSError, tarfile.TarError) as exc:
+        return f"invalid tar archive: {exc}"
+    return ""
+
+
+TEX_SHELL_ESCAPE_FLAG_RE = re.compile(
+    r"(?<!\S)-{1,2}(?:(?:no-)?shell-escape|"
+    r"(?:enable|disable)-write18)(?=\s|$)",
+    re.IGNORECASE,
+)
+TEX_ENGINE_COMMAND_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?P<engine>"
+    r"\"(?:/[^\"\s]+/)?(?:pdf|xe|lua)latex\"|"
+    r"'(?:/[^'\s]+/)?(?:pdf|xe|lua)latex'|"
+    r"(?:/[^\s'\";|&]+/)?(?:pdf|xe|lua)latex"
+    r")(?=\s|$)",
+    re.IGNORECASE,
+)
+
+
+def force_no_tex_shell_escape(command: str) -> str:
+    """Remove conflicting write18 flags and force each TeX engine safe."""
+    value = TEX_SHELL_ESCAPE_FLAG_RE.sub("", str(command or ""))
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return TEX_ENGINE_COMMAND_RE.sub(
+        lambda match: match.group("engine") + " -no-shell-escape",
+        value,
+    )
 
 
 def discover_tcb_listing_envs(content: str) -> Set[str]:
@@ -219,18 +427,848 @@ def llm_translation_response_quota_failed(text: str) -> bool:
     )
 
 
+# These labels are model-task metadata, not paper text.  In particular, a
+# three-line block such as ``Classification: Academic Translation`` / ``Task:
+# English to Chinese`` / ``Language: Chinese`` is a known prompt echo that can
+# replace an entire LaTeX list item.  Reject it before merge instead of trying
+# to regex-delete the already-corrupted output afterwards.
+LLM_TRANSLATION_TASK_ECHO_RE = re.compile(
+    r"(?is)(?=.*\bclassification\s*:\s*academic\s+translation\b)"
+    r"(?=.*\btask\s*:\s*english\s+to\s+chinese\b)"
+    r"(?=.*\blanguage\s*:\s*chinese\b)"
+)
+
+_CRITICAL_LATEX_COMMAND_RE = re.compile(
+    r"\\(?P<name>begin|end|item|caption|captionof|section|subsection|subsubsection|"
+    r"paragraph|subparagraph|label|ref|eqref|autoref|cref|Cref)\*?\b"
+)
+
+_SINGLE_HEADING_WRAPPER_RE = re.compile(
+    r"\A\s*\\(?:section|subsection|subsubsection|paragraph|subparagraph)"
+    r"\*?\s*\{"
+)
+
+_BARE_HALLUCINATED_HEADING_RE = re.compile(
+    r"\\(?P<name>section|subsection|subsubsection|paragraph|subparagraph)"
+    r"(?:\*)?(?![A-Za-z@])(?!(?:\s*)\{)"
+)
+
+_BARE_HEADING_LABELS = {
+    "section": "章节",
+    "subsection": "小节",
+    "subsubsection": "小节",
+    "paragraph": "段落",
+    "subparagraph": "段落",
+}
+
+
+def _without_unescaped_comments(text: str) -> str:
+    """Remove TeX comments before comparing structural command signatures."""
+    lines = []
+    for line in (text or "").splitlines(keepends=True):
+        cut = len(line)
+        for index, char in enumerate(line):
+            if char != "%":
+                continue
+            slashes = 0
+            cursor = index - 1
+            while cursor >= 0 and line[cursor] == "\\":
+                slashes += 1
+                cursor -= 1
+            if slashes % 2 == 0:
+                cut = index
+                break
+        lines.append(line[:cut])
+    return "".join(lines)
+
+
+def _critical_latex_signature(
+    text: str,
+) -> Tuple[Tuple[str, ...], Tuple[Tuple[str, int], ...]]:
+    """Return structural commands and an exact citation-call multiset.
+
+    This is intentionally a small structural subset, not a textual similarity
+    check: normal Chinese translation may change every word, but it must not
+    create a section, drop list items, or change a citation from the chunk.
+    Structural command order remains significant. Citation placement may move
+    naturally in Chinese, while the command, optional arguments, keys, and
+    duplicate counts must remain exact.
+    """
+    value = _without_unescaped_comments(
+        strip_inline_code_commands(extract_translation_fragment(text))
+    )
+    commands = tuple(
+        match.group("name").lower()
+        for match in _CRITICAL_LATEX_COMMAND_RE.finditer(value)
+    )
+    citations = tuple(sorted(Counter(
+        call.strip() for call in CITATION_COMMAND_RE.findall(value)
+    ).items()))
+    return commands, citations
+
+
+def llm_translation_structure_evidence(source: str, response: str):
+    """Return a deterministic diff for a rejected translation response.
+
+    The response gate deliberately compares only a small safety-critical LaTeX
+    subset.  A short text preview can make a dropped later ``\\paragraph`` or
+    citation look identical to its source, so callers need the complete
+    signatures and *directional* citation multiset differences in their error
+    log.  This helper is diagnostic only; it does not relax the gate.
+    """
+    source_commands, source_citations = _critical_latex_signature(source)
+    response_commands, response_citations = _critical_latex_signature(response)
+    source_counts = Counter(dict(source_citations))
+    response_counts = Counter(dict(response_citations))
+    return {
+        "source_commands": source_commands,
+        "response_commands": response_commands,
+        "source_citations_only": tuple(sorted(
+            (source_counts - response_counts).items()
+        )),
+        "response_citations_only": tuple(sorted(
+            (response_counts - source_counts).items()
+        )),
+    }
+
+
+def _matching_unescaped_brace(text: str, opening: int) -> int:
+    """Return the matching brace index, or ``-1`` for an unbalanced group."""
+    depth = 0
+    for index in range(opening, len(text)):
+        char = text[index]
+        if char not in "{}":
+            continue
+        slashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            slashes += 1
+            cursor -= 1
+        if slashes % 2:
+            continue
+        if char == "{":
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                return index
+            if depth < 0:
+                return -1
+    return -1
+
+
+def normalize_llm_translation_response(source: str, response: str) -> str:
+    r"""Normalize one provably spurious heading command in a bare fragment.
+
+    GPT occasionally sees a caption argument that the splitter has correctly
+    detached from ``\caption{...}``, then wraps its translation in
+    ``\section{...}``.  Accept only that recoverable shape: the source itself
+    has no critical structural command, the complete response is exactly one
+    balanced heading wrapper, and its inner critical commands/citations match
+    the source.  Any extra paragraph or second command leaves the response
+    unchanged so the normal structure gate rejects it.
+    """
+    source_value = extract_translation_fragment(source)
+    response_value = response if isinstance(response, str) else str(response or "")
+    if not source_value.strip() or not response_value.strip():
+        return response_value
+    source_commands, source_citations = _critical_latex_signature(source_value)
+    if source_commands:
+        return response_value
+
+    # A second recurring model error translates the ordinary word "section"
+    # into a *bare* TeX command, for example ``（第 \section）``.  A heading
+    # command without its braced argument is never a valid translation of bare
+    # prose.  Recover exactly one such addition and retain the strict citation
+    # and structural-signature checks below.
+    bare_headings = list(_BARE_HALLUCINATED_HEADING_RE.finditer(response_value))
+    if len(bare_headings) == 1:
+        normalized = _BARE_HALLUCINATED_HEADING_RE.sub(
+            lambda match: _BARE_HEADING_LABELS[match.group("name").lower()],
+            response_value,
+            count=1,
+        )
+        normalized_commands, normalized_citations = _critical_latex_signature(
+            normalized
+        )
+        if (
+            normalized_commands == source_commands
+            and normalized_citations == source_citations
+        ):
+            return normalized
+
+    opening_match = _SINGLE_HEADING_WRAPPER_RE.match(response_value)
+    if not opening_match:
+        return response_value
+    opening = opening_match.end() - 1
+    closing = _matching_unescaped_brace(response_value, opening)
+    if closing < 0 or response_value[closing + 1:].strip():
+        return response_value
+
+    inner = response_value[opening + 1:closing]
+    inner_commands, inner_citations = _critical_latex_signature(inner)
+    if inner_commands != source_commands or inner_citations != source_citations:
+        return response_value
+    return inner
+
+
+def normalize_llm_translation_payload(payload, sources: Iterable[str]) -> List[int]:
+    """Normalize alternating ``[input, response, ...]`` results in place."""
+    changed = []
+    source_items = list(sources)
+    for index, source in enumerate(source_items):
+        response_index = index * 2 + 1
+        if response_index >= len(payload):
+            break
+        response = payload[response_index]
+        normalized = normalize_llm_translation_response(source, response)
+        if normalized == response:
+            continue
+        payload[response_index] = normalized
+        changed.append(index)
+    return changed
+
+
+def llm_translation_response_invalid(source: str, response: str) -> str:
+    """Return a merge-blocking reason for a fabricated/corrupted response.
+
+    The caller retries this exact slot serially.  Returning a reason rather
+    than rewriting the response ensures a hallucinated paragraph can never
+    enter the final TeX merely because it is syntactically compilable.
+    """
+    source_value = extract_translation_fragment(source)
+    value = response or ""
+    # A protected inline prompt/schema should have been removed by the
+    # splitter.  If an upstream boundary nevertheless leaks a complete block,
+    # accept only an exact pass-through and force a retry for any mutation.
+    # This prevents prompt-injection text from becoming a translated response.
+    if is_inline_prompt_source_data_block(source_value):
+        if value == source_value:
+            return ""
+        return "protected_source_data_modified"
+    if LLM_TRANSLATION_TASK_ECHO_RE.search(value):
+        return "translation_task_echo"
+
+    source_commands, source_citations = _critical_latex_signature(source)
+    response_commands, response_citations = _critical_latex_signature(value)
+    if source_commands != response_commands:
+        return "critical_latex_structure_mismatch"
+    if source_citations != response_citations:
+        return "citation_structure_mismatch"
+    return ""
+
+
+TRANSLATION_PROMPT_MARKERS = (
+    "Answer me only with the translated text:\n\n",
+    "Answer me only with the translated text:\r\n\r\n",
+)
+INLINE_CODE_COMMAND_RE = re.compile(
+    r"\\(?:[A-Za-z@]*tt|path|url|nolinkurl)\*?"
+    r"(?:\[[^\]]*\])?\{[^{}]*\}"
+)
+INLINE_CODE_OPEN_RE = re.compile(
+    r"\\(?:[A-Za-z@]*tt|path|url|nolinkurl)\*?"
+    r"(?:\[[^\]]*\])?\{"
+)
+CITATION_COMMAND_RE = re.compile(
+    r"\\(?:cite|citep|citet|citealp|citeauthor|citeyear|parencite|textcite)"
+    r"\*?(?:\[[^\]]*\]){0,2}\{[^{}]*\}",
+    re.IGNORECASE,
+)
+REFERENCE_PAYLOAD_COMMAND_RE = re.compile(
+    r"\\(?:label|ref|eqref|pageref|autoref|cref|Cref)\*?"
+    r"(?:\[[^\]]*\]){0,2}\{[^{}]*\}",
+    re.IGNORECASE,
+)
+MATH_SPAN_RE = re.compile(
+    r"\$\$.*?\$\$|\$[^$]*\$|\\\(.*?\\\)|\\\[.*?\\\]",
+    re.DOTALL,
+)
+_CATALOG_NAME_WORDS = {
+    "audio",
+    "base",
+    "chat",
+    "flash",
+    "instruct",
+    "large",
+    "medium",
+    "mini",
+    "model",
+    "omni",
+    "pro",
+    "small",
+    "turbo",
+}
+_CATALOG_PROSE_WORDS = {
+    "achieve",
+    "achieves",
+    "are",
+    "compare",
+    "compares",
+    "evaluate",
+    "evaluates",
+    "include",
+    "includes",
+    "is",
+    "outperform",
+    "outperforms",
+    "propose",
+    "proposes",
+    "report",
+    "reports",
+    "show",
+    "shows",
+    "use",
+    "uses",
+    "were",
+}
+
+# High-precision signal for a *partial* Chinese translation.  These are
+# grammatical glue words, not a generic English-word blacklist: model names,
+# paper titles, table labels, code and citations must remain legal output.
+MIXED_ENGLISH_CLAUSE_GLUE_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "but",
+    "by", "each", "for", "from", "if", "in", "into", "is", "it", "its",
+    "of", "on", "or", "our", "that", "the", "their", "then", "these",
+    "this", "those", "to", "was", "we", "were", "when", "where", "which",
+    "while", "with",
+})
+MIXED_ENGLISH_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z'-]{1,}\b")
+SOURCE_DATA_INLINE_MACRO_OPEN_RE = re.compile(
+    r"\\(?:fbtask|fbtraj|fbresult)\*?(?:\[[^\]]*\])?\{",
+    re.IGNORECASE,
+)
+PROMPT_TEMPLATE_LINE_RE = re.compile(
+    r"(?i)(?:"
+    r"\bdo\s+not\s+renumber\b"
+    r"|\b(?:rules|rubrics|output\s+format|doc\s+set)\s*:"
+    r"|\b(?:query|answer)\s*:"
+    r")"
+)
+
+# Some appendices print an LLM's *own* XML/JSON prompt verbatim without a
+# dedicated LaTeX code environment.  Passing those instructions back to the
+# translation model is both incorrect (they are source data) and unsafe: an
+# embedded ``<final_prompt>`` may make the model follow the paper's instruction
+# instead of translating it.  Do not treat an arbitrary XML noun as source
+# data.  The rules below require an instruction/template/schema combination.
+INLINE_SOURCE_DATA_XML_PAIR_RE = re.compile(
+    r"(?is)<(?P<tag>[a-z][a-z0-9_-]{2,})\b[^>]*>.*?</(?P=tag)>"
+)
+INLINE_SOURCE_DATA_TAG_RE = re.compile(r"(?i)</?([a-z][a-z0-9_-]{2,})\b[^>]*>")
+INLINE_SOURCE_DATA_JSON_KEY_RE = re.compile(r'"[A-Za-z][A-Za-z0-9_-]{1,}"\s*:')
+INLINE_SOURCE_DATA_START_RE = re.compile(
+    r"(?is)(?:"
+    r"\bprompt\s+(?:upsampler|engineer)\b(?=.*\b(?:json|xml|template)\b)"
+    r"|\b(?:write|return|output)\b(?=.*<final_prompt>)(?=.*\b(?:json|template)\b)"
+    r"|\b(?:all\s+top-level\s+keys|output_json_template|user\s+visual\s+request)\b"
+    r"|\bstructured\s+json\b(?=.*\b(?:template|schema|every\s+top-level)\b)"
+    r")"
+)
+INLINE_SOURCE_DATA_END_RE = re.compile(
+    r"(?i)(?:\\end\{(?:Verbatim|verbatim|lstlisting|minted|tcblisting)\}"
+    r"|\\(?:section|subsection|subsubsection)\*?\{)"
+)
+
+
+def is_inline_prompt_source_data_block(text: str) -> bool:
+    """Identify a complete inline XML/JSON prompt or schema with high precision.
+
+    This is intentionally a block predicate, rather than a broad "contains
+    JSON/XML" check: normal prose may mention one XML tag, show a small JSON
+    example, or discuss a prompt, and must remain eligible for translation.
+    """
+    value = extract_translation_fragment(text)
+    if not value.strip() or not INLINE_SOURCE_DATA_START_RE.search(value):
+        return False
+    tags = {match.group("tag").lower() for match in INLINE_SOURCE_DATA_XML_PAIR_RE.finditer(value)}
+    tag_count = len(tags)
+    json_keys = len(INLINE_SOURCE_DATA_JSON_KEY_RE.findall(value))
+    has_template_placeholder = bool(re.search(
+        r"<\s*[a-z][a-z0-9_-]*\s*>\s*\{(?:\{?\s*[A-Za-z_][A-Za-z0-9_]*\s*\}?)?\s*\}\s*</",
+        value,
+        flags=re.IGNORECASE,
+    ))
+    has_schema_marker = bool(re.search(
+        r"(?i)\b(?:exact\s+template|output_json_template|top-level\s+keys|json\s+(?:object|schema|template)|fenced\s+json)\b",
+        value,
+    ))
+    # A multi-tag instruction block or a tagged exact JSON template is strong
+    # evidence.  A lone ``<method>...</method>`` in ordinary prose is not.
+    return (
+        (tag_count >= 2 and (has_template_placeholder or has_schema_marker))
+        or ("<final_prompt>" in value.lower() and has_schema_marker)
+        or (json_keys >= 4 and has_schema_marker and tag_count >= 1)
+    )
+
+
+def inline_prompt_source_data_line_protected(line: str, state=None):
+    """Return ``(protected, state)`` for one line of inline prompt source data.
+
+    The stateful form lets the splitter and final TeX quality scan agree when
+    an upstream splitter has already separated a prompt template into tiny
+    lines (for example ``<video_description>{description}</...>``).  Activation
+    is deliberately strict and bounded; it ends at a code environment/section
+    boundary or after 1,200 source lines, so it cannot silently hide an entire
+    appendix after a coincidental English phrase.
+    """
+    current = dict(state or {})
+    value = str(line or "")
+    active = bool(current.get("active"))
+    lines = int(current.get("lines", 0))
+    start = is_inline_prompt_source_data_block(value) or bool(
+        INLINE_SOURCE_DATA_START_RE.search(value)
+        and (
+            INLINE_SOURCE_DATA_TAG_RE.search(value)
+            or "json" in value.lower()
+            or "template" in value.lower()
+        )
+    )
+    protected = active or start
+    if protected:
+        lines += max(1, value.count("\n") + 1)
+    close = bool(INLINE_SOURCE_DATA_END_RE.search(value))
+    current["active"] = bool((active or start) and not close and lines < 1200)
+    current["lines"] = lines if current["active"] else 0
+    return protected, current
+
+
+def inline_prompt_source_data_fragment_protected(text: str, state=None):
+    """Apply the line policy to a fragment and return ``(protected, state)``.
+
+    A mixed fragment is preserved as a whole.  This small conservative choice
+    prevents coalescing an instruction tail into an adjacent prose request;
+    the strict start signal keeps ordinary appendix prose translatable.
+    """
+    current = dict(state or {})
+    protected = False
+    for line in str(text or "").splitlines(keepends=True) or [str(text or "")]:
+        line_protected, current = inline_prompt_source_data_line_protected(
+            line,
+            current,
+        )
+        protected = protected or line_protected
+    return protected, current
+
+
+def extract_translation_fragment(prompt_or_fragment: str) -> str:
+    """Return only the paper fragment from the upstream translation prompt.
+
+    GPT Academic passes ``prompt + fragment`` as ``inputs_array``.  Language
+    validation must not count the English prompt itself, otherwise a short
+    LaTeX-only fragment is falsely classified as untranslated.
+    """
+    value = prompt_or_fragment or ""
+    for marker in TRANSLATION_PROMPT_MARKERS:
+        if marker in value:
+            return value.split(marker, 1)[1]
+    return value
+
+
+def _split_top_level_option_items(value: str) -> Optional[List[str]]:
+    """Split commas outside balanced TeX option groups, or return ``None``."""
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    closers = set(pairs.values())
+    stack = []
+    parts = []
+    start = 0
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char in pairs:
+            stack.append(pairs[char])
+            continue
+        if char in closers:
+            if not stack or stack[-1] != char:
+                return None
+            stack.pop()
+            continue
+        if char == "," and not stack:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    if stack:
+        return None
+    parts.append(value[start:].strip())
+    return parts
+
+
+def _top_level_assignment(item: str) -> Optional[Tuple[str, str]]:
+    """Return the first top-level key/value split for one option item."""
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    closers = set(pairs.values())
+    stack = []
+    escaped = False
+    for index, char in enumerate(item):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char in pairs:
+            stack.append(pairs[char])
+            continue
+        if char in closers:
+            if not stack or stack[-1] != char:
+                return None
+            stack.pop()
+            continue
+        if char == "=" and not stack:
+            return item[:index].strip(), item[index + 1:].strip()
+    return None
+
+
+def is_bracketed_key_value_option_list(text: str) -> bool:
+    r"""Recognize a pure ``[key=value, ...]`` LaTeX configuration fragment.
+
+    Require at least two balanced assignments and reject sentence-like values.
+    This intentionally does not classify ordinary optional item labels such as
+    ``[This English prose ...]`` as structure.
+    """
+    value = (text or "").strip()
+    if len(value) < 7 or not value.startswith("[") or not value.endswith("]"):
+        return False
+    items = _split_top_level_option_items(value[1:-1])
+    if not items or len(items) < 2 or any(not item for item in items):
+        return False
+
+    assignments = []
+    key_re = re.compile(
+        r"/?[A-Za-z][A-Za-z0-9_.:/-]*"
+        r"(?:[ \t]+[A-Za-z][A-Za-z0-9_.:/-]*){0,5}"
+    )
+    prose_value_re = re.compile(
+        r"\b[A-Za-z]{2,}\b(?:\s+\b[A-Za-z]{2,}\b){2,}"
+    )
+    for item in items:
+        assignment = _top_level_assignment(item)
+        if assignment is None:
+            return False
+        key, option_value = assignment
+        if (
+            not key
+            or not option_value
+            or not key_re.fullmatch(key)
+            or len(option_value) > 500
+        ):
+            return False
+        prose_probe = re.sub(r"\\[A-Za-z@]+", " ", option_value)
+        prose_probe = re.sub(r"[^A-Za-z\s]", " ", prose_probe)
+        if prose_value_re.search(prose_probe):
+            return False
+        assignments.append(assignment)
+    return len(assignments) >= 2
+
+
+def strip_inline_code_commands(text: str) -> str:
+    """Remove inline code/URL payloads before natural-language heuristics."""
+    value = text or ""
+    for _ in range(3):
+        updated = INLINE_CODE_COMMAND_RE.sub(" ", value)
+        if updated == value:
+            break
+        value = updated
+    # Custom code macros often contain escaped JSON braces, which the fast
+    # regular expression above intentionally does not try to balance.
+    replacements = []
+    for match in INLINE_CODE_OPEN_RE.finditer(value):
+        depth = 1
+        index = match.end()
+        while index < len(value):
+            char = value[index]
+            escaped = index > 0 and value[index - 1] == "\\"
+            if char == "{" and not escaped:
+                depth += 1
+            elif char == "}" and not escaped:
+                depth -= 1
+                if depth == 0:
+                    replacements.append((match.start(), index + 1))
+                    break
+            index += 1
+    for start, end in reversed(replacements):
+        value = value[:start] + " " + value[end:]
+    # A URL may contain TeX escapes, base64-like query payloads and spaces.
+    # Everything from the scheme to the line end is address data, not prose.
+    value = re.sub(r"https?://[^\n]*", " ", value, flags=re.IGNORECASE)
+    return value
+
+
+def is_citation_heavy_proper_name_catalog(text: str) -> bool:
+    """Recognize a citation-backed catalog of versioned model/dataset names.
+
+    Such a line has no translatable predicate: the correct Chinese output often
+    keeps every proper name unchanged and only localizes punctuation.  Treating
+    that response as untranslated makes the whole paper fail after identical
+    retries.  The test is intentionally strict so an explanatory sentence that
+    happens to contain several citations still requires translation.
+    """
+    value = strip_inline_code_commands(extract_translation_fragment(text))
+    citations = CITATION_COMMAND_RE.findall(value)
+    if len(citations) < 4:
+        return False
+    remainder = CITATION_COMMAND_RE.sub(" ", value)
+    remainder = re.sub(r"\$[^$]*\$", " ", remainder)
+    remainder = re.sub(
+        r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?",
+        " ",
+        remainder,
+    )
+    # Decimal version separators are name data; sentence punctuation is prose.
+    punctuation_probe = re.sub(r"(?<=\d)\.(?=\d)", "", remainder)
+    if re.search(r"[.!?]", punctuation_probe):
+        return False
+    separators = len(re.findall(r"[,;\n]", remainder))
+    if separators < len(citations) - 2:
+        return False
+    tokens = re.findall(
+        r"\b[A-Za-z][A-Za-z0-9]*(?:[-_.+][A-Za-z0-9]+)*\b",
+        remainder,
+    )
+    if len(tokens) < len(citations) or len(tokens) > len(citations) * 4 + 3:
+        return False
+    lowered = [token.lower() for token in tokens]
+    if any(
+        word in _CATALOG_PROSE_WORDS and token.islower()
+        for token, word in zip(tokens, lowered)
+    ):
+        return False
+    name_like = sum(
+        bool(re.search(r"[A-Z0-9_.+-]", token))
+        or word in _CATALOG_NAME_WORDS
+        for token, word in zip(tokens, lowered)
+    )
+    return name_like / max(1, len(tokens)) >= 0.8
+
+
+def _natural_language_probe(text: str) -> str:
+    """Remove non-prose LaTeX payloads before language-ratio decisions."""
+    value = strip_inline_code_commands(extract_translation_fragment(text))
+    # Optional item labels may themselves be prose, so expose them before
+    # removing generic command names.
+    value = re.sub(r"\\item\s*\[([^\]]+)\]", r" \1 ", value)
+    value = CITATION_COMMAND_RE.sub(" ", value)
+    value = REFERENCE_PAYLOAD_COMMAND_RE.sub(" ", value)
+    value = MATH_SPAN_RE.sub(" ", value)
+    value = re.sub(
+        r"\\(?:begin|end)\{[^{}]+\}(?:\[[^\]]*\])?",
+        " ",
+        value,
+    )
+    # Keep braced human text (for example a section title), but remove the
+    # command name and options. Reference/citation keys were removed above.
+    value = re.sub(
+        r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?",
+        " ",
+        value,
+    )
+    return re.sub(r"[{}\\_^$&#~=+*/<>|]", " ", value)
+
+
+def _mixed_language_probe(text: str) -> str:
+    """Return ordinary prose while hiding literal English examples/code."""
+    value = extract_translation_fragment(text)
+    # Failure-box task/trajectory/result payloads are verbatim source data.
+    # Keep their surrounding explanation prose eligible for translation.
+    value = _strip_source_data_inline_macros(value)
+    # Some papers render an entire prompt template directly with ``\\`` line
+    # breaks instead of a tracked box environment.  Narrow directive markers
+    # distinguish that source data from normal paper prose.
+    if "\\\\" in value and PROMPT_TEMPLATE_LINE_RE.search(value):
+        return ""
+    for _ in range(3):
+        updated = re.sub(
+            r"\\(?:emph|textit|texttt|verb)\*?(?:\[[^\]]*\])?\{[^{}]*\}",
+            " ",
+            value,
+        )
+        if updated == value:
+            break
+        value = updated
+    value = re.sub(r'["“][^"”\n]*["”]', " ", value)
+    return _natural_language_probe(value)
+
+
+def _strip_source_data_inline_macros(value: str) -> str:
+    """Remove balanced verbatim failure-box payloads without touching prose."""
+    replacements = []
+    for match in SOURCE_DATA_INLINE_MACRO_OPEN_RE.finditer(value or ""):
+        depth = 1
+        index = match.end()
+        while index < len(value):
+            char = value[index]
+            escaped = index > 0 and value[index - 1] == "\\"
+            if char == "{" and not escaped:
+                depth += 1
+            elif char == "}" and not escaped:
+                depth -= 1
+                if depth == 0:
+                    replacements.append((match.start(), index + 1))
+                    break
+            index += 1
+    for start, end in reversed(replacements):
+        value = value[:start] + " " + value[end:]
+    return value
+
+
+def mixed_untranslated_english_clauses(text: str):
+    """Return high-confidence English clauses embedded in Chinese prose.
+
+    A clause must have four words, grammatical glue, one lower-case content
+    words, and Chinese on the same fragment.  This deliberately ignores
+    ordinary English titles/proper names and intentionally preserved inline
+    prompts, code, citations, URLs, and equations.
+    """
+    probe = _mixed_language_probe(text)
+    if len(re.findall(r"[\u4e00-\u9fff]", probe)) < 6:
+        return []
+    matches = list(MIXED_ENGLISH_WORD_RE.finditer(probe))
+    clauses = []
+    current = []
+    previous_end = 0
+    for match in matches:
+        gap = probe[previous_end:match.start()] if current else ""
+        if current and (
+            re.search(r"[\u4e00-\u9fff.!?]", gap)
+            or re.search(r"[^\s,;:()\[\]{}~\\'\"-]", gap)
+        ):
+            clauses.extend(_qualifying_mixed_english_clause(current))
+            current = []
+        current.append(match)
+        previous_end = match.end()
+    if current:
+        clauses.extend(_qualifying_mixed_english_clause(current))
+    return clauses
+
+
+def absorb_short_prose_bridges(
+    fragments: Iterable[Tuple[str, bool]],
+    max_translate_chars: int = 1800,
+) -> List[Tuple[str, bool]]:
+    r"""Attach short preserved prose around citations to a neighboring chunk.
+
+    Upstream may split a paragraph at ``\cite{...}`` and preserve pieces such
+    as ``\cite{key}, including``.  Those pieces are too short to translate on
+    their own, but leaving them untouched creates English seams between Chinese
+    chunks.  Absorb only fragments containing ordinary prose and citation/ref
+    commands; structural or arbitrary LaTeX commands remain protected.
+    """
+    items = [[str(text), bool(preserve)] for text, preserve in fragments]
+
+    def bridgeable(value: str) -> bool:
+        stripped = value.strip()
+        if not stripped or is_inline_prompt_source_data_block(stripped):
+            return False
+        probe = CITATION_COMMAND_RE.sub(" ", stripped)
+        probe = REFERENCE_PAYLOAD_COMMAND_RE.sub(" ", probe)
+        probe = MATH_SPAN_RE.sub(" ", probe)
+        if re.search(r"\\[A-Za-z@]+", probe):
+            return False
+        words = re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", probe)
+        letters = len(re.findall(r"[A-Za-z]", probe))
+        return letters >= 5 and bool(words)
+
+    changed = True
+    while changed:
+        changed = False
+        for index, (value, preserve) in enumerate(items):
+            if not preserve or not bridgeable(value):
+                continue
+            if (
+                index > 0
+                and not items[index - 1][1]
+                and len(items[index - 1][0]) + len(value) <= max_translate_chars
+            ):
+                items[index - 1][0] += value
+                del items[index]
+                changed = True
+                break
+            if (
+                index + 1 < len(items)
+                and not items[index + 1][1]
+                and len(value) + len(items[index + 1][0]) <= max_translate_chars
+            ):
+                items[index + 1][0] = value + items[index + 1][0]
+                del items[index]
+                changed = True
+                break
+    return [(text, preserve) for text, preserve in items]
+
+
+def _qualifying_mixed_english_clause(matches):
+    tokens = [match.group(0) for match in matches]
+    lowered = [token.lower() for token in tokens]
+    content = [
+        token for token, lowered_token in zip(tokens, lowered)
+        if lowered_token not in MIXED_ENGLISH_CLAUSE_GLUE_WORDS
+    ]
+    if (
+        len(tokens) < 4
+        or sum(len(token) for token in tokens) < 12
+        or not any(token in MIXED_ENGLISH_CLAUSE_GLUE_WORDS for token in lowered)
+        or not content
+        or not any(token[0].islower() for token in content)
+    ):
+        return []
+    return [{
+        "text": " ".join(tokens)[:220],
+        "words": len(tokens),
+        "letters": sum(len(token) for token in tokens),
+    }]
+
+
 def llm_translation_response_untranslated(source: str, response: str) -> bool:
     """Detect prose-like source chunks whose response still lacks Chinese."""
     if llm_translation_response_failed(response):
         return True
-    source_value = source or ""
-    response_value = response or ""
-    source_letters = len(re.findall(r"[A-Za-z]", source_value))
-    source_cjk = len(re.findall(r"[\u4e00-\u9fff]", source_value))
-    response_letters = len(re.findall(r"[A-Za-z]", response_value))
-    response_cjk = len(re.findall(r"[\u4e00-\u9fff]", response_value))
-    return (
+    source_value = strip_inline_code_commands(extract_translation_fragment(source))
+    if is_inline_prompt_source_data_block(source_value):
+        return False
+    if is_bracketed_key_value_option_list(source_value):
+        return False
+    if is_citation_heavy_proper_name_catalog(source_value):
+        return False
+    source_prose = _natural_language_probe(source_value)
+    response_prose = _natural_language_probe(response or "")
+    # A mostly Chinese response can still leave a grammatical English clause
+    # behind.  The historic ratio-only test missed exactly this shape; reject
+    # the slot before merge so the existing serialized retry path repairs it.
+    if mixed_untranslated_english_clauses(response or ""):
+        return True
+    source_letters = len(re.findall(r"[A-Za-z]", source_prose))
+    source_words = re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", source_prose)
+    source_cjk = len(re.findall(r"[\u4e00-\u9fff]", source_prose))
+    response_letters = len(re.findall(r"[A-Za-z]", response_prose))
+    response_words = re.findall(
+        r"\b[A-Za-z][A-Za-z'-]{1,}\b",
+        response_prose,
+    )
+    response_cjk = len(re.findall(r"[\u4e00-\u9fff]", response_prose))
+
+    # Short prose used to rely on long reference keys to cross the generic
+    # 40-letter threshold. Once those keys are correctly removed, retain a
+    # narrow exact-copy detector so a genuine English echo is still rejected.
+    source_word_text = " ".join(word.lower() for word in source_words)
+    response_word_text = " ".join(word.lower() for word in response_words)
+    copied_short_prose = (
+        source_letters >= 18
+        and len(source_words) >= 3
+        and source_cjk < 8
+        and response_letters >= 15
+        and response_cjk < 6
+        and difflib.SequenceMatcher(
+            None,
+            source_word_text,
+            response_word_text,
+        ).ratio() >= 0.92
+    )
+    return copied_short_prose or (
         source_letters >= 40
+        and len(source_words) >= 6
         and source_cjk < 8
         and response_letters >= 24
         and response_cjk < 6
@@ -247,7 +1285,25 @@ def coalesce_translation_fragments(
     not a semantic boundary. Absorb them into the translation request, while
     retaining structural LaTeX boundaries and a conservative request-size cap.
     """
-    items = [(text, preserve) for text, preserve in fragments if text]
+    items = []
+    inline_source_state = {}
+    for text, preserve in fragments:
+        if not text:
+            continue
+        inline_source, inline_source_state = (
+            inline_prompt_source_data_fragment_protected(
+                text,
+                inline_source_state,
+            )
+        )
+        items.append((
+            text,
+            bool(
+                preserve
+                or inline_source
+                or is_bracketed_key_value_option_list(text)
+            ),
+        ))
     result: List[Tuple[str, bool]] = []
     pending_whitespace = ""
     for index, (text, preserve) in enumerate(items):
@@ -299,6 +1355,159 @@ def coalesce_translation_fragments(
     return result
 
 
+def split_translation_line_bounded(
+    line: str,
+    max_translate_chars: int = 1800,
+    min_sentence_chars: int = 180,
+) -> List[str]:
+    r"""Split prose without cutting open TeX groups or inline math delimiters.
+
+    Sentence punctuation is preferred, then top-level whitespace, then a plain
+    text character boundary.  ``$...$``, ``$$...$$``, ``\(...\)``, ``\[...\]``
+    and brace groups are kept balanced.  A single protected TeX group may
+    necessarily exceed the cap, but ordinary unpunctuated prose remains bounded.
+    """
+    value = str(line or "")
+    if not value:
+        return []
+    max_chars = max(1, int(max_translate_chars))
+    min_chars = max(1, min(int(min_sentence_chars), max_chars))
+
+    safe_positions = []
+    whitespace_positions = []
+    sentence_positions = []
+    brace_depth = 0
+    math_mode = ""
+    index = 0
+
+    def escaped(position):
+        backslashes = 0
+        cursor = position - 1
+        while cursor >= 0 and value[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        return backslashes % 2 == 1
+
+    while index < len(value):
+        token_end = index + 1
+        if value.startswith(r"\(", index) and not escaped(index):
+            if not math_mode:
+                math_mode = "paren"
+            token_end = index + 2
+        elif value.startswith(r"\)", index) and not escaped(index):
+            if math_mode == "paren":
+                math_mode = ""
+            token_end = index + 2
+        elif value.startswith(r"\[", index) and not escaped(index):
+            if not math_mode:
+                math_mode = "bracket"
+            token_end = index + 2
+        elif value.startswith(r"\]", index) and not escaped(index):
+            if math_mode == "bracket":
+                math_mode = ""
+            token_end = index + 2
+        elif value.startswith("$$", index) and not escaped(index):
+            math_mode = "" if math_mode == "display-dollar" else (
+                "display-dollar" if not math_mode else math_mode
+            )
+            token_end = index + 2
+        elif value[index] == "$" and not escaped(index):
+            math_mode = "" if math_mode == "dollar" else (
+                "dollar" if not math_mode else math_mode
+            )
+        elif not math_mode and value[index] == "{" and not escaped(index):
+            brace_depth += 1
+        elif (
+            not math_mode
+            and value[index] == "}"
+            and not escaped(index)
+            and brace_depth > 0
+        ):
+            brace_depth -= 1
+        elif (
+            not math_mode
+            and brace_depth == 0
+            and value[index] == "\\"
+            and index + 1 < len(value)
+            and value[index + 1].isalpha()
+        ):
+            token_end = index + 2
+            while token_end < len(value) and (
+                value[token_end].isalpha() or value[token_end] == "@"
+            ):
+                token_end += 1
+            if token_end < len(value) and value[token_end] == "*":
+                token_end += 1
+
+        index = token_end
+        if math_mode or brace_depth:
+            continue
+
+        safe_positions.append(index)
+        previous = value[index - 1]
+        if previous.isspace():
+            whitespace_positions.append(index)
+        if previous in ".;!?。；！？":
+            following = value[index] if index < len(value) else ""
+            if not following or following.isspace():
+                sentence_positions.append(index)
+
+    if not safe_positions or safe_positions[-1] != len(value):
+        safe_positions.append(len(value))
+
+    parts = []
+    start = 0
+    while start < len(value):
+        remaining = len(value) - start
+        preferred = next(
+            (
+                position
+                for position in sentence_positions
+                if start + min_chars <= position <= start + max_chars
+            ),
+            None,
+        )
+        if preferred is not None:
+            end = preferred
+            while (
+                end < len(value)
+                and value[end].isspace()
+                and value[end] != "\n"
+                and end - start < max_chars
+            ):
+                end += 1
+        elif remaining <= max_chars:
+            end = len(value)
+        else:
+            whitespace = [
+                position
+                for position in whitespace_positions
+                if start < position <= start + max_chars
+            ]
+            safe = [
+                position
+                for position in safe_positions
+                if start < position <= start + max_chars
+            ]
+            if whitespace:
+                end = whitespace[-1]
+            elif safe:
+                end = safe[-1]
+            else:
+                # The cap falls inside one protected TeX group/math span.  Move
+                # to its first balanced boundary instead of emitting malformed
+                # chunks; ordinary prose always has safe character boundaries.
+                end = next(
+                    (position for position in safe_positions if position > start),
+                    len(value),
+                )
+        if end <= start:
+            end = min(len(value), start + max_chars)
+        parts.append(value[start:end])
+        start = end
+    return parts
+
+
 def _extra_artifact_patterns() -> List[object]:
     raw = os.environ.get("PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS", "")
     if not raw.strip():
@@ -321,11 +1530,89 @@ def strip_llm_translation_artifacts(text: str) -> Tuple[str, int]:
     return new_text, total
 
 
-def _insert_latex_preamble_snippet(
+def find_uncommented_latex_token(text: str, token: str) -> int:
+    """Return the first TeX token position outside an unescaped ``%`` comment."""
+    offset = 0
+    for line in (text or "").splitlines(keepends=True):
+        comment_at = len(line)
+        for index, char in enumerate(line):
+            if char != "%":
+                continue
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and line[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2 == 0:
+                comment_at = index
+                break
+        position = line[:comment_at].find(token)
+        if position >= 0:
+            return offset + position
+        offset += len(line)
+    return -1
+
+
+def _safe_top_level_line_start(text: str, position: int) -> int:
+    """Return a line boundary before ``position`` that is outside TeX groups.
+
+    A command use can occur inside a multi-line ``\newcommand`` body.  Inserting
+    a fallback directly before that use makes the fallback local to the macro
+    body, so it disappears before the command is expanded.  Track brace depth
+    and comments and move the insertion point back to the line that opened the
+    surrounding top-level construct.
+    """
+    source = text or ""
+    limit = max(0, min(position, len(source)))
+    depth = 0
+    line_start = 0
+    safe_line_start = 0
+    index = 0
+    in_comment = False
+
+    while index < limit:
+        char = source[index]
+        if char == "\n":
+            index += 1
+            line_start = index
+            in_comment = False
+            if depth == 0:
+                safe_line_start = line_start
+            continue
+        if in_comment:
+            index += 1
+            continue
+        if char == "%":
+            in_comment = True
+            index += 1
+            continue
+        if char == "\\":
+            # A control symbol such as ``\{`` does not open a TeX group.
+            index += 2
+            continue
+        if char == "{":
+            if depth == 0:
+                safe_line_start = line_start
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+        index += 1
+
+    return safe_line_start if depth else line_start
+
+
+def insert_latex_preamble_snippet(
     text: str,
     insertion: str,
     command_markers: Iterable[str] = (),
 ) -> Tuple[str, bool]:
+    """Insert a snippet at a top-level preamble boundary.
+
+    The earliest command marker still determines ordering, but a marker nested
+    in a macro argument is mapped back to the top-level line that owns that
+    argument.  This prevents fallback definitions from becoming accidentally
+    local while retaining the previous "before first use" behavior.
+    """
     snippet = insertion.strip()
     if not snippet or snippet in text:
         return text, False
@@ -333,20 +1620,29 @@ def _insert_latex_preamble_snippet(
     positions = []
     for marker in command_markers:
         token = marker if marker.startswith("\\") else "\\" + marker
-        pos = text.find(token)
+        pos = find_uncommented_latex_token(text, token)
         if pos >= 0:
             positions.append(pos)
 
-    begin_doc = text.find(r"\begin{document}")
+    begin_doc = find_uncommented_latex_token(text, r"\begin{document}")
     if positions:
         pos = min(positions)
         if begin_doc < 0 or pos < begin_doc:
-            line_start = text.rfind("\n", 0, pos) + 1
-            return text[:line_start] + insertion + "\n" + text[line_start:], True
+            insert_at = _safe_top_level_line_start(text, pos)
+            return text[:insert_at] + insertion + "\n" + text[insert_at:], True
 
     if begin_doc >= 0:
-        return text[:begin_doc] + insertion + "\n" + text[begin_doc:], True
-    return text + "\n" + insertion + "\n", True
+        insert_at = _safe_top_level_line_start(text, begin_doc)
+        return text[:insert_at] + insertion + "\n" + text[insert_at:], True
+    return text + ("" if text.endswith("\n") else "\n") + insertion + "\n", True
+
+
+def _insert_latex_preamble_snippet(
+    text: str,
+    insertion: str,
+    command_markers: Iterable[str] = (),
+) -> Tuple[str, bool]:
+    return insert_latex_preamble_snippet(text, insertion, command_markers)
 
 
 def _latex_command_defined(text: str, name: str) -> bool:
@@ -377,6 +1673,66 @@ def fontawesome_command_names(text: str) -> Tuple[str, ...]:
     names = set(re.findall(r"\\(fa[A-Z][A-Za-z]+)\b", text or ""))
     names.discard("faIcon")  # faIcon itself takes a mandatory icon-name argument.
     return tuple(sorted(names))
+
+
+def add_fontawesome_legacy_aliases(
+    text: str,
+    sibling_text: str = "",
+) -> Tuple[str, int]:
+    """Add deterministic FontAwesome fallbacks at top-level preamble scope.
+
+    Older versions inserted the tagged block immediately before the first icon
+    token.  When that token lived inside a ``\newcommand`` body, every
+    ``\providecommand`` became local and the icon was still undefined at use
+    time.  Remove all historical tagged blocks first, then rebuild one block at
+    a safe top-level boundary.
+    """
+    marker = "% paper-trans fallback for fontawesome5 legacy aliases"
+    tagged_block = re.compile(
+        r"(?m)^" + re.escape(marker) + r"\r?\n"
+        r"(?:\\providecommand\{\\fa[A-Za-z]+\}\{[^\n]*\}\r?\n?)+"
+    )
+    source, removed_blocks = tagged_block.subn("", text or "")
+
+    aliases = {
+        "faFile": ("file", "F"),
+        "faGlobe": ("globe", "G"),
+        "faGithub": ("github", "GH"),
+        "faSearch": ("search", "S"),
+        "faTrophy": ("trophy", "T"),
+        "faDatabase": ("database", "DB"),
+        "faEnvelope": ("envelope", "@"),
+        "faEnvelopeO": ("envelope", "@"),
+        "faGem": ("gem", "*"),
+    }
+    combined = source + "\n" + (sibling_text or "")
+    names = [
+        name
+        for name in fontawesome_command_names(combined)
+        if not _latex_command_defined(combined, name)
+    ]
+    if not names:
+        return source, removed_blocks
+
+    lines = [marker]
+    for name in names:
+        alias = aliases.get(name)
+        if alias is None:
+            lines.append(r"\providecommand{\%s}{\textbullet}" % name)
+            continue
+        icon, fallback = alias
+        lines.append(
+            r"\providecommand{\%s}{\ifcsname faIcon\endcsname\faIcon{%s}"
+            r"\else\textcircled{%s}\fi}" % (name, icon, fallback)
+        )
+
+    insertion = "\n".join(lines)
+    fixed, inserted = insert_latex_preamble_snippet(source, insertion, names)
+    if not inserted:
+        return source, removed_blocks
+    if fixed == text:
+        return text, 0
+    return fixed, max(len(names), removed_blocks)
 
 
 def restore_environment_opening_options(
@@ -507,6 +1863,23 @@ def disable_fragile_tikz_matrix_legends(text: str) -> Tuple[str, int]:
 def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
     """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
     source = text or ""
+    historical_repairs = 0
+
+    # v4.36 located ``\begin{document}`` with a raw string search.  A template
+    # comment containing that example token could therefore be split by the
+    # natbib fallback and turn the remaining comment tail into executable TeX.
+    broken_natbib_comment = "\n".join([
+        r"% Outer hook fires during % paper-trans fallback for missing natbib citation commands",
+        r"\providecommand{\citep}[2][]{\cite{#2}}",
+        r"\providecommand{\citet}[2][]{\cite{#2}}",
+        r"\begin{document} processing;",
+    ])
+    if broken_natbib_comment in source:
+        historical_repairs = source.count(broken_natbib_comment)
+        source = source.replace(
+            broken_natbib_comment,
+            r"% Outer hook fires during \begin{document} processing;",
+        )
 
     # Replace the first-generation CJK fallback, which used ``providecommand``
     # with ``\csname`` and can emit "already defined" errors on CJKutf8.
@@ -587,7 +1960,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         and not _latex_command_defined(source, "CJK")
     )
 
-    total = 0
+    total = historical_repairs
     if needs_inputencoding:
         insertion = "\n".join([
             r"% paper-trans fallback for XeLaTeX compatibility commands",
@@ -763,6 +2136,106 @@ CJK_INTER_CHAR_SPACE_RE = re.compile(
     r"(" + CJK_CHAR_CLASS + r") +(?=" + CJK_CHAR_CLASS + r")"
 )
 
+# Built-in commands in this allow-list consume no mandatory text argument.
+# Keep the list deliberately narrow: this repair handles translation glue, not
+# arbitrary undefined control sequences.
+ZERO_ARG_LAYOUT_COMMANDS = (
+    "cleardoublepage",
+    "clearpage",
+    "noindent",
+    "smallskip",
+    "medskip",
+    "bigskip",
+    "newline",
+    "newpage",
+    "hfill",
+    "vfill",
+    "par",
+)
+
+
+def separate_builtin_layout_ascii_glue(
+    text: str,
+    definition_text: str = "",
+) -> Tuple[str, int]:
+    r"""Split built-in layout commands glued to Titlecase prose.
+
+    For example, an LLM can turn ``\par From (A)-(C)`` into
+    ``\parFrom (A)-(C)``, which TeX parses as the undefined command
+    ``\parFrom``.  Only a small built-in zero-argument allow-list and a
+    Titlecase ASCII word followed by prose punctuation/whitespace are accepted.
+    An explicitly defined combined command always wins.
+    """
+    source = text or ""
+    definition_source = source + "\n" + (definition_text or "")
+    explicitly_defined = {
+        (match.group(1) or match.group(2))
+        for match in ZERO_ARG_COMMAND_DEF_RE.finditer(definition_source)
+        if match.group(1) or match.group(2)
+    }
+    for match in re.finditer(
+        r"\\(?:def|gdef|edef|xdef)\s*\\([A-Za-z@]+)\b"
+        r"|\\let\s*\\([A-Za-z@]+)\b",
+        definition_source,
+    ):
+        name = match.group(1) or match.group(2)
+        if name:
+            explicitly_defined.add(name)
+
+    command_pattern = "|".join(
+        re.escape(name)
+        for name in sorted(ZERO_ARG_LAYOUT_COMMANDS, key=len, reverse=True)
+    )
+    glued_re = re.compile(
+        r"\\(?P<layout>" + command_pattern + r")"
+        r"(?P<word>[A-Z][a-z]{1,40})"
+        r"(?=$|[\\\s()\[\],.;:!?，。；：！？\u3400-\u4dbf\u4e00-\u9fff])"
+    )
+    verbatim_envs = set(BASE_VERBATIM_RESTORE_ENVS)
+    env_stack = []
+    total = 0
+    output = []
+
+    def replace(match) -> str:
+        nonlocal total
+        combined = match.group("layout") + match.group("word")
+        if combined in explicitly_defined:
+            return match.group(0)
+        total += 1
+        return "\\" + match.group("layout") + " " + match.group("word")
+
+    for line in source.splitlines(keepends=True):
+        begins = re.findall(r"\\begin\{([^{}]+)\}", line)
+        protected = bool(env_stack) or any(env in verbatim_envs for env in begins)
+        if protected:
+            output.append(line)
+        else:
+            comment_at = len(line)
+            for index, char in enumerate(line):
+                if char != "%":
+                    continue
+                backslashes = 0
+                cursor = index - 1
+                while cursor >= 0 and line[cursor] == "\\":
+                    backslashes += 1
+                    cursor -= 1
+                if backslashes % 2 == 0:
+                    comment_at = index
+                    break
+            output.append(glued_re.sub(replace, line[:comment_at]) + line[comment_at:])
+
+        for env in begins:
+            if env in verbatim_envs:
+                env_stack.append(env)
+        for env in re.findall(r"\\end\{([^{}]+)\}", line):
+            if env not in verbatim_envs:
+                continue
+            if env in env_stack:
+                pos = len(env_stack) - 1 - env_stack[::-1].index(env)
+                del env_stack[pos:]
+
+    return "".join(output), total
+
 
 def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
     r"""Separate no-argument custom macros from glued CJK text/punctuation.
@@ -875,8 +2348,14 @@ def replace_bare_citation_commands(text: str) -> Tuple[str, int]:
 
 
 def separate_declaration_command_cjk_glue(text: str) -> Tuple[str, int]:
-    r"""Terminate legacy font declarations before translated CJK prose."""
-    commands = ("em", "bf", "it", "rm", "sf", "tt")
+    r"""Terminate no-argument declarations before translated CJK prose.
+
+    ``\\xspace`` is frequently appended to a project macro; when translation
+    glues Chinese text to it, XeTeX reads one undefined control sequence such
+    as ``\\xspace与``.  It has no mandatory argument, just like the legacy
+    font declarations handled here.
+    """
+    commands = ("xspace", "em", "bf", "it", "rm", "sf", "tt")
     pattern = re.compile(r"\\(" + "|".join(commands) + r")(?=" + CJK_COMMAND_FOLLOW_RE + r")")
     return pattern.subn(lambda m: "\\" + m.group(1) + " ", text or "")
 
@@ -891,6 +2370,37 @@ def demote_cleveref_commands(text: str) -> Tuple[str, int]:
     r"""Use core LaTeX references when a template's cleveref setup is fragile."""
     pattern = re.compile(r"\\(?:c|C)ref(?:\s*\[[^\]]*\])?(?=\s*\{)")
     return pattern.subn(r"\\ref", text or "")
+
+
+def split_multilabel_references(text: str) -> Tuple[str, int]:
+    """Split core refs only when every individual label exists in this source."""
+    source = text or ""
+    defined_labels = {
+        match.group(1).strip()
+        for match in re.finditer(r"\\label\{([^{}\n]+)\}", source)
+        if match.group(1).strip()
+    }
+    pattern = re.compile(
+        r"\\(?P<command>ref|eqref|autoref)\{(?P<labels>[^{}\n]*,[^{}\n]*)\}"
+    )
+    total = 0
+
+    def replace(match) -> str:
+        nonlocal total
+        combined = match.group("labels").strip()
+        labels = [item.strip() for item in match.group("labels").split(",")]
+        if (
+            len(labels) < 2
+            or any(not item for item in labels)
+            or combined in defined_labels
+            or any(item not in defined_labels for item in labels)
+        ):
+            return match.group(0)
+        total += 1
+        command = match.group("command")
+        return ", ".join(f"\\{command}{{{label}}}" for label in labels)
+
+    return pattern.sub(replace, source), total
 
 
 def disable_microtype_package_loads(text: str) -> Tuple[str, int]:
@@ -1020,6 +2530,76 @@ PDFTEX_PRIMITIVE_LINE_RE = re.compile(
 def guard_pdftex_primitive_lines(text: str) -> Tuple[str, int]:
     """Wrap pdfTeX-only primitive lines so XeLaTeX/LuaLaTeX can skip them."""
     total = 0
+    value = text or ""
+    names_pattern = "|".join(
+        re.escape(name) for name in PDFTEX_PRIMITIVE_NAMES
+    )
+
+    # Repair the first-generation multiline guard, which placed ``\fi``
+    # immediately after the opening brace and left the payload unguarded.
+    malformed_re = re.compile(
+        r"(?ms)^(?P<indent>[ \t]*)\\ifdefined\\(?P<name>"
+        + names_pattern
+        + r")\\(?P=name)\{\s*\\fi(?P<body>.*?)^(?P=indent)\}[ \t]*$"
+    )
+
+    def repair_malformed(match) -> str:
+        nonlocal total
+        total += 1
+        return (
+            match.group("indent")
+            + "\\ifdefined\\"
+            + match.group("name")
+            + "\\"
+            + match.group("name")
+            + "{"
+            + match.group("body")
+            + match.group("indent")
+            + "}\\fi"
+        )
+
+    value = malformed_re.sub(repair_malformed, value)
+
+    # A primitive such as ``\pdfinfo{`` commonly spans several lines.  Guard
+    # the whole balanced command; wrapping only its first line leaves the
+    # payload outside the conditional and causes "Missing \begin{document}".
+    braced_re = re.compile(
+        r"(?m)^(?P<indent>[ \t]*)\\(?P<name>"
+        + names_pattern
+        + r")\b[^\n{]*\{"
+    )
+    replacements = []
+    for match in braced_re.finditer(value):
+        line_start = value.rfind("\n", 0, match.start()) + 1
+        if "\\ifdefined\\" + match.group("name") in value[line_start:match.start()]:
+            continue
+        open_index = value.find("{", match.start(), match.end())
+        depth = 0
+        close_index = -1
+        for index in range(open_index, len(value)):
+            char = value[index]
+            if char == "{" and (index == 0 or value[index - 1] != "\\"):
+                depth += 1
+            elif char == "}" and (index == 0 or value[index - 1] != "\\"):
+                depth -= 1
+                if depth == 0:
+                    close_index = index + 1
+                    break
+        if close_index < 0:
+            continue
+        command_start = match.start() + len(match.group("indent"))
+        guarded = (
+            match.group("indent")
+            + "\\ifdefined\\"
+            + match.group("name")
+            + value[command_start:close_index]
+            + "\\fi"
+        )
+        replacements.append((match.start(), close_index, guarded))
+
+    for start, end, guarded in reversed(replacements):
+        value = value[:start] + guarded + value[end:]
+        total += 1
 
     def replace(m) -> str:
         nonlocal total
@@ -1036,8 +2616,59 @@ def guard_pdftex_primitive_lines(text: str) -> Tuple[str, int]:
             + "\\fi"
         )
 
-    new_text = PDFTEX_PRIMITIVE_LINE_RE.sub(replace, text or "")
+    new_text = PDFTEX_PRIMITIVE_LINE_RE.sub(replace, value)
     return new_text, total
+
+
+def unique_label_replacement(
+    label: str,
+    labels: Iterable[str],
+    original_refs: Iterable[str] = (),
+) -> Optional[str]:
+    """Infer one conservative replacement for an undefined translated ref."""
+    if "," in label:
+        return None
+    targets = sorted(set(labels))
+    if "/" in label:
+        colon_variant = label.replace("/", ":")
+        if colon_variant in targets:
+            return colon_variant
+
+    candidates = [
+        target for target in targets
+        if target.startswith(label + "_") or target.startswith(label + "-")
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Pure edit-distance guesses can silently redirect a genuinely missing ref
+    # to the wrong figure/table.  Only consider fuzzy candidates that are
+    # independently present as refs in the untranslated merge.tex.
+    original_targets = set(original_refs)
+    if not original_targets:
+        return None
+
+    namespace = label.split(":", 1)[0] if ":" in label else ""
+    if not namespace:
+        return None
+    comparable = [
+        target for target in targets
+        if target.startswith(namespace + ":") and target in original_targets
+    ]
+    scored = sorted(
+        (
+            difflib.SequenceMatcher(None, label, target).ratio(),
+            target,
+        )
+        for target in comparable
+    )
+    if not scored:
+        return None
+    best_score, best = scored[-1]
+    runner_up = scored[-2][0] if len(scored) > 1 else 0.0
+    if best_score >= 0.78 and best_score - runner_up >= 0.08:
+        return best
+    return None
 
 
 CAPTION_MARKER = r"\caption{"

@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import latex_translation_filters as filters
+from paperhub.translation_quality import analyze_tex, is_untranslated_prose
 
 
 NODE_RE = re.compile(
@@ -24,7 +24,6 @@ LATEX_COMMAND_RE = re.compile(
     r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?"
 )
 LONG_ENGLISH_RE = re.compile(r"(?:[A-Za-z][A-Za-z-]{2,}[\s,.;:()]+){8,}")
-WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z-]{2,}\b")
 
 
 def decode_node(body):
@@ -150,102 +149,6 @@ def analyze_debug_root(debug_root, translation_dirs):
     }
 
 
-def rough_text(line):
-    value = re.sub(r"\$[^$]*\$", " ", line)
-    for _ in range(3):
-        value = re.sub(
-            r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
-            r"scriptsize|normalsize|large|Large|captionof)\*?"
-            r"(?:\[[^\]]*\])?\{([^{}]*)\}",
-            r" \1 ",
-            value,
-        )
-    value = LATEX_COMMAND_RE.sub(" ", value)
-    return re.sub(r"\\.|[{}$^_&#~]", " ", value)
-
-
-def analyze_tex(path):
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
-    in_document = False
-    env_stack = []
-    english_lines = []
-    mixed_lines = 0
-    english_dominant_lines = 0
-    envs = Counter()
-    commands = Counter()
-    english_words = Counter()
-    english_word_line_bins = Counter()
-    cjk_total = 0
-    letter_total = 0
-    prose_lines = 0
-    for line_no, line in enumerate(text.splitlines(), 1):
-        if r"\begin{document}" in line:
-            in_document = True
-        begins = re.findall(r"\\begin\{([^}]+)\}", line)
-        ends = re.findall(r"\\end\{([^}]+)\}", line)
-        active = next(
-            (env for env in reversed(env_stack) if env != "document"),
-            "body",
-        )
-        protected = any(filters.is_hard_protected_env(env) for env in env_stack)
-        structural = bool(begins or ends)
-        if in_document and not protected and not structural:
-            rough = rough_text(line)
-            letters = len(re.findall(r"[A-Za-z]", rough))
-            cjk = len(re.findall(r"[\u4e00-\u9fff]", rough))
-            words = WORD_RE.findall(rough)
-            if letters + cjk >= 24:
-                prose_lines += 1
-                cjk_total += cjk
-                letter_total += letters
-            if len(words) >= 8 and letters >= 50:
-                normalized_words = [word.lower() for word in words]
-                english_words.update(normalized_words)
-                english_word_line_bins[
-                    "8-15" if len(words) <= 15 else
-                    "16-30" if len(words) <= 30 else
-                    "31+"
-                ] += 1
-                envs[active] += 1
-                command = COMMAND_RE.match(line)
-                commands[command.group(1) if command else "plain"] += 1
-                english_lines.append({
-                    "line": line_no,
-                    "env": active,
-                    "command": command.group(1) if command else "plain",
-                    "words": len(words),
-                    "cjk": cjk,
-                    "text": line.strip()[:220],
-                })
-                if cjk >= 8:
-                    mixed_lines += 1
-                if cjk < 8 or len(words) >= cjk:
-                    english_dominant_lines += 1
-        for env in begins:
-            env_stack.append(env)
-        for env in ends:
-            if env in env_stack:
-                pos = len(env_stack) - 1 - env_stack[::-1].index(env)
-                env_stack = env_stack[:pos]
-        if r"\end{document}" in line:
-            in_document = False
-    return {
-        "path": str(path),
-        "cjk_pct": round(100 * cjk_total / max(1, cjk_total + letter_total), 1),
-        "prose_lines": prose_lines,
-        "long_english_lines": len(english_lines),
-        "mixed_language_lines": mixed_lines,
-        "english_dominant_lines": english_dominant_lines,
-        "english_word_occurrences": sum(english_words.values()),
-        "english_word_line_bins": dict(english_word_line_bins),
-        "top_english_words": dict(english_words.most_common(30)),
-        "_english_word_counts": dict(english_words),
-        "by_environment": dict(envs),
-        "by_command": dict(commands),
-        "samples": english_lines[:8],
-    }
-
-
 def analyze_tex_dirs(directories):
     paths = []
     for directory in directories:
@@ -262,8 +165,12 @@ def analyze_tex_dirs(directories):
         word_line_bins.update(paper["english_word_line_bins"])
         paper.pop("_english_word_counts", None)
     affected = [paper for paper in papers if paper["long_english_lines"]]
+    broad_affected = [
+        paper for paper in papers if paper["broad_english_lines"]
+    ]
     cjk_bins = Counter()
     english_bins = Counter()
+    broad_english_bins = Counter()
     for paper in papers:
         cjk = paper["cjk_pct"]
         cjk_bins[
@@ -281,11 +188,23 @@ def analyze_tex_dirs(directories):
             "21-50" if english <= 50 else
             "51+"
         ] += 1
+        broad_english = paper["broad_english_lines"]
+        broad_english_bins[
+            "0" if broad_english == 0 else
+            "1-5" if broad_english <= 5 else
+            "6-20" if broad_english <= 20 else
+            "21-50" if broad_english <= 50 else
+            "51+"
+        ] += 1
     return {
         "papers": len(papers),
         "papers_with_long_english": len(affected),
         "papers_without_long_english": len(papers) - len(affected),
         "long_english_lines": sum(item["long_english_lines"] for item in papers),
+        "papers_with_broad_english": len(broad_affected),
+        "broad_english_lines": sum(
+            item["broad_english_lines"] for item in papers
+        ),
         "mixed_language_lines": sum(item["mixed_language_lines"] for item in papers),
         "english_dominant_lines": sum(
             item["english_dominant_lines"] for item in papers
@@ -297,15 +216,16 @@ def analyze_tex_dirs(directories):
         "top_english_words": dict(english_words.most_common(50)),
         "cjk_pct_bins": dict(cjk_bins),
         "long_english_line_bins": dict(english_bins),
+        "broad_english_line_bins": dict(broad_english_bins),
         "severe_papers": sum(
-            item["cjk_pct"] < 50 and item["long_english_lines"] > 20
+            is_untranslated_prose(item)
             for item in papers
         ),
         "by_environment": dict(environments.most_common()),
         "by_command": dict(commands.most_common()),
         "worst_papers": sorted(
-            affected,
-            key=lambda item: (item["long_english_lines"], -item["cjk_pct"]),
+            broad_affected,
+            key=lambda item: (item["broad_english_lines"], -item["cjk_pct"]),
             reverse=True,
         )[:30],
     }

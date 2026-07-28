@@ -7,6 +7,18 @@
 import sys, os, glob, time, shutil, tarfile
 import latex_translation_filters as _ltf
 from failure_taxonomy import classify_failure
+try:
+    # Container deployment copies this support module beside the driver.
+    from translation_quality import (
+        analyze_tex as _analyze_translated_tex,
+        is_untranslated_prose as _is_untranslated_prose,
+    )
+except ImportError:
+    # Keep direct host-side diagnostics/imports usable from the repository.
+    from paperhub.translation_quality import (
+        analyze_tex as _analyze_translated_tex,
+        is_untranslated_prose as _is_untranslated_prose,
+    )
 
 sys.path.insert(0, '/gpt')
 os.chdir('/gpt')
@@ -15,7 +27,7 @@ arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-07-27-v4"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-07-28-v11"
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
@@ -55,7 +67,48 @@ _cfg.read_single_conf_with_lru_cache = _patched_read
 
 import requests as _req
 _OrigSession = _req.Session
-_LLM_HTTP_TIMEOUT = int(os.environ.get("PAPER_TRANS_LLM_HTTP_TIMEOUT", "120"))
+def _bounded_positive_int_env(name, default, minimum, maximum):
+    """Read an operator-controlled timeout without making the driver fragile."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+_LLM_HTTP_TIMEOUT = _bounded_positive_int_env(
+    "PAPER_TRANS_LLM_HTTP_TIMEOUT",
+    120,
+    5,
+    3600,
+)
+
+# arXiv source retrieval is deliberately bounded separately from LLM requests.
+# ``requests``' read timeout is an *idle* timeout: a peer that sends one byte
+# periodically can otherwise hold the global translation lock forever.  Keep
+# these knobs operator-configurable, but put safe ceilings on each attempt and
+# on the complete proxy/direct fallback sequence.
+_SOURCE_DOWNLOAD_CONNECT_TIMEOUT = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_CONNECT_TIMEOUT", 15, 5, 60,
+)
+_SOURCE_DOWNLOAD_READ_TIMEOUT = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_READ_TIMEOUT", 90, 15, 300,
+)
+_SOURCE_DOWNLOAD_ATTEMPT_SECONDS = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_ATTEMPT_SECONDS", 300, 60, 1800,
+)
+_SOURCE_DOWNLOAD_TOTAL_SECONDS = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_TOTAL_SECONDS", 600, 120, 3600,
+)
+_SOURCE_DOWNLOAD_RATE_GRACE_SECONDS = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_RATE_GRACE_SECONDS", 45, 10, 300,
+)
+_SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_MIN_BYTES_PER_SECOND", 8 * 1024, 1024, 512 * 1024,
+)
+_SOURCE_DOWNLOAD_MAX_BYTES = _bounded_positive_int_env(
+    "PAPER_TRANS_SOURCE_MAX_BYTES", 512 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024 * 1024,
+)
 
 
 class _PatchedSession(_OrigSession):
@@ -84,25 +137,54 @@ _req.request = _patched_request
 # ── Patch compile_latex_with_timeout：用进程组 kill，防止 pdflatex 变孤儿进程 ─────
 import subprocess as _subprocess
 import os as _os
+import re as _re
 import signal as _signal
 
+
+def _restricted_tex_env():
+    """Constrain TeX/BibTeX file I/O to the active project tree."""
+    env = _os.environ.copy()
+    env.update({
+        "openin_any": "p",
+        "openout_any": "p",
+        "shell_escape": "0",
+    })
+    return env
+
+
+def _disable_tex_shell_escape(command):
+    """Force every TeX engine in an upstream shell command into safe mode."""
+    return _ltf.force_no_tex_shell_escape(command)
+
+
 def _patched_compile_with_timeout(command, cwd, timeout=90):
-    """修复版：shell=True + 进程组 kill，确保 pdflatex 子进程也被杀掉。"""
+    """Bound compilation and disable TeX shell escape / broad file access."""
     # gpt-academic 传入的缓存目录通常是相对 /gpt 的路径。插件内部会切换
     # 当前目录，多轮编译时若继续把相对路径交给 Popen，会把同一路径重复
     # 拼接并触发 FileNotFoundError。这里统一锚定到稳定的容器项目根目录。
     if not _os.path.isabs(cwd):
         cwd = _os.path.join("/gpt", cwd)
     cwd = _os.path.abspath(cwd)
+    command = _disable_tex_shell_escape(command)
     process = _subprocess.Popen(
         command, shell=True,
         stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
         cwd=cwd,
+        env=_restricted_tex_env(),
         preexec_fn=_os.setsid,   # 创建新进程组
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-        return True
+        # gpt-academic uses this boolean to decide whether the compile phase
+        # may continue.  Treating a non-zero TeX exit as success can leave a
+        # stale/truncated PDF on the apparent success path until a later
+        # incidental check happens to reject it.
+        if process.returncode != 0:
+            print(
+                f"[driver] ⚠️  LaTeX 命令失败（exit={process.returncode}）",
+                flush=True,
+            )
+        return process.returncode == 0
     except _subprocess.TimeoutExpired:
         try:
             _os.killpg(_os.getpgid(process.pid), _signal.SIGKILL)
@@ -123,7 +205,11 @@ _latex_toolbox_spec = importlib.util.find_spec('crazy_functions.latex_fns.latex_
 if _latex_toolbox_spec:
     _lt = importlib.import_module('crazy_functions.latex_fns.latex_toolbox')
     _lt.compile_latex_with_timeout = _patched_compile_with_timeout
-    print(f"[driver] ✅ compile_latex_with_timeout 已 patch（timeout=300s，进程组 kill）", flush=True)
+    print(
+        "[driver] ✅ compile_latex_with_timeout 已 patch"
+        "（timeout=300s，受限 TeX I/O，禁用 shell escape，进程组 kill）",
+        flush=True,
+    )
 
     # ── Patch find_main_tex_file：先去注释再搜索 \documentclass，避免注释行误匹配 ──────
     # gpt-academic 原实现在原始文本（含注释）中搜索 \documentclass，
@@ -271,7 +357,12 @@ def _patch_latex_translation_splitter():
     inline_math_re = _re.compile(r"\$[^$]*\$")
 
     def _rough_text(line: str) -> str:
-        rough = inline_math_re.sub(" ", line)
+        rough = _ltf.strip_inline_code_commands(inline_math_re.sub(" ", line))
+        rough = _re.sub(
+            r"\\(?:begin|end)\{[^{}]+\}(?:\[[^\]]*\])?",
+            " ",
+            rough,
+        )
         rough = _re.sub(
             r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}\{([^{}]*)\}",
             r" \1 ",
@@ -295,6 +386,8 @@ def _patch_latex_translation_splitter():
     def _text_has_translatable_prose(text: str, min_letters=32, min_words=5) -> bool:
         stripped = text.strip()
         if not stripped or stripped.startswith("%"):
+            return False
+        if _ltf.is_bracketed_key_value_option_list(stripped):
             return False
         if command_only_re.match(stripped):
             return False
@@ -424,16 +517,34 @@ def _patch_latex_translation_splitter():
         _append(nodes, comment + newline, True)
         return nodes
 
-    def _update_env_stack(line: str, env_stack: list[str]):
-        begins = _re.findall(r"\\begin\{([^}]+)\}", line)
-        ends = _re.findall(r"\\end\{([^}]+)\}", line)
-        for env in begins:
-            if _env_is_tracked(env):
-                env_stack.append(env)
-        for env in ends:
-            if _env_is_tracked(env):
-                if env in env_stack:
-                    pos = len(env_stack) - 1 - env_stack[::-1].index(env)
+    def _promote_semantic_frame(line: str, env_stack):
+        for index in range(len(env_stack) - 1, -1, -1):
+            env, semantic_source_data = env_stack[index]
+            if semantic_source_data:
+                break
+            if _ltf.is_semantic_source_data_content(env, line):
+                env_stack[index] = (env, True)
+                break
+        return env_stack
+
+    def _update_env_stack(text: str, env_stack):
+        for line in text.splitlines(keepends=True) or [text]:
+            env_stack = _promote_semantic_frame(line, env_stack)
+            events = _re.finditer(r"\\(begin|end)\{([^}]+)\}", line)
+            for event in events:
+                action, env = event.groups()
+                if not _env_is_tracked(env):
+                    continue
+                if action == "begin":
+                    semantic_source_data = (
+                        _ltf.is_semantic_source_data_opening(env, line)
+                        or _ltf.is_semantic_source_data_content(env, line)
+                    )
+                    env_stack.append((env, semantic_source_data))
+                    continue
+                names = [name for name, _ in env_stack]
+                if env in names:
+                    pos = len(names) - 1 - names[::-1].index(env)
                     env_stack = env_stack[:pos]
                 elif env_stack:
                     env_stack.pop()
@@ -442,39 +553,11 @@ def _patch_latex_translation_splitter():
     def _split_long_transform_line(line: str):
         if len(_rough_text(line)) < 420:
             return [line]
-
-        parts = []
-        start = 0
-        brace_depth = 0
-        in_math = False
-        for idx, ch in enumerate(line):
-            prev = line[idx - 1] if idx else ""
-            if ch == "$" and prev != "\\":
-                in_math = not in_math
-            elif not in_math and ch == "{" and prev != "\\":
-                brace_depth += 1
-            elif not in_math and ch == "}" and prev != "\\" and brace_depth > 0:
-                brace_depth -= 1
-            if brace_depth == 0 and not in_math and ch in ".;。；":
-                nxt = line[idx + 1] if idx + 1 < len(line) else ""
-                if nxt.isspace() and idx + 1 - start >= 180:
-                    end = idx + 1
-                    while end < len(line) and line[end].isspace() and line[end] != "\n":
-                        end += 1
-                    parts.append(line[start:end])
-                    start = end
-        if start < len(line):
-            parts.append(line[start:])
-        return parts if len(parts) > 1 else [line]
-
-    def _split_transform_text(text: str):
-        parts = []
-        for line in text.splitlines(keepends=True):
-            if _line_has_translatable_prose(line):
-                parts.extend(_split_long_transform_line(line))
-            else:
-                parts.append(line)
-        return parts
+        return _ltf.split_translation_line_bounded(
+            line,
+            max_translate_chars=1800,
+            min_sentence_chars=180,
+        )
 
     def _split_preserved_text(text: str, state: dict):
         nodes = []
@@ -490,14 +573,36 @@ def _patch_latex_translation_splitter():
                 state["env_stack"] = _update_env_stack(line, state["env_stack"])
                 continue
 
-            active_env = state["env_stack"][-1] if state["env_stack"] else None
+            state["env_stack"] = _promote_semantic_frame(
+                line,
+                state["env_stack"],
+            )
+            inline_source_data, state["inline_source_data"] = (
+                _ltf.inline_prompt_source_data_line_protected(
+                    line,
+                    state.get("inline_source_data"),
+                )
+            )
+            active_env = (
+                state["env_stack"][-1][0]
+                if state["env_stack"]
+                else None
+            )
             in_soft_env = _ltf.is_soft_text_env(active_env)
-            hard_active = any(_ltf.is_hard_protected_env(env) for env in state["env_stack"])
+            hard_active = any(
+                semantic_source_data or _ltf.is_hard_protected_env(env)
+                for env, semantic_source_data in state["env_stack"]
+            )
             begins = _re.findall(r"\\begin\{([^}]+)\}", line)
             ends = _re.findall(r"\\end\{([^}]+)\}", line)
             structural_line = any(_env_is_tracked(env) for env in begins + ends)
 
-            if state["in_document"] and in_soft_env and not structural_line:
+            if (
+                state["in_document"]
+                and in_soft_env
+                and not hard_active
+                and not structural_line
+            ):
                 if active_env.startswith("tabular") or active_env in {"longtable", "array"}:
                     for part in _split_tabular_line(line):
                         _append(nodes, part.string, part.preserve)
@@ -511,9 +616,14 @@ def _patch_latex_translation_splitter():
                     (not state["in_document"])
                     or hard_active
                     or structural_line
+                    or inline_source_data
                 )
                 transform = (not line_protected) and _line_has_translatable_prose(line)
-                _append(nodes, line, preserve=not transform)
+                if transform:
+                    for part in _split_long_transform_line(line):
+                        _append(nodes, part, preserve=False)
+                else:
+                    _append(nodes, line, preserve=True)
 
             state["env_stack"] = _update_env_stack(line, state["env_stack"])
         return nodes
@@ -564,6 +674,10 @@ def _patch_latex_translation_splitter():
         stripped = text.strip()
         if not stripped:
             return False
+        if _ltf.is_inline_prompt_source_data_block(stripped):
+            return False
+        if _ltf.is_bracketed_key_value_option_list(stripped):
+            return False
         if _is_section_heading(stripped):
             rough = _rough_text(stripped)
             letters = len(_re.findall(r"[A-Za-z]", rough))
@@ -601,6 +715,10 @@ def _patch_latex_translation_splitter():
             # call per sentence, multiplying 429 risk and creating mixed
             # Chinese/English paragraphs when only some calls succeeded.
             fragments.append((node.string, False))
+        fragments = _ltf.absorb_short_prose_bridges(
+            fragments,
+            max_translate_chars=1800,
+        )
         merged = _ltf.coalesce_translation_fragments(fragments)
         finalized = [_Node(text, preserve=preserve) for text, preserve in merged]
         transform_after_merge = sum(1 for node in finalized if not node.preserve)
@@ -612,17 +730,12 @@ def _patch_latex_translation_splitter():
         original_chars = sum(len(node.string) for node in self.nodes if not node.preserve)
 
         expanded = []
-        state = {"in_document": False, "env_stack": []}
+        state = {
+            "in_document": False,
+            "env_stack": [],
+            "inline_source_data": {},
+        }
         for node in self.nodes:
-            if not node.preserve:
-                for part in _split_transform_text(node.string):
-                    _append(expanded, part, False, merge=False)
-                if r"\begin{document}" in node.string:
-                    state["in_document"] = True
-                if r"\end{document}" in node.string:
-                    state["in_document"] = False
-                state["env_stack"] = _update_env_stack(node.string, state["env_stack"])
-                continue
             parts = _split_preserved_text(node.string, state)
             for part in parts:
                 _append(expanded, part.string, part.preserve)
@@ -735,15 +848,92 @@ def _patch_latex_llm_rate_limit_handling():
         histories = options.get("history_array", [])
         prompts = options.get("sys_prompt_array", [])
         # inputs_array contains the translation prompt plus the actual LaTeX
-        # fragment. inputs_show_user_array is only a label such as
-        # "translate_zh segment-7" and cannot be used for language validation.
-        validation_sources = inputs
+        # fragment. Strip that English prompt before language validation or a
+        # short command-only fragment becomes a false untranslated positive.
+        # inputs_show_user_array is only a label such as
+        # "translate_zh segment-7" and cannot be used for validation.
+        validation_sources = [
+            _ltf.extract_translation_fragment(item)
+            for item in inputs
+        ]
+
+        def log_abnormal_chunks(payload, failed_indices, invalid_reasons, stage):
+            """Print enough structure evidence to diagnose a rejected slot.
+
+            Text previews intentionally stay short, while the signatures remain
+            complete.  Log after every validation pass so the final serial
+            retry cannot hide a different persistent mismatch from the first
+            attempt.
+            """
+            for index in failed_indices[:3]:
+                label = (
+                    visible_inputs[index]
+                    if index < len(visible_inputs)
+                    else f"chunk-{index}"
+                )
+                source = (
+                    validation_sources[index]
+                    if index < len(validation_sources)
+                    else ""
+                )
+                response_index = index * 2 + 1
+                response = (
+                    payload[response_index]
+                    if response_index < len(payload)
+                    else ""
+                )
+                source_preview = " ".join(source.split())[:180]
+                response_preview = " ".join(str(response).split())[:180]
+                invalid_reason = invalid_reasons.get(
+                    index,
+                    "request_or_untranslated",
+                )
+                print(
+                    f"[driver]    abnormal {stage} {label}: "
+                    f"reason={invalid_reason} "
+                    f"source={source_preview!r} response={response_preview!r}",
+                    flush=True,
+                )
+                if invalid_reason in {
+                    "critical_latex_structure_mismatch",
+                    "citation_structure_mismatch",
+                }:
+                    evidence = _ltf.llm_translation_structure_evidence(
+                        source,
+                        str(response),
+                    )
+                    print(
+                        "[driver]      latex-signatures: "
+                        f"source_commands={evidence['source_commands']!r} "
+                        f"response_commands={evidence['response_commands']!r} "
+                        f"source_citations_only="
+                        f"{evidence['source_citations_only']!r} "
+                        f"response_citations_only="
+                        f"{evidence['response_citations_only']!r}",
+                        flush=True,
+                    )
 
         def response_status(payload):
             failed = []
             request_failed = []
             untranslated = []
+            structurally_invalid = []
+            invalid_reasons = {}
             quota_failed = []
+            normalized_indices = _ltf.normalize_llm_translation_payload(
+                payload,
+                validation_sources,
+            )
+            for index in normalized_indices:
+                label = (
+                    visible_inputs[index]
+                    if index < len(visible_inputs)
+                    else f"chunk-{index}"
+                )
+                print(
+                    f"[driver] 🔧 {label}: 移除误加的单一标题 wrapper 后再校验",
+                    flush=True,
+                )
             for index, response in enumerate(payload[1::2]):
                 source = (
                     validation_sources[index]
@@ -754,13 +944,39 @@ def _patch_latex_llm_rate_limit_handling():
                     quota_failed.append(index)
                 if _ltf.llm_translation_response_failed(response):
                     request_failed.append(index)
-                elif _ltf.llm_translation_response_untranslated(source, response):
-                    untranslated.append(index)
-                if index in request_failed or index in untranslated:
+                else:
+                    invalid_reason = _ltf.llm_translation_response_invalid(
+                        source,
+                        response,
+                    )
+                    if invalid_reason:
+                        structurally_invalid.append(index)
+                        invalid_reasons[index] = invalid_reason
+                    elif _ltf.llm_translation_response_untranslated(source, response):
+                        untranslated.append(index)
+                if (
+                    index in request_failed
+                    or index in untranslated
+                    or index in structurally_invalid
+                ):
                     failed.append(index)
-            return failed, request_failed, untranslated, quota_failed
+            return (
+                failed,
+                request_failed,
+                untranslated,
+                structurally_invalid,
+                invalid_reasons,
+                quota_failed,
+            )
 
-        remaining, request_failed, untranslated, quota_failed = response_status(result)
+        (
+            remaining,
+            request_failed,
+            untranslated,
+            structurally_invalid,
+            invalid_reasons,
+            quota_failed,
+        ) = response_status(result)
         if quota_failed:
             raise RuntimeError(
                 "insufficient_user_quota: API balance is insufficient for "
@@ -769,15 +985,22 @@ def _patch_latex_llm_rate_limit_handling():
         if remaining:
             print(
                 f"[driver] ⚠️  chunk 首轮异常: request_failed={len(request_failed)}, "
-                f"untranslated={len(untranslated)}",
+                f"untranslated={len(untranslated)}, "
+                f"structure_invalid={len(structurally_invalid)}",
                 flush=True,
+            )
+            log_abnormal_chunks(
+                result,
+                remaining,
+                invalid_reasons,
+                "首轮",
             )
         for round_index in range(1, retry_rounds + 1):
             if not remaining:
                 break
             print(
                 f"[driver] 🐢 LLM 限流恢复: 第 {round_index}/{retry_rounds} 轮，"
-                f"串行重试 {len(remaining)} 个失败/漏译 chunk",
+                f"串行重试 {len(remaining)} 个失败/漏译/结构异常 chunk",
                 flush=True,
             )
             retry_options = dict(options)
@@ -791,18 +1014,32 @@ def _patch_latex_llm_rate_limit_handling():
             retried = yield from original(**retry_options)
             for local_index, original_index in enumerate(remaining):
                 result[original_index * 2 + 1] = retried[local_index * 2 + 1]
-            remaining, request_failed, untranslated, quota_failed = response_status(result)
+            (
+                remaining,
+                request_failed,
+                untranslated,
+                structurally_invalid,
+                invalid_reasons,
+                quota_failed,
+            ) = response_status(result)
             if quota_failed:
                 raise RuntimeError(
                     "insufficient_user_quota: API balance is insufficient for "
                     f"{len(quota_failed)} translation chunks"
+                )
+            if remaining:
+                log_abnormal_chunks(
+                    result,
+                    remaining,
+                    invalid_reasons,
+                    f"第 {round_index} 轮重试后",
                 )
 
         if remaining:
             # Never cache a temp.pkl where request failures are silently
             # merged back into the output as English source text.
             raise RuntimeError(
-                "LLM request/untranslated failures remain in "
+                "LLM request/untranslated/structural failures remain in "
                 f"{len(remaining)} translation chunks after serial retry"
             )
         return result
@@ -816,9 +1053,34 @@ def _patch_latex_llm_rate_limit_handling():
     )
 
 
+def _patch_safe_archive_extraction():
+    """Validate untrusted arXiv source archives before any extraction."""
+    import toolbox as _toolbox
+
+    if getattr(_toolbox, "_paper_trans_safe_archive_patch", False):
+        return
+    original = _toolbox.extract_archive
+
+    def _safe_extract_archive(file_path, dest_dir, *args, **kwargs):
+        if tarfile.is_tarfile(file_path):
+            reason = _ltf.source_tar_safety_error(file_path)
+            if reason:
+                raise RuntimeError(f"unsafe arXiv source archive: {reason}")
+        return original(file_path, dest_dir, *args, **kwargs)
+
+    _toolbox.extract_archive = _safe_extract_archive
+    _toolbox._paper_trans_safe_archive_patch = True
+    print(
+        "[driver] ✅ archive extraction 已 patch"
+        "（路径穿越/逃逸链接/设备文件/解压体积门禁）",
+        flush=True,
+    )
+
+
 _patch_latex_translation_splitter()
 _patch_latex_fix_content_artifacts()
 _patch_latex_llm_rate_limit_handling()
+_patch_safe_archive_extraction()
 
 from toolbox import get_conf, ChatBotWithCookies, default_user_name
 
@@ -838,120 +1100,17 @@ _last_quality_report: dict = {}
 
 
 def translation_quality_report(workfolder: str) -> dict:
-    """
-    Inspect merge_translate_zh.tex and estimate whether ordinary prose was
-    actually translated. This intentionally ignores hard LaTeX blocks such as
-    equations, listings, figures, and bibliographies, but still inspects prose
-    inside table cells and algorithmic descriptions.
-    """
-    import re as _re
-
+    """Apply the shared repository/publication translated-TeX quality gate."""
     trans_tex = os.path.join(workfolder, "merge_translate_zh.tex")
     if not os.path.exists(trans_tex):
         return {"ok": False, "reason": "missing merge_translate_zh.tex"}
-
-    latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
-    inline_math_re = _re.compile(r"\$[^$]*\$")
-
-    def _rough_text(line: str) -> str:
-        rough = inline_math_re.sub(" ", line)
-        rough = _re.sub(
-            r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}\{([^{}]*)\}",
-            r" \1 ",
-            rough,
-        )
-        for _ in range(3):
-            rough = _re.sub(
-                r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
-                r"scriptsize|normalsize|large|Large|captionof)\*?"
-                r"(?:\[[^\]]*\])?(?:\{[^{}]*\})?\{([^{}]*)\}",
-                r" \1 ",
-                rough,
-            )
-        rough = latex_cmd_re.sub(" ", rough)
-        rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
-        return rough
-
-    def _env_is_tracked(env: str | None) -> bool:
-        return _ltf.is_tracked_env(env)
-
-    with open(trans_tex, encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-
-    in_document = False
-    env_stack: list[str] = []
-    cjk = 0
-    letters = 0
-    prose_lines = 0
-    long_english: list[tuple[int, str]] = []
-    very_long_english = 0
-
-    for line_no, line in enumerate(lines, 1):
-        if r"\begin{document}" in line:
-            in_document = True
-            continue
-        if not in_document:
-            continue
-
-        begins = _re.findall(r"\\begin\{([^}]+)\}", line)
-        ends = _re.findall(r"\\end\{([^}]+)\}", line)
-        active_env = env_stack[-1] if env_stack else None
-        in_soft_env = _ltf.is_soft_text_env(active_env)
-        hard_active = any(_ltf.is_hard_protected_env(env) for env in env_stack)
-        structural_line = any(_env_is_tracked(env) for env in begins + ends)
-        line_protected = (
-            (hard_active and not in_soft_env)
-            or structural_line
-        )
-
-        if not line_protected:
-            rough = _rough_text(line)
-            line_cjk = len(_re.findall(r"[\u4e00-\u9fff]", rough))
-            line_letters = len(_re.findall(r"[A-Za-z]", rough))
-            words = _re.findall(r"\b[A-Za-z][A-Za-z\-]{2,}\b", rough)
-            cjk += line_cjk
-            letters += line_letters
-            if line_letters >= 40 or line_cjk >= 10:
-                prose_lines += 1
-            if line_letters >= 80 and line_cjk <= 5 and len(words) >= 12:
-                long_english.append((line_no, line.strip()[:220]))
-            if line_letters >= 180 and line_cjk <= 8 and len(words) >= 24:
-                very_long_english += 1
-
-        for env in begins:
-            if _env_is_tracked(env):
-                env_stack.append(env)
-        for env in ends:
-            if _env_is_tracked(env):
-                if env in env_stack:
-                    pos = len(env_stack) - 1 - env_stack[::-1].index(env)
-                    env_stack = env_stack[:pos]
-                elif env_stack:
-                    env_stack.pop()
-        if r"\end{document}" in line:
-            in_document = False
-
-    total = cjk + letters
-    cjk_pct = (cjk / total * 100) if total else 0.0
-    long_count = len(long_english)
-    fail = (
-        (long_count >= 20)
-        or (very_long_english >= 3)
-        or (long_count >= 10 and cjk_pct < 70.0)  # relaxed: long papers with EN related-work prose are acceptable
-        or (long_count >= 6 and cjk_pct < 55.0)
-        or (cjk_pct < 45.0 and long_count >= 4)
-        or (cjk_pct < 15.0 and prose_lines >= 20)
-    )
-    return {
-        "ok": not fail,
-        "cjk": cjk,
-        "letters": letters,
-        "cjk_pct": cjk_pct,
-        "prose_lines": prose_lines,
-        "long_english_lines": long_count,
-        "very_long_english_lines": very_long_english,
-        "samples": long_english[:8],
-    }
+    report = _analyze_translated_tex(trans_tex)
+    report["ok"] = not _is_untranslated_prose(report)
+    report["samples"] = [
+        (sample["line"], sample["text"])
+        for sample in report.get("samples", [])
+    ]
+    return report
 
 
 def check_pdf_integrity(pdf_path: str) -> bool:
@@ -1439,7 +1598,22 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
+    sibling_definitions = ''
+    workfolder = os.path.dirname(trans_tex_path)
+    for pattern in ('**/*.sty', '**/*.cls'):
+        for path in glob.glob(os.path.join(workfolder, pattern), recursive=True):
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    sibling_definitions += f.read() + '\n'
+            except Exception:
+                pass
+
     new_text, total = _ltf.repair_duplicated_macro_initials(text)
+    new_text, builtin_ascii = _ltf.separate_builtin_layout_ascii_glue(
+        new_text,
+        sibling_definitions,
+    )
+    total += builtin_ascii
     new_text, separated = _ltf.separate_custom_macro_cjk_glue(new_text)
     total += separated
     new_text, spaced = _ltf.collapse_spaced_cjk_characters(new_text)
@@ -1449,7 +1623,7 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
             f.write(new_text)
         print(
             f"[driver] 🔧 patch_custom_macro_cjk_glue: "
-            f"修复 {total} 处宏/CJK 粘连或中文空格",
+            f"修复 {total} 处排版命令/正文、宏/CJK 粘连或中文空格",
             flush=True,
         )
     return total
@@ -1803,6 +1977,8 @@ def patch_fragile_cleveref_references(trans_tex_path):
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
     new_text, total = _ltf.demote_cleveref_commands(text)
+    new_text, split_count = _ltf.split_multilabel_references(new_text)
+    total += split_count
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
@@ -1903,19 +2079,25 @@ def patch_undefined_unique_ref_labels(trans_tex_path):
         return 0
 
     ref_pattern = _re.compile(r'\\(ref|eqref|autoref|cref|Cref)\{([^{}]+)\}')
+    original_refs = set()
+    original_path = os.path.join(os.path.dirname(trans_tex_path), "merge.tex")
+    try:
+        with open(original_path, encoding="utf-8", errors="replace") as f:
+            original_refs = {
+                match.group(2)
+                for match in ref_pattern.finditer(f.read())
+            }
+    except OSError:
+        pass
     replacements: dict[str, str] = {}
     for label in sorted({m.group(2) for m in ref_pattern.finditer(text)} - labels):
-        if '/' in label:
-            colon_variant = label.replace('/', ':')
-            if colon_variant in labels:
-                replacements[label] = colon_variant
-                continue
-        candidates = sorted(
-            target for target in labels
-            if target.startswith(label + '_') or target.startswith(label + '-')
+        replacement = _ltf.unique_label_replacement(
+            label,
+            labels,
+            original_refs=original_refs,
         )
-        if len(candidates) == 1:
-            replacements[label] = candidates[0]
+        if replacement:
+            replacements[label] = replacement
 
     if not replacements:
         return 0
@@ -1974,7 +2156,7 @@ def patch_dangling_href_commands(trans_tex_path, orig_tex_path=None):
 
 def _insert_before_begin_document(text: str, insertion: str) -> tuple[str, bool]:
     marker = r'\begin{document}'
-    pos = text.find(marker)
+    pos = _ltf.find_uncommented_latex_token(text, marker)
     if pos < 0:
         return text, False
     return text[:pos] + insertion + '\n' + text[pos:], True
@@ -1985,32 +2167,16 @@ def _insert_latex_preamble_snippet(
     insertion: str,
     command_markers: tuple[str, ...] = (),
 ) -> tuple[str, bool]:
-    """Insert a preamble snippet before the earliest marker use, not only before document."""
-    snippet = insertion.strip()
-    if snippet and snippet in text:
-        return text, False
-
-    positions = []
-    for marker in command_markers:
-        token = marker if marker.startswith("\\") else "\\" + marker
-        pos = text.find(token)
-        if pos >= 0:
-            positions.append(pos)
-
-    begin_doc = text.find(r"\begin{document}")
-    if positions:
-        pos = min(positions)
-        if begin_doc < 0 or pos < begin_doc:
-            line_start = text.rfind("\n", 0, pos) + 1
-            return text[:line_start] + insertion + "\n" + text[line_start:], True
-
-    return _insert_before_begin_document(text, insertion)
+    """Insert a preamble snippet at a shared, top-level-safe boundary."""
+    return _ltf.insert_latex_preamble_snippet(
+        text,
+        insertion,
+        command_markers,
+    )
 
 
 def patch_fontawesome_legacy_aliases(trans_tex_path):
     """Provide common fontawesome5 aliases used by older templates."""
-    import re as _re
-
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
@@ -2024,66 +2190,16 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
             except Exception:
                 pass
 
-    text = _re.sub(
-        r"% paper-trans fallback for fontawesome5 legacy aliases\r?\n"
-        r"(?:\\providecommand\{\\fa[A-Za-z]+\}\{[^\n]*\}\r?\n)+",
-        "",
-        text,
-    )
-
-    aliases = {
-        'faFile': ('file', 'F'),
-        'faGlobe': ('globe', 'G'),
-        'faGithub': ('github', 'GH'),
-        'faSearch': ('search', 'S'),
-        'faTrophy': ('trophy', 'T'),
-        'faDatabase': ('database', 'DB'),
-        'faEnvelope': ('envelope', '@'),
-        'faEnvelopeO': ('envelope', '@'),
-        'faGem': ('gem', '*'),
-    }
-    combined = text + sibling_text
-    needed = []
-    for name, (icon, fallback) in aliases.items():
-        token = '\\' + name
-        if token not in combined:
-            continue
-        if ('\\newcommand{\\' + name + '}') in text:
-            continue
-        use_pos = text.find(token)
-        provide_pos = text.find('\\providecommand{\\' + name + '}')
-        if provide_pos >= 0 and (use_pos < 0 or provide_pos < use_pos):
-            continue
-        needed.append((name, icon, fallback))
-    known_names = {name for name, _icon, _fallback in needed}
-    generic_needed = [
-        name for name in _ltf.fontawesome_command_names(combined)
-        if name not in known_names
-    ]
-    if not needed and not generic_needed:
-        return 0
-
-    lines = [r'% paper-trans fallback for fontawesome5 legacy aliases']
-    for name, icon, fallback in needed:
-        lines.append(
-            '\\providecommand{\\' + name + '}{\\ifcsname faIcon\\endcsname\\faIcon{'
-            + icon + '}\\else\\textcircled{' + fallback + '}\\fi}'
-        )
-    for name in generic_needed:
-        lines.append('\\providecommand{\\' + name + '}{\\textbullet}')
-    insertion = '\n'.join(lines)
-    markers = tuple(name for name, _icon, _fallback in needed) + tuple(generic_needed)
-    new_text, ok = _insert_latex_preamble_snippet(text, insertion, markers)
-    if not ok:
+    new_text, total = _ltf.add_fontawesome_legacy_aliases(text, sibling_text)
+    if new_text == text:
         return 0
     with open(trans_tex_path, 'w', encoding='utf-8') as f:
         f.write(new_text)
     names = ','.join(
-        ['\\' + name for name, _icon, _fallback in needed]
-        + ['\\' + name for name in generic_needed]
+        '\\' + name for name in _ltf.fontawesome_command_names(new_text)
     )
-    print(f"[driver] 🔧 patch_fontawesome_legacy_aliases: 补充 {names} fallback", flush=True)
-    return len(needed) + len(generic_needed)
+    print(f"[driver] 🔧 patch_fontawesome_legacy_aliases: 补充/迁移 {names} fallback", flush=True)
+    return total
 
 
 def patch_declare_unicode_character_fallback(trans_tex_path):
@@ -2407,6 +2523,7 @@ def synthesize_bbl_from_tex(workfolder, trans_tex_path):
         ['bibtex', 'merge_translate_zh'],
         cwd=workfolder, timeout=120,
         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        env=_restricted_tex_env(),
     )
     ok = r.returncode == 0 and os.path.exists(bbl_path) and os.path.getsize(bbl_path) > 0
     if ok:
@@ -3040,9 +3157,17 @@ def patch_and_recompile(workfolder, arxiv_id_):
 
     def _latex_cmds(engine, has_bbl):
         if engine == 'xelatex':
-            engine_cmd = [engine, '-no-pdf', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex']
+            engine_cmd = [
+                engine, '-no-shell-escape', '-no-pdf',
+                '-interaction=nonstopmode', '-file-line-error',
+                'merge_translate_zh.tex',
+            ]
         else:
-            engine_cmd = [engine, '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex']
+            engine_cmd = [
+                engine, '-no-shell-escape',
+                '-interaction=nonstopmode', '-file-line-error',
+                'merge_translate_zh.tex',
+            ]
         if has_bbl:
             return [engine_cmd, engine_cmd, engine_cmd, engine_cmd]
         return [
@@ -3060,6 +3185,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
             r = _sp.run(
                 cmd, cwd=workfolder, timeout=900,
                 stdout=_sp.DEVNULL, stderr=_sp.PIPE,
+                env=_restricted_tex_env(),
             )
             if cmd[0] == 'xelatex':
                 is_xelatex = True
@@ -3122,11 +3248,16 @@ def patch_and_recompile(workfolder, arxiv_id_):
                 )
                 try:
                     r1 = _sp.run(
-                        ['xelatex', '-no-pdf', '-interaction=nonstopmode', '-file-line-error', 'merge_translate_zh.tex'],
+                        [
+                            'xelatex', '-no-shell-escape', '-no-pdf',
+                            '-interaction=nonstopmode', '-file-line-error',
+                            'merge_translate_zh.tex',
+                        ],
                         cwd=workfolder,
                         timeout=900,
                         stdout=_sp.DEVNULL,
                         stderr=_sp.PIPE,
+                        env=_restricted_tex_env(),
                     )
                     if r1.returncode == 0:
                         _sp.run(
@@ -3264,14 +3395,34 @@ def source_cache_is_valid():
     src_tar = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print', arxiv_id + '.tar')
     if not os.path.exists(src_tar) or os.path.getsize(src_tar) < 1024:
         return False
-    try:
-        return tarfile.is_tarfile(src_tar)
-    except Exception:
+    reason = _ltf.source_tar_safety_error(src_tar)
+    if reason:
+        print(f"[driver] ⚠️  arXiv 源码缓存不安全/无效: {reason}", flush=True)
         return False
+    return True
+
+
+def _source_content_length(response):
+    """Return a sane Content-Length when the server supplied one."""
+    raw = response.headers.get('Content-Length')
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(f'invalid Content-Length: {raw!r}')
+    if value < 0:
+        raise RuntimeError(f'invalid Content-Length: {raw!r}')
+    if value > _SOURCE_DOWNLOAD_MAX_BYTES:
+        raise RuntimeError(
+            'source archive exceeds download limit: '
+            f'{value} > {_SOURCE_DOWNLOAD_MAX_BYTES} bytes'
+        )
+    return value
 
 
 def prefetch_source_cache(max_rounds=3):
-    """预下载 arXiv 源码包，代理/直连交替重试，避免插件下载断流后直接失败。"""
+    """预下载 arXiv 源码包，代理/直连交替重试，且为慢速断流设总时限。"""
     src_dir = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print')
     src_tar = os.path.join(src_dir, arxiv_id + '.tar')
     tmp_tar = src_tar + '.part'
@@ -3283,10 +3434,25 @@ def prefetch_source_cache(max_rounds=3):
 
     os.makedirs(src_dir, exist_ok=True)
     plans = [('proxy', True), ('direct', False)]
+    started_at = time.monotonic()
+    total_deadline = started_at + _SOURCE_DOWNLOAD_TOTAL_SECONDS
 
     for round_idx in range(1, max_rounds + 1):
         for label, use_proxy in plans:
             try:
+                remaining = total_deadline - time.monotonic()
+                if remaining <= 0:
+                    print(
+                        '[driver] ⚠️  arXiv 源码预下载达到总时限 '
+                        f'({_SOURCE_DOWNLOAD_TOTAL_SECONDS}s)，停止重试',
+                        flush=True,
+                    )
+                    return False
+                attempt_started = time.monotonic()
+                attempt_deadline = min(
+                    total_deadline,
+                    attempt_started + _SOURCE_DOWNLOAD_ATTEMPT_SECONDS,
+                )
                 if os.path.exists(tmp_tar):
                     os.remove(tmp_tar)
                 session = _OrigSession()
@@ -3295,16 +3461,55 @@ def prefetch_source_cache(max_rounds=3):
                 else:
                     session.trust_env = False
                 print(f"[driver] ⬇️  预下载 arXiv 源码 ({label}, round={round_idx}): {url}", flush=True)
-                with session.get(url, stream=True, timeout=(15, 180)) as r:
+                request_read_timeout = min(
+                    _SOURCE_DOWNLOAD_READ_TIMEOUT,
+                    max(15, int(remaining)),
+                )
+                with session.get(
+                    url,
+                    stream=True,
+                    timeout=(_SOURCE_DOWNLOAD_CONNECT_TIMEOUT, request_read_timeout),
+                ) as r:
                     r.raise_for_status()
+                    content_length = _source_content_length(r)
+                    # requests may transparently decode an HTTP-compressed
+                    # entity, so its yielded byte count need not equal the
+                    # wire Content-Length in that rare case.
+                    if r.headers.get('Content-Encoding', '').lower() not in ('', 'identity'):
+                        content_length = None
+                    written = 0
                     with open(tmp_tar, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=1024 * 256):
                             if chunk:
                                 f.write(chunk)
+                                written += len(chunk)
+                            elapsed = time.monotonic() - attempt_started
+                            if time.monotonic() > attempt_deadline:
+                                raise TimeoutError(
+                                    'source download attempt exceeded '
+                                    f'{int(attempt_deadline - attempt_started)}s'
+                                )
+                            if (
+                                elapsed >= _SOURCE_DOWNLOAD_RATE_GRACE_SECONDS
+                                and written / max(elapsed, 1) < _SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND
+                            ):
+                                raise TimeoutError(
+                                    'source download below minimum rate: '
+                                    f'{written / max(elapsed, 1):.0f}B/s < '
+                                    f'{_SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND}B/s'
+                                )
+                    if content_length is not None and written != content_length:
+                        raise RuntimeError(
+                            'incomplete source archive: '
+                            f'expected {content_length} bytes, got {written}'
+                        )
                 if os.path.getsize(tmp_tar) < 1024:
                     raise RuntimeError('downloaded source is too small')
-                if not tarfile.is_tarfile(tmp_tar):
-                    raise RuntimeError('downloaded source is not a valid tar archive')
+                unsafe_reason = _ltf.source_tar_safety_error(tmp_tar)
+                if unsafe_reason:
+                    raise RuntimeError(
+                        "downloaded source archive rejected: " + unsafe_reason
+                    )
                 os.replace(tmp_tar, src_tar)
                 kb = os.path.getsize(src_tar) // 1024
                 print(f"[driver] ✅ arXiv 源码预下载成功: {src_tar} ({kb}KB)", flush=True)
@@ -3316,7 +3521,10 @@ def prefetch_source_cache(max_rounds=3):
                         os.remove(tmp_tar)
                 except Exception:
                     pass
-        time.sleep(min(2 * round_idx, 6))
+        remaining = total_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(2 * round_idx, 6, remaining))
 
     return False
 

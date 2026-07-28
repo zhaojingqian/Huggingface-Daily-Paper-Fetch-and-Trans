@@ -15,12 +15,18 @@ import argparse
 import time
 import shutil
 import json
+import fcntl
+import re
+import math
 from pathlib import Path
 
 from paperhub.json_io import write_json_atomic
+from paperhub.paper_store import pdf_file_valid
+from paperhub.publication_lock import paper_publication_lock
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DEFAULT_GPT_ACADEMIC_CONTAINER,
+    LOCK_DIR,
     TEX_BACKUP_DIR,
     TEX_FAILED_BACKUP_DIR,
 )
@@ -32,10 +38,324 @@ DRIVER_SUPPORT_FILES = [
     DRIVER_SCRIPT,
     os.path.join(BASE_DIR, "latex_translation_filters.py"),
     os.path.join(BASE_DIR, "failure_taxonomy.py"),
+    os.path.join(BASE_DIR, "paperhub", "translation_quality.py"),
 ]
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
 # 宿主机侧 tex 备份目录（容器重启后可从这里恢复翻译缓存，避免重复调 GPT）
+
+_ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
+DEFAULT_DOCKER_CONTROL_TIMEOUT = 30.0
+MAX_DOCKER_CONTROL_TIMEOUT = 600.0
+
+
+def _docker_control_timeout() -> float:
+    """Return a bounded timeout for short Docker control-plane operations."""
+    raw = os.environ.get(
+        "PAPER_TRANS_DOCKER_CONTROL_TIMEOUT",
+        str(DEFAULT_DOCKER_CONTROL_TIMEOUT),
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = DEFAULT_DOCKER_CONTROL_TIMEOUT
+    if not math.isfinite(value) or value <= 0:
+        value = DEFAULT_DOCKER_CONTROL_TIMEOUT
+    return min(MAX_DOCKER_CONTROL_TIMEOUT, value)
+
+
+def _run_docker_control(command, operation, **kwargs):
+    """Run one short Docker command without allowing it to hold the global lock forever."""
+    try:
+        return subprocess.run(
+            command,
+            timeout=_docker_control_timeout(),
+            **kwargs,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"❌ Docker 操作超时（{_docker_control_timeout():g}s）: {operation}",
+            flush=True,
+        )
+    except OSError as exc:
+        print(f"❌ Docker 操作失败: {operation} ({exc})", flush=True)
+    return None
+
+# docker exec 默认不保证容器内命令拥有独立进程组。驱动先建立新 session，
+# 让超时/人工终止可以只向该论文的进程组发信号，而不会波及其他 docker exec。
+_CONTAINER_DRIVER_LAUNCHER = r"""
+import ctypes
+import os
+import signal
+import sys
+import time
+
+argv = ["python3", "/tmp/full_translate_driver.py"] + sys.argv[1:]
+try:
+    # Linux PR_SET_CHILD_SUBREAPER：驱动被终止后，由这个轻量 supervisor
+    # 接管并回收孤儿孙进程，避免容器 PID 1（tail）留下永久 zombie。
+    ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)
+except Exception:
+    pass
+
+child = os.fork()
+if child == 0:
+    os.setsid()
+    os.execvp(argv[0], argv)
+
+_, driver_status = os.waitpid(child, 0)
+
+
+def adopted_descendants():
+    found = []
+    me = os.getpid()
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, encoding="utf-8") as handle:
+                stat = handle.read()
+            fields = stat[stat.rfind(")") + 2:].split()
+            if int(fields[1]) == me:
+                found.append(int(name))
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+            continue
+    return found
+
+
+def reap_nonblocking():
+    while True:
+        try:
+            waited, _ = os.waitpid(-1, os.WNOHANG)
+        except (ChildProcessError, InterruptedError):
+            return
+        if waited == 0:
+            return
+
+
+# 正常/异常退出都收束残留 descendants。子进程成为 subreaper 的直接子进程
+# 后逐个 TERM，再用 KILL 兜底；不会触碰其他 docker exec 的进程。
+for sig, grace in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.5)):
+    deadline = time.monotonic() + grace
+    signaled = set()
+    while time.monotonic() < deadline:
+        reap_nonblocking()
+        remaining = adopted_descendants()
+        if not remaining:
+            break
+        for pid in remaining:
+            if pid in signaled:
+                continue
+            try:
+                os.kill(pid, sig)
+                signaled.add(pid)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.05)
+reap_nonblocking()
+
+if os.WIFEXITED(driver_status):
+    raise SystemExit(os.WEXITSTATUS(driver_status))
+if os.WIFSIGNALED(driver_status):
+    os.kill(os.getpid(), os.WTERMSIG(driver_status))
+raise SystemExit(1)
+""".strip()
+
+# 在容器内读取 /proc，按“驱动精确 argv + arXiv ID”定位根进程，并递归处理
+# descendants。starttime 用来防止等待期间 PID 被复用后误杀无关进程。
+_CONTAINER_PROCESS_TREE_HELPER = r"""
+import json
+import os
+import re
+import signal
+import sys
+import time
+
+DRIVER = "/tmp/full_translate_driver.py"
+ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
+
+
+def snapshot():
+    result = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open("/proc/%s/cmdline" % name, "rb") as handle:
+                argv = [
+                    part.decode("utf-8", "replace")
+                    for part in handle.read().split(b"\0")
+                    if part
+                ]
+            with open("/proc/%s/stat" % name, encoding="utf-8") as handle:
+                stat = handle.read()
+            fields = stat[stat.rfind(")") + 2:].split()
+            result[pid] = {
+                "pid": pid,
+                "ppid": int(fields[1]),
+                "pgid": int(fields[2]),
+                "starttime": int(fields[19]),
+                "argv": argv,
+            }
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+            continue
+    return result
+
+
+def driver_id(proc):
+    argv = proc["argv"]
+    for pos, arg in enumerate(argv[:-1]):
+        if arg == DRIVER and ID_RE.fullmatch(argv[pos + 1]):
+            return argv[pos + 1]
+    return ""
+
+
+def matching_drivers(table, selector):
+    found = []
+    for proc in table.values():
+        arxiv_id = driver_id(proc)
+        if arxiv_id and (not selector or selector == arxiv_id):
+            item = dict(proc)
+            item.pop("argv", None)
+            item["arxiv_id"] = arxiv_id
+            found.append(item)
+    return sorted(found, key=lambda item: item["pid"])
+
+
+def descendants(table, roots):
+    children = {}
+    for proc in table.values():
+        children.setdefault(proc["ppid"], []).append(proc["pid"])
+    found = set(roots)
+    pending = list(roots)
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, ()):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def same_process(pid, starttime):
+    try:
+        with open("/proc/%d/stat" % pid, encoding="utf-8") as handle:
+            stat = handle.read()
+        fields = stat[stat.rfind(")") + 2:].split()
+        return int(fields[19]) == starttime
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+        return False
+
+
+def signal_pid(pid, sig):
+    try:
+        os.kill(pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+action = sys.argv[1] if len(sys.argv) > 1 else "list"
+selector = sys.argv[2] if len(sys.argv) > 2 else ""
+if selector and not ID_RE.fullmatch(selector):
+    print(json.dumps({"ok": False, "error": "invalid arxiv id"}))
+    raise SystemExit(2)
+
+table = snapshot()
+drivers = matching_drivers(table, selector)
+if action == "list":
+    print(json.dumps({"ok": True, "drivers": drivers}, sort_keys=True))
+    raise SystemExit(0)
+if action != "terminate":
+    print(json.dumps({"ok": False, "error": "invalid action"}))
+    raise SystemExit(2)
+if not selector:
+    print(json.dumps({"ok": False, "error": "arxiv id required"}))
+    raise SystemExit(2)
+if not drivers:
+    print(json.dumps({
+        "ok": False, "found": False, "verified": True, "arxiv_id": selector,
+        "driver_pids": [], "target_pids": [], "survivors": [],
+    }, sort_keys=True))
+    raise SystemExit(0)
+
+root_pids = [item["pid"] for item in drivers]
+target_pids = descendants(table, root_pids)
+identities = {
+    pid: table[pid]["starttime"]
+    for pid in target_pids
+    if pid in table
+}
+# 新启动的驱动由 launcher 保证 pgid == driver pid。旧进程不满足这个
+# 条件时只递归按 PID 清理，避免向共享进程组发信号。
+isolated_groups = {
+    table[pid]["pgid"]
+    for pid in root_pids
+    if table[pid]["pgid"] == pid and pid > 1
+}
+
+term_pids = []
+for pgid in sorted(isolated_groups):
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+for pid in sorted(target_pids):
+    if table[pid]["pgid"] not in isolated_groups and signal_pid(pid, signal.SIGTERM):
+        term_pids.append(pid)
+
+deadline = time.monotonic() + 2.0
+survivors = []
+while time.monotonic() < deadline:
+    survivors = [
+        pid for pid, started in identities.items()
+        if same_process(pid, started)
+    ]
+    if not survivors:
+        break
+    time.sleep(0.1)
+
+kill_pids = []
+if survivors:
+    for pgid in sorted(isolated_groups):
+        if not any(
+            pid in survivors and table[pid]["pgid"] == pgid
+            for pid in target_pids
+        ):
+            continue
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for pid in survivors:
+        if table[pid]["pgid"] not in isolated_groups and signal_pid(pid, signal.SIGKILL):
+            kill_pids.append(pid)
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        survivors = [
+            pid for pid, started in identities.items()
+            if same_process(pid, started)
+        ]
+        if not survivors:
+            break
+        time.sleep(0.05)
+
+remaining_drivers = matching_drivers(snapshot(), selector)
+verified = not survivors and not remaining_drivers
+print(json.dumps({
+    "ok": verified,
+    "found": True,
+    "verified": verified,
+    "arxiv_id": selector,
+    "driver_pids": root_pids,
+    "target_pids": sorted(target_pids),
+    "term_pids": term_pids,
+    "kill_pids": kill_pids,
+    "survivors": survivors,
+    "remaining_driver_pids": [item["pid"] for item in remaining_drivers],
+}, sort_keys=True))
+""".strip()
 
 
 def _container_workfolder(arxiv_id: str) -> str:
@@ -47,25 +367,32 @@ def _container_translated_tex(arxiv_id: str) -> str:
 
 
 def _container_tex_exists(arxiv_id: str) -> bool:
-    return subprocess.run(
+    result = _run_docker_control(
         ["docker", "exec", CONTAINER_NAME, "test", "-s", _container_translated_tex(arxiv_id)],
+        f"检查翻译 TeX {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode == 0
+    )
+    return result is not None and result.returncode == 0
 
 
 def _ensure_workfolder_writable(arxiv_id: str) -> bool:
     workfolder = _container_workfolder(arxiv_id)
-    chown = subprocess.run(
+    chown = _run_docker_control(
         ["docker", "exec", "-u", "root", CONTAINER_NAME,
          "chown", "-R", "gptuser:gptuser", workfolder],
+        f"修复 workfolder owner {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    chmod = subprocess.run(
+    if chown is None or chown.returncode != 0:
+        print(f"⚠️  重设容器 workfolder owner 失败: {workfolder}", flush=True)
+        return False
+    chmod = _run_docker_control(
         ["docker", "exec", "-u", "root", CONTAINER_NAME,
          "chmod", "-R", "u+rw", workfolder],
+        f"修复 workfolder mode {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    ok = chown.returncode == 0 and chmod.returncode == 0
+    ok = chmod is not None and chmod.returncode == 0
     if not ok:
         print(f"⚠️  重设容器 workfolder 权限失败: {workfolder}", flush=True)
     return ok
@@ -79,23 +406,52 @@ def _backup_tex_from_container(arxiv_id: str, failed: bool = False) -> bool:
     """
     container_tex = _container_translated_tex(arxiv_id)
     # 先确认文件在容器内存在且非空
-    check = subprocess.run(
+    check = _run_docker_control(
         ["docker", "exec", CONTAINER_NAME, "test", "-s", container_tex],
+        f"检查待备份 TeX {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    if check.returncode != 0:
+    if check is None or check.returncode != 0:
         return False
     backup_dir = TEX_FAILED_BACKUP_DIR if failed else TEX_BACKUP_DIR
     os.makedirs(backup_dir, exist_ok=True)
     local_tex = os.path.join(backup_dir, f"{arxiv_id}_merge_translate_zh.tex")
-    r = subprocess.run(
-        ["docker", "cp", f"{CONTAINER_NAME}:{container_tex}", local_tex],
+    staged_tex = f"{local_tex}.tmp.{os.getpid()}"
+    try:
+        os.remove(staged_tex)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"⚠️  无法清理旧 TeX 备份临时文件: {staged_tex} ({exc})", flush=True)
+        return False
+    r = _run_docker_control(
+        ["docker", "cp", f"{CONTAINER_NAME}:{container_tex}", staged_tex],
+        f"备份翻译 TeX {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    ok = r.returncode == 0 and os.path.exists(local_tex) and os.path.getsize(local_tex) > 0
+    ok = (
+        r is not None
+        and r.returncode == 0
+        and os.path.exists(staged_tex)
+        and os.path.getsize(staged_tex) > 0
+    )
     if ok:
+        try:
+            os.replace(staged_tex, local_tex)
+        except OSError as exc:
+            print(f"⚠️  翻译 TeX 备份落盘失败: {local_tex} ({exc})", flush=True)
+            try:
+                os.remove(staged_tex)
+            except OSError:
+                pass
+            return False
         label = "失败现场 tex" if failed else "翻译 tex"
         print(f"💾 已备份{label} 到宿主机: {local_tex}", flush=True)
+    else:
+        try:
+            os.remove(staged_tex)
+        except OSError:
+            pass
     return ok
 
 
@@ -104,28 +460,54 @@ def _restore_tex_to_container(arxiv_id: str) -> bool:
     将宿主机备份的 merge_translate_zh.tex 恢复到容器内 workfolder。
     返回是否恢复成功。
     """
-    local_tex = os.path.join(TEX_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
-    if not os.path.exists(local_tex) or os.path.getsize(local_tex) == 0:
-        local_tex = os.path.join(TEX_FAILED_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex")
-        if not os.path.exists(local_tex) or os.path.getsize(local_tex) == 0:
-            return False
+    filename = f"{arxiv_id}_merge_translate_zh.tex"
+    candidates = [
+        os.path.join(TEX_BACKUP_DIR, filename),
+        os.path.join(TEX_FAILED_BACKUP_DIR, filename),
+    ]
+    candidates = [
+        path
+        for path in candidates
+        if os.path.isfile(path) and os.path.getsize(path) > 0
+    ]
+    if not candidates:
+        return False
+    # A failed compile after a successful retranslation deliberately leaves the
+    # newer, higher-quality TeX in tex_backup_failed while preserving the last
+    # published backup. Compile-only repair must use that newest work product;
+    # otherwise it silently recompiles the stale untranslated TeX.
+    local_tex = max(
+        candidates,
+        key=lambda path: (
+            os.stat(path).st_mtime_ns,
+            os.path.abspath(path).startswith(
+                os.path.abspath(TEX_FAILED_BACKUP_DIR) + os.sep
+            ),
+        ),
+    )
     workfolder = _container_workfolder(arxiv_id)
     # 确保容器内目标目录存在
-    subprocess.run(
+    mkdir = _run_docker_control(
         ["docker", "exec", CONTAINER_NAME, "mkdir", "-p", workfolder],
+        f"创建 workfolder {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    if mkdir is None or mkdir.returncode != 0:
+        print(f"⚠️  容器 workfolder 创建失败: {workfolder}", flush=True)
+        return False
     container_tex = _container_translated_tex(arxiv_id)
-    r = subprocess.run(
+    r = _run_docker_control(
         ["docker", "cp", local_tex, f"{CONTAINER_NAME}:{container_tex}"],
+        f"恢复翻译 TeX {arxiv_id}",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    ok = r.returncode == 0
+    ok = r is not None and r.returncode == 0
     if ok:
         # docker cp writes files as root. The driver runs as gptuser and needs to
         # rewrite merge_translate_zh.tex during keep-translation repair passes.
-        _ensure_workfolder_writable(arxiv_id)
-        print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex} (来自 {os.path.basename(os.path.dirname(local_tex))})", flush=True)
+        ok = _ensure_workfolder_writable(arxiv_id)
+        if ok:
+            print(f"♻️  已从宿主机恢复翻译 tex 到容器: {container_tex} (来自 {os.path.basename(os.path.dirname(local_tex))})", flush=True)
     return ok
 
 
@@ -134,19 +516,20 @@ def _prepare_keep_translation(arxiv_id: str) -> bool:
     if _restore_tex_to_container(arxiv_id):
         return True
     if _container_tex_exists(arxiv_id):
-        _ensure_workfolder_writable(arxiv_id)
-        print(f"♻️  容器内已有翻译 tex，直接复用: {_container_translated_tex(arxiv_id)}", flush=True)
-        return True
+        if _ensure_workfolder_writable(arxiv_id):
+            print(f"♻️  容器内已有翻译 tex，直接复用: {_container_translated_tex(arxiv_id)}", flush=True)
+            return True
     return False
 
 
 def check_container():
-    r = subprocess.run(
+    r = _run_docker_control(
         ["docker", "container", "inspect", "-f", "{{.State.Running}}", CONTAINER_NAME],
+        "检查翻译容器状态",
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True,
     )
-    return r.returncode == 0 and r.stdout.strip() == "true"
+    return r is not None and r.returncode == 0 and r.stdout.strip() == "true"
 
 
 def copy_driver_to_container():
@@ -155,22 +538,28 @@ def copy_driver_to_container():
     for src in DRIVER_SUPPORT_FILES:
         name = os.path.basename(src)
         dst = f"{CONTAINER_NAME}:/tmp/{name}"
-        r = subprocess.run(
+        r = _run_docker_control(
             ["docker", "cp", src, dst],
+            f"复制容器驱动支持文件 {name}",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True,
         )
-        if r.returncode != 0:
+        if r is None or r.returncode != 0:
+            if r is None:
+                return False
             msg = (r.stderr or r.stdout or "").strip()
             if msg:
                 print(f"❌ 复制 {name} 到容器失败: {msg}", flush=True)
             return False
         copied.append(f"/tmp/{name}")
-    chmod = subprocess.run(
+    chmod = _run_docker_control(
         ["docker", "exec", "-u", "root", CONTAINER_NAME, "chmod", "0644", *copied],
+        "设置容器驱动支持文件权限",
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True,
     )
+    if chmod is None:
+        return False
     if chmod.returncode != 0:
         msg = (chmod.stderr or chmod.stdout or "").strip()
         if msg:
@@ -178,33 +567,132 @@ def copy_driver_to_container():
     return chmod.returncode == 0
 
 
-def _terminate_container_driver(arxiv_id: str):
-    """Best-effort cleanup for a timed-out docker exec driver process."""
-    pattern = f"/tmp/full_translate_driver.py {arxiv_id}"
-    for signal_name in ("-TERM", "-KILL"):
-        subprocess.run(
-            ["docker", "exec", "-u", "root", CONTAINER_NAME,
-             "pkill", signal_name, "-f", pattern],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+def _container_process_tree_action(action: str, arxiv_id: str = "",
+                                   container_name: str = None):
+    """Run the exact-driver /proc helper and return its structured result."""
+    if action not in ("list", "terminate"):
+        raise ValueError(f"unsupported process action: {action}")
+    if arxiv_id and not _ARXIV_ID_RE.fullmatch(arxiv_id):
+        raise ValueError(f"invalid arXiv ID: {arxiv_id}")
+    if action == "terminate" and not arxiv_id:
+        raise ValueError("terminate requires an arXiv ID")
+
+    cmd = [
+        "docker", "exec", "-u", "root", container_name or CONTAINER_NAME,
+        "python3", "-c", _CONTAINER_PROCESS_TREE_HELPER, action,
+    ]
+    if arxiv_id:
+        cmd.append(arxiv_id)
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=8,
         )
-        time.sleep(1)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": str(exc), "drivers": []}
+
+    output = (result.stdout or "").strip().splitlines()
+    try:
+        payload = json.loads(output[-1]) if output else {}
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if result.returncode != 0 or not payload:
+        detail = (result.stderr or result.stdout or "").strip()
+        payload.setdefault("ok", False)
+        payload.setdefault(
+            "error",
+            detail or f"container process helper exited {result.returncode}",
+        )
+    return payload
+
+
+def list_container_drivers(container_name: str = None):
+    """Return exact full-translation driver processes currently in the container."""
+    result = _container_process_tree_action(
+        "list", container_name=container_name,
+    )
+    if not result.get("ok"):
+        raise RuntimeError(
+            result.get("error") or "unable to inspect container drivers"
+        )
+    drivers = result.get("drivers", [])
+    if not isinstance(drivers, list):
+        raise RuntimeError("container driver response is malformed")
+    return drivers
+
+
+def terminate_container_driver_tree(arxiv_id: str, container_name: str = None):
+    """TERM/KILL one paper's complete container process tree and verify exit."""
+    return _container_process_tree_action(
+        "terminate", arxiv_id=arxiv_id, container_name=container_name,
+    )
+
+
+def _terminate_container_driver(arxiv_id: str):
+    """Compatibility wrapper used by timeout/error cleanup."""
+    return terminate_container_driver_tree(arxiv_id)
+
+
+def _stop_docker_exec_client(proc, grace_seconds: float = 2.0):
+    """Reap the host docker-exec client after the container tree has stopped."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    proc.terminate()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _cleanup_container_driver(proc, arxiv_id: str):
+    """Stop the scoped container tree first, then reap docker exec."""
+    cleanup = _terminate_container_driver(arxiv_id)
+    _stop_docker_exec_client(proc)
+    if not cleanup.get("verified"):
+        detail = cleanup.get("error") or cleanup.get("survivors") or "unknown"
+        print(
+            f"⚠️  容器翻译进程树清理未通过验证 ({arxiv_id}): {detail}",
+            flush=True,
+        )
+    return cleanup
 
 
 def _container_driver_command(arxiv_id: str):
     """Build docker exec command with an explicit, bounded LLM env allowlist."""
     cmd = ["docker", "exec"]
     for name in (
+        "HOST_PROXY",
+        "PAPER_TRANS_LLM_HTTP_TIMEOUT",
         "PAPER_TRANS_LLM_MODEL",
         "PAPER_TRANS_LLM_WORKERS",
         "PAPER_TRANS_LLM_RETRIES",
         "PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS",
+        "PAPER_TRANS_EXPAND_TRANSLATION_SPLIT",
+        "PAPER_TRANS_EXTRA_HARD_ENVS",
+        "PAPER_TRANS_EXTRA_SOFT_ENVS",
+        "PAPER_TRANS_EXTRA_RESTORE_ENVS",
+        "PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS",
     ):
         value = os.environ.get(name)
         if value:
             cmd.extend(["-e", f"{name}={value}"])
     cmd.extend([
         CONTAINER_NAME,
-        "python3", "/tmp/full_translate_driver.py", arxiv_id,
+        "python3", "-c", _CONTAINER_DRIVER_LAUNCHER, arxiv_id,
     ])
     return cmd
 
@@ -291,15 +779,16 @@ def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
                 return retcode, "\n".join(collected), ""
 
             if time.time() - t_start > timeout:
-                proc.kill()
-                _terminate_container_driver(arxiv_id)
-                return -1, "\n".join(collected), f"超时 ({timeout}s)"
+                cleanup = _cleanup_container_driver(proc, arxiv_id)
+                suffix = ""
+                if not cleanup.get("verified"):
+                    suffix = "；容器进程树清理未完全验证"
+                return -1, "\n".join(collected), f"超时 ({timeout}s){suffix}"
 
             time.sleep(0.5)
 
     except Exception as e:
-        proc.kill()
-        _terminate_container_driver(arxiv_id)
+        _cleanup_container_driver(proc, arxiv_id)
         return -1, "\n".join(collected), str(e)
 
 
@@ -315,12 +804,13 @@ def extract_result(stdout: str):
 
 def copy_from_container(container_path: str, local_path: str):
     """docker cp 将文件从容器复制到本地"""
-    r = subprocess.run(
+    r = _run_docker_control(
         ["docker", "cp",
          f"{CONTAINER_NAME}:{container_path}", local_path],
+        f"复制生成 PDF {os.path.basename(local_path)}",
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    return r.returncode == 0
+    return r is not None and r.returncode == 0
 
 
 def _write_error_log(arxiv_id: str, stdout: str):
@@ -501,21 +991,74 @@ def _clear_failed_tex_backup(arxiv_id: str):
 
 
 def check_local_pdf_integrity(filepath: str) -> bool:
-    """Read the tail of the file to verify it ends with standard %%EOF marker."""
-    if not os.path.exists(filepath) or os.path.getsize(filepath) < 4096:
-        return False
-    try:
-        with open(filepath, 'rb') as f:
-            f.seek(-1024, os.SEEK_END)
-            tail = f.read()
-            return b'%%EOF' in tail
-    except Exception:
-        return False
+    """Use the same bounded PDF gate as the paper store and project audit."""
+    return pdf_file_valid(filepath)
 
 
-def translate_full(arxiv_id: str, output_dir: str,
-                   no_cache: bool = False, timeout: int = 3600,
-                   keep_translation: bool = False) -> dict:
+class GlobalTranslationLock:
+    """Serialize every host entrypoint that uses the shared LaTeX container."""
+
+    def __init__(self, arxiv_id: str, wait_seconds: int, lock_path: str = None):
+        self.arxiv_id = arxiv_id
+        self.wait_seconds = max(0, wait_seconds)
+        configured_path = os.environ.get(
+            "PAPER_TRANS_FULL_TRANSLATION_LOCK",
+            "",
+        ).strip()
+        self.path = os.path.abspath(
+            lock_path
+            or configured_path
+            or os.path.join(LOCK_DIR, "full-translation.lock")
+        )
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._handle = None
+
+    def __enter__(self):
+        self._handle = open(self.path, "a+")
+        deadline = time.monotonic() + self.wait_seconds
+        announced = False
+        while True:
+            try:
+                fcntl.flock(
+                    self._handle,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                break
+            except BlockingIOError:
+                if not announced:
+                    print(
+                        f"⏳ 全文翻译队列繁忙，等待全局锁: {self.path}",
+                        flush=True,
+                    )
+                    announced = True
+                if time.monotonic() >= deadline:
+                    self._handle.close()
+                    self._handle = None
+                    raise TimeoutError(
+                        f"等待全文翻译全局锁超时 ({self.wait_seconds}s)"
+                    )
+                time.sleep(1)
+
+        self._handle.seek(0)
+        self._handle.truncate()
+        self._handle.write(json.dumps({
+            "pid": os.getpid(),
+            "arxiv_id": self.arxiv_id,
+            "acquired_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, ensure_ascii=False))
+        self._handle.flush()
+        return self
+
+    def __exit__(self, *_):
+        if self._handle:
+            fcntl.flock(self._handle, fcntl.LOCK_UN)
+            self._handle.close()
+            self._handle = None
+
+
+def _translate_full_locked(arxiv_id: str, output_dir: str,
+                           no_cache: bool = False, timeout: int = 3600,
+                           keep_translation: bool = False) -> dict:
     """
     全文翻译主函数：仅以 PDF 为成功标准，失败则直接报错（由驱动内部重试）。
     Returns: {
@@ -576,25 +1119,70 @@ def translate_full(arxiv_id: str, output_dir: str,
     # 5. 复制 PDF 到本地
     if kind == "pdf":
         local_pdf = os.path.join(output_dir, f"{arxiv_id}_zh.pdf")
-        if copy_from_container(container_path, local_pdf):
-            if check_local_pdf_integrity(local_pdf):
-                result['success'] = True
-                result['pdf_path'] = local_pdf
-                size_mb = os.path.getsize(local_pdf) / 1024 / 1024
-                print(f"✅ PDF 翻译成功: {local_pdf} ({size_mb:.2f} MB)", flush=True)
-                _backup_tex_from_container(arxiv_id)
-                _clear_error_log(arxiv_id)
-                _clear_failed_tex_backup(arxiv_id)
+        temp_pdf = os.path.join(
+            output_dir,
+            f".{arxiv_id}_zh.pdf.{os.getpid()}.tmp",
+        )
+        try:
+            if copy_from_container(container_path, temp_pdf):
+                if check_local_pdf_integrity(temp_pdf):
+                    with open(temp_pdf, "rb") as handle:
+                        os.fsync(handle.fileno())
+                    with paper_publication_lock(
+                        arxiv_id,
+                        lock_dir=LOCK_DIR,
+                    ):
+                        os.replace(temp_pdf, local_pdf)
+                    result['success'] = True
+                    result['pdf_path'] = local_pdf
+                    size_mb = os.path.getsize(local_pdf) / 1024 / 1024
+                    print(f"✅ PDF 翻译成功: {local_pdf} ({size_mb:.2f} MB)", flush=True)
+                    _backup_tex_from_container(arxiv_id)
+                    _clear_error_log(arxiv_id)
+                    _clear_failed_tex_backup(arxiv_id)
+                else:
+                    result['error'] = "PDF 复制成功但文件损坏或为空（header/EOF 校验失败）"
+                    print(f"❌ {result['error']}", flush=True)
+                    _backup_tex_from_container(arxiv_id, failed=True)
             else:
-                result['error'] = "PDF 复制成功但文件损坏或为空（未找到 EOF 标记）"
+                result['error'] = f"无法从容器复制 PDF: {container_path}"
                 print(f"❌ {result['error']}", flush=True)
                 _backup_tex_from_container(arxiv_id, failed=True)
-        else:
-            result['error'] = f"无法从容器复制 PDF: {container_path}"
-            print(f"❌ {result['error']}", flush=True)
-            _backup_tex_from_container(arxiv_id, failed=True)
+        finally:
+            try:
+                os.remove(temp_pdf)
+            except OSError:
+                pass
 
     return result
+
+
+def translate_full(arxiv_id: str, output_dir: str,
+                   no_cache: bool = False, timeout: int = 3600,
+                   keep_translation: bool = False) -> dict:
+    """Run one full translation behind the cross-mode/container global lock."""
+    default_wait = timeout + 300
+    try:
+        wait_seconds = int(os.environ.get(
+            "PAPER_TRANS_GLOBAL_LOCK_TIMEOUT",
+            str(default_wait),
+        ))
+    except (TypeError, ValueError):
+        wait_seconds = default_wait
+
+    try:
+        with GlobalTranslationLock(arxiv_id, wait_seconds):
+            return _translate_full_locked(
+                arxiv_id,
+                output_dir,
+                no_cache=no_cache,
+                timeout=timeout,
+                keep_translation=keep_translation,
+            )
+    except TimeoutError as exc:
+        error = str(exc)
+        print(f"❌ {error}", flush=True)
+        return {"success": False, "pdf_path": None, "error": error}
 
 
 def main():

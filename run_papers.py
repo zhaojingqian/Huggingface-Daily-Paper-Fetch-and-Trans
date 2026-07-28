@@ -3,18 +3,28 @@
 通用论文处理 runner
 被 run_daily.py / run_monthly.py / main.py(weekly) 共用
 """
-import os, sys, json, time, fcntl, subprocess
+import os, sys, json, time, subprocess
 from datetime import datetime
 from pathlib import Path
 
 from paperhub import paper_store
 from paperhub.json_io import read_json, write_json_atomic
+from paperhub.publication_lock import (
+    InvalidIndexError,
+    PublicationBusyError,
+    index_lock_path,
+    index_publication_lock,
+    lock_dir_for_index,
+    merge_index_paper_fields,
+    read_index_snapshot,
+)
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     DATA_DIR,
     PAPER_STORE_DIR,
     LOGS_DIR,
     LOCK_DIR,
+    TEX_FAILED_BACKUP_DIR,
     mode_dir,
     mode_index_path,
     mode_key_dir,
@@ -30,8 +40,27 @@ def _paper_pdf_path(arxiv_id):
     return paper_store.pdf_path(arxiv_id)
 
 
-def _pdf_store_hit(arxiv_id):
-    """paper store 中有有效 PDF → 返回路径，否则 None"""
+def _pdf_quality_tainted(arxiv_id):
+    """A quality taint survives later compile diagnostics until new PDF success."""
+    if paper_store.pdf_quality_tainted(arxiv_id):
+        return True
+    diagnosis = read_json(
+        os.path.join(LOGS_DIR, "pdf_errors", f"{arxiv_id}.json"),
+        {},
+    )
+    return bool(
+        isinstance(diagnosis, dict)
+        and (
+            diagnosis.get("phase") == "quality"
+            or str(diagnosis.get("category", "")).startswith("quality.")
+        )
+    )
+
+
+def _pdf_store_hit(arxiv_id, include_tainted=False):
+    """Return a valid PDF only when it is publishable, unless explicitly physical-only."""
+    if not include_tainted and _pdf_quality_tainted(arxiv_id):
+        return None
     return paper_store.pdf_hit(arxiv_id)
 
 
@@ -48,34 +77,163 @@ def _paper_store_update_pdf_status(arxiv_id, status):
     paper_store.update_pdf_status(arxiv_id, status)
 
 
+def _paper_store_mark_pdf_verified(arxiv_id):
+    """Clear a persistent quality taint only after a new PDF passes all gates."""
+    return paper_store.mark_pdf_verified(arxiv_id)
+
+
+_STAT_FIELDS = (
+    "metadata_attempted",
+    "metadata_succeeded",
+    "metadata_failed",
+    "summary_attempted",
+    "summary_succeeded",
+    "summary_failed",
+    "pdf_attempted",
+    "pdf_succeeded",
+    "pdf_failed",
+)
+
+
+def _new_stats():
+    """Create a stable result shape shared by run/repair/retry commands."""
+    stats = {field: 0 for field in _STAT_FIELDS}
+    stats["residual_failures"] = 0
+    stats["residual_ids"] = []
+    return stats
+
+
+def _finalize_stats(stats, residual_ids=()):
+    result = dict(stats)
+    ids = sorted({str(item) for item in residual_ids if item})
+    result["residual_ids"] = ids
+    result["residual_failures"] = len(ids)
+    return result
+
+
+def _merge_stats(target, source):
+    """Merge counters and residual IDs into ``target`` in place."""
+    for field in _STAT_FIELDS:
+        target[field] = target.get(field, 0) + int(source.get(field, 0) or 0)
+    ids = set(target.get("residual_ids", []))
+    ids.update(source.get("residual_ids", []))
+    target["residual_ids"] = sorted(ids)
+    target["residual_failures"] = len(ids)
+    return target
+
+
+def _stats_line(stats):
+    return (
+        f"metadata={stats['metadata_succeeded']}/{stats['metadata_attempted']}"
+        f"(失败={stats['metadata_failed']}) "
+        f"summary={stats['summary_succeeded']}/{stats['summary_attempted']}"
+        f"(失败={stats['summary_failed']}) "
+        f"pdf={stats['pdf_succeeded']}/{stats['pdf_attempted']}"
+        f"(失败={stats['pdf_failed']}) "
+        f"残留={stats['residual_failures']}"
+    )
+
+
+def _metadata_complete(data):
+    return bool(
+        isinstance(data, dict)
+        and str(data.get("title", "")).strip()
+        and str(data.get("abstract") or data.get("summary") or "").strip()
+    )
+
+
+def _audit_translation_state(arxiv_ids, structural_residuals=(), missing_attempts=0):
+    """Recompute final summary/metadata status from the persisted paper store."""
+    ids = {str(item) for item in arxiv_ids if item}
+    stats = _new_stats()
+    stats["audited_ids"] = sorted(ids)
+    stats["metadata_attempted"] = len(ids) + int(missing_attempts)
+    stats["summary_attempted"] = len(ids)
+    stats["metadata_failed"] = int(missing_attempts)
+    residual_ids = {str(item) for item in structural_residuals if item}
+    for aid in sorted(ids):
+        stored = paper_store.read_raw(aid)
+        if _metadata_complete(stored):
+            stats["metadata_succeeded"] += 1
+        else:
+            stats["metadata_failed"] += 1
+            residual_ids.add(aid)
+        if paper_store.translation_complete(stored):
+            stats["summary_succeeded"] += 1
+        else:
+            stats["summary_failed"] += 1
+            residual_ids.add(aid)
+    return _finalize_stats(stats, residual_ids)
+
+
+def _clear_stale_failure_artifacts(arxiv_id):
+    """Remove diagnostics that no longer describe a verified successful PDF."""
+    paths = [
+        os.path.join(LOGS_DIR, "pdf_errors", f"{arxiv_id}.json"),
+        os.path.join(LOGS_DIR, "pdf_errors", f"{arxiv_id}.log"),
+        os.path.join(TEX_FAILED_BACKUP_DIR, f"{arxiv_id}_merge_translate_zh.tex"),
+    ]
+    removed = []
+    for path in paths:
+        try:
+            os.remove(path)
+            removed.append(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"  ⚠️ 清理陈旧失败记录失败 {path}: {exc}", flush=True)
+    return removed
+
+
+def _accept_new_pdf(arxiv_id):
+    """Promote a newly generated physical PDF and clear quality taint atomically enough."""
+    physical_pdf = _pdf_store_hit(arxiv_id, include_tainted=True)
+    if not physical_pdf:
+        return None
+    if not _paper_store_mark_pdf_verified(arxiv_id):
+        return None
+    _clear_stale_failure_artifacts(arxiv_id)
+    return _pdf_store_hit(arxiv_id)
+
+
 
 # ── 进程级锁，防止同一 mode/key 并发执行 ─────────────────────────────────────
 class RunLock:
     """对 mode/key 加文件锁，同一任务第二个进程直接退出"""
-    def __init__(self, mode, key):
-        os.makedirs(LOCK_DIR, exist_ok=True)
-        self.path = os.path.join(LOCK_DIR, f"{mode}-{key}.lock")
-        self._f = None
+    def __init__(self, mode, key, lock_dir=None):
+        self.mode = mode
+        self.key = key
+        self.lock_dir = lock_dir or LOCK_DIR
+        self.path = index_lock_path(mode, key, lock_dir=self.lock_dir)
+        self._context = None
 
     def __enter__(self):
-        self._f = open(self.path, "w")
+        self._context = index_publication_lock(
+            self.mode,
+            self.key,
+            lock_dir=self.lock_dir,
+            timeout=0,
+        )
         try:
-            fcntl.flock(self._f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            self._f.close()
+            self._context.__enter__()
+        except PublicationBusyError:
+            self._context = None
             raise RuntimeError(f"另一个进程正在处理此任务，跳过: {self.path}")
-        self._f.write(str(os.getpid()))
-        self._f.flush()
         return self
 
     def __exit__(self, *_):
-        if self._f:
-            fcntl.flock(self._f, fcntl.LOCK_UN)
-            self._f.close()
-        try:
-            os.remove(self.path)
-        except OSError:
-            pass
+        if self._context is not None:
+            context, self._context = self._context, None
+            context.__exit__(None, None, None)
+
+
+def _publication_lock_dir(index_path, mode):
+    return lock_dir_for_index(
+        index_path,
+        mode,
+        data_dir=DATA_DIR,
+        lock_dir=LOCK_DIR,
+    )
 
 
 def setup_dirs(mode, key):
@@ -195,6 +353,8 @@ def _run_locked(mode, key, limit, do_full_translate):
     from fetch_hf import fetch_hf_papers
     from translate_arxiv import load_api_config, translate_and_save
 
+    stats = _new_stats()
+    residual_ids = set()
     base_dir, papers_dir = setup_dirs(mode, key)
     log(f"📁 {base_dir}", mode, key)
 
@@ -202,6 +362,10 @@ def _run_locked(mode, key, limit, do_full_translate):
     papers = fetch_hf_papers(mode, key, limit)
     if not papers:
         log("❌ 未获取到论文", mode, key)
+        stats["metadata_attempted"] = 1
+        stats["metadata_failed"] = 1
+        result_stats = _finalize_stats(stats, [f"{mode}/{key}:fetch"])
+        log(f"📊 失败: {_stats_line(result_stats)}", mode, key)
         return False
 
     log(f"✅ 获取到 {len(papers)} 篇", mode, key)
@@ -215,11 +379,11 @@ def _run_locked(mode, key, limit, do_full_translate):
 
     # 3. 逐一翻译摘要
     papers_data = []
-    ok = fail = 0
 
     for i, paper in enumerate(papers, 1):
         arxiv_id = paper.get("arxiv_id", "")
         if not arxiv_id:
+            log(f"  [{i}/{len(papers)}] ❌ 缺少 arxiv_id，无法处理", mode, key)
             continue
 
         html_path = os.path.join(papers_dir, f"{arxiv_id}.html")
@@ -227,9 +391,8 @@ def _run_locked(mode, key, limit, do_full_translate):
             # ★ 从循环前快照中恢复，而非从动态写入的 index.json 里读
             existing_entry = prior.get(arxiv_id)
 
-            # 若 title_zh 或 summary_zh 为空，删除旧 HTML 强制重新翻译
-            if not existing_entry or not existing_entry.get("title_zh") or \
-                    not existing_entry.get("summary_zh"):
+            # 缓存必须真正包含中文标题和中文摘要；非空英文不能算成功。
+            if not paper_store.translation_complete(existing_entry):
                 log(f"  [{i}/{len(papers)}] 🔁 翻译不完整，重新翻译: {arxiv_id}", mode, key)
                 try:
                     os.remove(html_path)
@@ -243,7 +406,6 @@ def _run_locked(mode, key, limit, do_full_translate):
                 entry["rank"] = i
                 entry["upvotes"] = paper.get("upvotes", entry.get("upvotes", 0))
                 papers_data.append(entry)
-                ok += 1
                 continue
 
         log(f"  [{i}/{len(papers)}] 🔄 翻译: {arxiv_id}", mode, key)
@@ -260,13 +422,15 @@ def _run_locked(mode, key, limit, do_full_translate):
             result["upvotes"] = paper.get("upvotes", 0)
             result["html_file"] = f"papers/{arxiv_id}.html"
             papers_data.append(result)
-            ok += 1
-            log(f"  ✅ {result.get('title_zh') or result.get('title', arxiv_id)}", mode, key)
+            persisted = paper_store.read_raw(arxiv_id)
+            if paper_store.translation_complete(persisted):
+                log(f"  ✅ {result.get('title_zh') or result.get('title', arxiv_id)}", mode, key)
+            else:
+                log(f"  ❌ {arxiv_id}: 翻译结果未通过中文完整性/持久化校验", mode, key)
         except Exception as e:
             log(f"  ❌ {arxiv_id}: {e}", mode, key)
             papers_data.append({"arxiv_id": arxiv_id, "rank": i, "error": str(e),
                                  "html_file": f"papers/{arxiv_id}.html"})
-            fail += 1
 
         save_index(base_dir, mode, key, papers_data)
 
@@ -274,6 +438,39 @@ def _run_locked(mode, key, limit, do_full_translate):
             time.sleep(2)
 
     idx_file = save_index(base_dir, mode, key, papers_data)
+
+    # 对最终持久化状态做统一门禁，避免 translate_and_save 返回后“假绿”。
+    final_entries = {p.get("arxiv_id"): p for p in papers_data if p.get("arxiv_id")}
+    stats["metadata_attempted"] = len(papers)
+    for position, paper in enumerate(papers, 1):
+        aid = paper.get("arxiv_id", "")
+        if not aid:
+            stats["metadata_failed"] += 1
+            residual_ids.add(f"{mode}/{key}:missing-id-{position}")
+            continue
+
+        stored = paper_store.read_raw(aid)
+        merged = {}
+        merged.update(paper)
+        merged.update(final_entries.get(aid, {}))
+        if isinstance(stored, dict):
+            merged.update(stored)
+        has_metadata = bool(
+            str(merged.get("title", "")).strip()
+            and str(merged.get("abstract") or merged.get("summary") or "").strip()
+        )
+        if has_metadata:
+            stats["metadata_succeeded"] += 1
+        else:
+            stats["metadata_failed"] += 1
+            residual_ids.add(aid)
+
+        stats["summary_attempted"] += 1
+        if paper_store.translation_complete(stored):
+            stats["summary_succeeded"] += 1
+        else:
+            stats["summary_failed"] += 1
+            residual_ids.add(aid)
 
     # 4. 全文翻译（所有模式均支持，传 do_full_translate=False 可跳过）
     if do_full_translate:
@@ -292,6 +489,7 @@ def _run_locked(mode, key, limit, do_full_translate):
                 entry.pop("pdf_status", None)
                 log(f"  ⚡ paper store PDF 命中: {aid} ({os.path.getsize(store_pdf)//1024} KB)", mode, key)
                 _paper_store_update_pdf_status(aid, "ok")
+                _clear_stale_failure_artifacts(aid)
                 save_index(base_dir, mode, key, papers_data)
                 continue
 
@@ -300,17 +498,20 @@ def _run_locked(mode, key, limit, do_full_translate):
             try:
                 r = translate_full(arxiv_id=aid, output_dir=PAPER_STORE_DIR,
                                    no_cache=False, timeout=3600)
-                if r.get("pdf_path"):
+                verified_pdf = _accept_new_pdf(aid) if r.get("pdf_path") else None
+                if r.get("pdf_path") and verified_pdf:
                     entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
                     entry.pop("pdf_zh_failed", None)
-                    _paper_store_update_pdf_status(aid, "ok")
                     log(f"  ✅ PDF: {r['pdf_path']}", mode, key)
                 else:
                     entry["pdf_zh_failed"] = True
+                    entry.pop("pdf_zh", None)
                     _paper_store_update_pdf_status(aid, "failed")
-                    log(f"  ❌ {r.get('error','')}", mode, key)
+                    error = r.get("error", "") or "返回 PDF 路径但 paper store 校验失败"
+                    log(f"  ❌ {error}", mode, key)
             except Exception as e:
                 entry["pdf_zh_failed"] = True
+                entry.pop("pdf_zh", None)
                 _paper_store_update_pdf_status(aid, "failed")
                 log(f"  ❌ {aid}: {e}", mode, key)
             save_index(base_dir, mode, key, papers_data)
@@ -324,6 +525,27 @@ def _run_locked(mode, key, limit, do_full_translate):
                 log(f"  ⚠️ 补标 pdf_status=failed: {aid}", mode, key)
 
         idx_file = save_index(base_dir, mode, key, papers_data)
+
+        # 以实际 PDF 文件而不是驱动返回值作为最终成功依据。
+        for entry in papers_data:
+            aid = entry.get("arxiv_id", "")
+            if not aid:
+                continue
+            stats["pdf_attempted"] += 1
+            if _pdf_store_hit(aid):
+                stats["pdf_succeeded"] += 1
+                entry["pdf_zh"] = f"papers/{aid}_zh.pdf"
+                entry.pop("pdf_zh_failed", None)
+                entry.pop("pdf_status", None)
+                _paper_store_update_pdf_status(aid, "ok")
+                _clear_stale_failure_artifacts(aid)
+            else:
+                stats["pdf_failed"] += 1
+                entry["pdf_zh_failed"] = True
+                entry.pop("pdf_zh", None)
+                _paper_store_update_pdf_status(aid, "failed")
+                residual_ids.add(aid)
+        idx_file = save_index(base_dir, mode, key, papers_data)
     else:
         # do_full_translate=False 时，明确标记 pdf_status="none"（未尝试）
         for entry in papers_data:
@@ -331,11 +553,15 @@ def _run_locked(mode, key, limit, do_full_translate):
                 entry["pdf_status"] = "none"
         idx_file = save_index(base_dir, mode, key, papers_data)
 
-    log(f"📊 完成: 成功={ok} 失败={fail}  {idx_file}", mode, key)
-    return fail == 0
+    result_stats = _finalize_stats(stats, residual_ids)
+    status = "完成" if not result_stats["residual_failures"] else "部分失败"
+    log(f"📊 {status}: {_stats_line(result_stats)}  {idx_file}", mode, key)
+    if result_stats["residual_ids"]:
+        log(f"📌 残留: {', '.join(result_stats['residual_ids'])}", mode, key)
+    return result_stats["residual_failures"] == 0
 
 
-def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
+def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
     """
     对一组 slim index paper entries 中 pdf_status=failed 的条目重试全文 PDF。
     若条目标记 ok 但 paper store PDF 已缺失，会先降级为 failed 再重试。
@@ -354,21 +580,77 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
     total_ok = 0
     total_fail = 0
     changed = False
+    attempted = 0
+    processed = processed_ids if processed_ids is not None else set()
 
+    # Reconcile every verified store PDF before selecting retry candidates.
+    # This also clears diagnostics left by an older failed attempt when the
+    # index was already synchronized to ``ok`` through another mode.
     for slim in papers:
         aid = slim.get("arxiv_id", "")
-        if aid and slim.get("pdf_status") == "ok" and not _pdf_store_hit(aid):
+        if not aid:
+            continue
+        status = slim.get("pdf_status")
+        stored = paper_store.read_raw(aid)
+        stored_status = (
+            stored.get("pdf_status") if isinstance(stored, dict) else None
+        )
+        if stored_status == "failed" and status != "failed":
+            # The paper store is shared across modes and is the durable source
+            # of failure truth.  Older slim indexes may predate pdf_status or
+            # still say "none"; do not let that hide a known failed PDF.
+            slim["pdf_status"] = "failed"
+            status = "failed"
+            changed = True
+        if _pdf_quality_tainted(aid) and status != "failed":
+            slim["pdf_status"] = "failed"
+            status = "failed"
+            changed = True
+        diagnosis = read_json(
+            os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"),
+            {},
+        )
+        force_retranslation = (
+            status == "failed"
+            and diagnosis.get("retry_strategy") == "retry_translation"
+        )
+        if _pdf_store_hit(aid) and not force_retranslation:
+            if status != "ok":
+                slim["pdf_status"] = "ok"
+                changed = True
+            _paper_store_update_pdf_status(aid, "ok")
+            _clear_stale_failure_artifacts(aid)
+            if status == "failed":
+                print(
+                    f"{label} ✅ {aid} — paper store 已有 PDF，更新状态",
+                    flush=True,
+                )
+                if aid not in processed:
+                    processed.add(aid)
+                    attempted += 1
+                    total_ok += 1
+            continue
+        if status == "ok":
             print(f"{label} ⚠️  {aid} — pdf_status=ok 但 paper store 缺 PDF，降级重试", flush=True)
             slim["pdf_status"] = "failed"
             _paper_store_update_pdf_status(aid, "failed")
             changed = True
 
     failed = [p for p in papers if p.get("pdf_status") == "failed"]
-
     for slim in failed:
         aid = slim.get("arxiv_id", "")
         if not aid:
             continue
+        if aid in processed:
+            if _pdf_store_hit(aid):
+                if slim.get("pdf_status") != "ok":
+                    slim["pdf_status"] = "ok"
+                    changed = True
+                _paper_store_update_pdf_status(aid, "ok")
+                _clear_stale_failure_artifacts(aid)
+            continue
+        processed.add(aid)
+        attempted += 1
 
         diagnosis = read_json(os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"), {})
         retry_strategy = diagnosis.get("retry_strategy", "")
@@ -379,11 +661,14 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
                 flush=True,
             )
 
-        # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态
-        if _pdf_store_hit(aid):
+        # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态。
+        # 质量门禁或翻译阶段诊断明确要求重译时，旧 PDF 本身就是待替换
+        # 的失败产物，不能因为结构完整就把它重新标绿。
+        if _pdf_store_hit(aid) and retry_strategy != "retry_translation":
             print(f"{label} ✅ {aid} — paper store 已有 PDF，更新状态", flush=True)
             slim["pdf_status"] = "ok"
             _paper_store_update_pdf_status(aid, "ok")
+            _clear_stale_failure_artifacts(aid)
             changed = True
             total_ok += 1
             continue
@@ -442,117 +727,274 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]"):
                                        no_cache=True,
                                        keep_translation=False,
                                        timeout=3600)
-            if r.get("pdf_path"):
+            verified_pdf = _accept_new_pdf(aid) if r.get("pdf_path") else None
+            if r.get("pdf_path") and verified_pdf:
                 slim["pdf_status"] = "ok"
-                _paper_store_update_pdf_status(aid, "ok")
                 print(f"{label} ✅ {aid} — 成功: {r['pdf_path']}", flush=True)
                 changed = True
                 total_ok += 1
             else:
-                print(f"{label} ❌ {aid} — 仍失败: {r.get('error', '')}", flush=True)
+                slim["pdf_status"] = "failed"
+                _paper_store_update_pdf_status(aid, "failed")
+                error = r.get("error", "") or "返回 PDF 路径但 paper store 校验失败"
+                print(f"{label} ❌ {aid} — 仍失败: {error}", flush=True)
                 total_fail += 1
         except Exception as e:
+            slim["pdf_status"] = "failed"
+            _paper_store_update_pdf_status(aid, "failed")
             print(f"{label} ❌ {aid}: {e}", flush=True)
             total_fail += 1
 
-    return {"ok": total_ok, "failed": total_fail, "changed": changed}
+    residual_ids = sorted({
+        p.get("arxiv_id", "")
+        for p in papers
+        if p.get("arxiv_id") and p.get("pdf_status") == "failed"
+    })
+    return {
+        "ok": total_ok,
+        "failed": total_fail,
+        "changed": changed,
+        "pdf_attempted": attempted,
+        "pdf_succeeded": total_ok,
+        "pdf_failed": total_fail,
+        "residual_failures": len(residual_ids),
+        "residual_ids": residual_ids,
+    }
 
 
-def retry_pdf(mode=None, key=None):
+def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=None):
     """
     扫描 pdf_status=failed 的条目，重新尝试全文 PDF 翻译，成功后更新 paper store 与 slim index。
-    mode=None 时扫描全部 (daily/weekly/monthly)。
+    mode=None 时扫描全部 (daily/weekly/monthly/manual)。
     key=None  时扫描该 mode 下所有 key。
-    返回成功翻译的篇数。
+    默认返回成功翻译的篇数；return_stats=True 返回完整统计。
     """
-    modes = [mode] if mode else ["daily", "weekly", "monthly"]
-    total_ok = 0
-    total_fail = 0
-
-    from paperhub import paper_store
-    reconciled = paper_store.reconcile_existing_pdf_statuses()
-    if reconciled:
-        print(
-            f"[retry-pdf] 已同步已有 PDF 的 paper store 状态: {', '.join(reconciled)}",
-            flush=True,
-        )
+    if key is not None and keys is not None:
+        raise ValueError("key and keys are mutually exclusive")
+    modes = [mode] if mode else ["daily", "weekly", "monthly", "manual"]
+    processed = processed_ids if processed_ids is not None else set()
+    candidate_ids = set()
+    references = {}
+    structural_residuals = set()
 
     for m in modes:
         mode_path = mode_dir(m)
         if not os.path.isdir(mode_path):
+            requested_keys = [key] if key is not None else list(keys or ())
+            structural_residuals.update(
+                f"{m}/{requested_key}:index"
+                for requested_key in requested_keys
+            )
             continue
-        keys = [key] if key else sorted(os.listdir(mode_path))
+        selected_keys = (
+            [key]
+            if key is not None
+            else list(keys)
+            if keys is not None
+            else sorted(os.listdir(mode_path))
+        )
 
-        for k in keys:
+        for k in selected_keys:
             idx_file = mode_index_path(m, k)
             if not os.path.exists(idx_file):
+                structural_residuals.add(f"{m}/{k}:index")
                 continue
+            lock_dir = _publication_lock_dir(idx_file, m)
             try:
-                with open(idx_file, encoding="utf-8") as f:
-                    idx = json.load(f)
-            except Exception:
+                idx = read_index_snapshot(
+                    idx_file,
+                    mode=m,
+                    key=k,
+                    lock_dir=lock_dir,
+                )
+            except PublicationBusyError:
+                print(
+                    f"[retry-pdf] ⚠️ {m}/{k} 正在发布，跳过本轮",
+                    flush=True,
+                )
+                structural_residuals.add(f"{m}/{k}:busy")
+                continue
+            except InvalidIndexError as exc:
+                print(f"[retry-pdf] ❌ {m}/{k} index.json 无法读取: {exc}", flush=True)
+                structural_residuals.add(f"{m}/{k}:index")
                 continue
 
             papers = idx.get("papers", [])
             if not papers:
                 continue
-            result = retry_failed_pdf_entries(papers, label=f"[retry-pdf] {m}/{k}")
+            before_statuses = {
+                slim.get("arxiv_id"): slim.get("pdf_status")
+                for slim in papers
+                if slim.get("arxiv_id")
+            }
+            for slim in papers:
+                aid = slim.get("arxiv_id", "")
+                if not aid:
+                    continue
+                status = slim.get("pdf_status")
+                stored = paper_store.read_raw(aid)
+                stored_status = (
+                    stored.get("pdf_status")
+                    if isinstance(stored, dict)
+                    else None
+                )
+                if (
+                    status == "failed"
+                    or stored_status == "failed"
+                    or (status == "ok" and not _pdf_store_hit(aid))
+                    or _pdf_quality_tainted(aid)
+                ):
+                    candidate_ids.add(aid)
+            result = retry_failed_pdf_entries(
+                papers,
+                label=f"[retry-pdf] {m}/{k}",
+                processed_ids=processed,
+            )
             changed = result["changed"]
-            total_ok += result["ok"]
-            total_fail += result["failed"]
 
+            current_papers = papers
             if changed:
-                idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                idx["papers"] = papers
-                write_json_atomic(idx_file, idx)
+                updates = {
+                    slim.get("arxiv_id"): {
+                        "pdf_status": slim.get("pdf_status")
+                    }
+                    for slim in papers
+                    if slim.get("arxiv_id")
+                    and slim.get("pdf_status") in {"ok", "failed", "none"}
+                    and before_statuses.get(slim.get("arxiv_id"))
+                    != slim.get("pdf_status")
+                }
+                try:
+                    merged = merge_index_paper_fields(
+                        idx_file,
+                        updates,
+                        mode=m,
+                        key=k,
+                        lock_dir=lock_dir,
+                    )
+                    current_papers = merged["payload"]["papers"]
+                except PublicationBusyError:
+                    print(
+                        f"[retry-pdf] ⚠️ {m}/{k} 写回时正在发布，"
+                        "保留为 residual",
+                        flush=True,
+                    )
+                    structural_residuals.add(f"{m}/{k}:busy")
+                except InvalidIndexError as exc:
+                    print(
+                        f"[retry-pdf] ❌ {m}/{k} 写回前 index 已失效: {exc}",
+                        flush=True,
+                    )
+                    structural_residuals.add(f"{m}/{k}:index")
 
-    print(f"[retry-pdf] 完成: 成功={total_ok} 仍失败={total_fail}", flush=True)
-    return total_ok
+            for slim in current_papers:
+                aid = slim.get("arxiv_id", "")
+                if aid:
+                    references.setdefault(aid, []).append(slim)
+
+    stats = _new_stats()
+    stats["audited_ids"] = sorted(candidate_ids)
+    stats["pdf_attempted"] = len(candidate_ids)
+    residual_ids = set(structural_residuals)
+    for aid in sorted(candidate_ids):
+        publishable = bool(_pdf_store_hit(aid))
+        index_failed = any(
+            slim.get("pdf_status") == "failed"
+            for slim in references.get(aid, ())
+        )
+        if publishable and not index_failed:
+            stats["pdf_succeeded"] += 1
+        else:
+            stats["pdf_failed"] += 1
+            residual_ids.add(aid)
+    result_stats = _finalize_stats(stats, residual_ids)
+    print(f"[retry-pdf] 完成: {_stats_line(result_stats)}", flush=True)
+    if result_stats["residual_ids"]:
+        print(f"[retry-pdf] 残留: {', '.join(result_stats['residual_ids'])}", flush=True)
+    return result_stats if return_stats else result_stats["pdf_succeeded"]
 
 
-def repair(mode=None, key=None):
+def repair(mode=None, key=None, keys=None, return_stats=False, processed_ids=None):
     """
     扫描已有数据目录，找出 title_zh / summary_zh 为空的条目，重新翻译并更新 index.json。
-    mode=None 时扫描全部 (daily/weekly/monthly)。
+    mode=None 时扫描全部 (daily/weekly/monthly/manual)。
     key=None  时扫描该 mode 下所有 key。
     """
-    modes = [mode] if mode else ["daily", "weekly", "monthly"]
+    modes = [mode] if mode else ["daily", "weekly", "monthly", "manual"]
     from translate_arxiv import load_api_config, translate_and_save
-    import re as _re
+
+    if key is not None and keys is not None:
+        raise ValueError("key and keys are mutually exclusive")
 
     config = load_api_config()
     total_fixed = 0
+    processed = processed_ids if processed_ids is not None else set()
+    scope_ids = set()
+    structural_residuals = set()
+    missing_attempts = 0
 
     for m in modes:
         mode_path = mode_dir(m)
         if not os.path.isdir(mode_path):
+            requested_keys = [key] if key is not None else list(keys or ())
+            structural_residuals.update(
+                f"{m}/{requested_key}:index"
+                for requested_key in requested_keys
+            )
             continue
-        keys = [key] if key else sorted(os.listdir(mode_path))
-        for k in keys:
+        selected_keys = (
+            [key]
+            if key is not None
+            else list(keys)
+            if keys is not None
+            else sorted(os.listdir(mode_path))
+        )
+        for k in selected_keys:
             idx_file = mode_index_path(m, k)
             if not os.path.exists(idx_file):
+                structural_residuals.add(f"{m}/{k}:index")
                 continue
+            lock_dir = _publication_lock_dir(idx_file, m)
             try:
-                with open(idx_file, encoding="utf-8") as f:
-                    idx = json.load(f)
-            except Exception:
+                idx = read_index_snapshot(
+                    idx_file,
+                    mode=m,
+                    key=k,
+                    lock_dir=lock_dir,
+                )
+            except PublicationBusyError:
+                print(
+                    f"[repair] ⚠️ {m}/{k} 正在发布，跳过本轮",
+                    flush=True,
+                )
+                structural_residuals.add(f"{m}/{k}:busy")
+                continue
+            except InvalidIndexError as exc:
+                print(f"[repair] ❌ {m}/{k} index.json 无法读取: {exc}", flush=True)
+                structural_residuals.add(f"{m}/{k}:index")
                 continue
 
-            from translate_arxiv import paper_store_read
             slim_papers = idx.get("papers", [])
             changed = False
 
             for slim in slim_papers:
                 aid = slim.get("arxiv_id", "")
                 if not aid:
+                    missing_attempts += 1
+                    structural_residuals.add(f"{m}/{k}:missing-id")
                     continue
+                scope_ids.add(aid)
+                if aid in processed:
+                    continue
+                processed.add(aid)
 
                 # 从 paper store 检查翻译完整性
-                stored = paper_store_read(aid)
-                if stored and stored.get("title_zh") and stored.get("summary_zh"):
+                stored = paper_store.read_raw(aid)
+                if paper_store.translation_complete(stored):
                     continue  # paper store 已有完整翻译，跳过
 
                 print(f"[repair] {m}/{k} — 重新翻译: {aid}", flush=True)
+                persisted = stored
                 try:
                     result = translate_and_save(
                         arxiv_id=aid,
@@ -561,10 +1003,16 @@ def repair(mode=None, key=None):
                         week_str=f"{m}/{k}",
                         config=config,
                     )
-                    if result.get("title_zh"):
+                    persisted = paper_store.read_raw(aid)
+                    if paper_store.translation_complete(persisted):
                         changed = True
                         total_fixed += 1
-                        print(f"[repair] ✅ {result['title_zh'][:60]}", flush=True)
+                        display_title = str(
+                            persisted.get("title_zh")
+                            or (result.get("title_zh") if isinstance(result, dict) else "")
+                            or aid
+                        )
+                        print(f"[repair] ✅ {display_title[:60]}", flush=True)
                     else:
                         print(f"[repair] ❌ 仍无中文翻译: {aid}", flush=True)
                 except Exception as e:
@@ -574,8 +1022,16 @@ def repair(mode=None, key=None):
                 # slim index 本身不变（元数据在 paper store），只记录日志
                 print(f"[repair] 💾 paper store 已更新，slim index 无需改变: {idx_file}", flush=True)
 
-    print(f"[repair] 完成，共修复 {total_fixed} 篇", flush=True)
-    return total_fixed
+    result_stats = _audit_translation_state(
+        scope_ids,
+        structural_residuals=structural_residuals,
+        missing_attempts=missing_attempts,
+    )
+    result_stats["summary_repaired"] = total_fixed
+    print(f"[repair] 完成: 修复={total_fixed} {_stats_line(result_stats)}", flush=True)
+    if result_stats["residual_ids"]:
+        print(f"[repair] 残留: {', '.join(result_stats['residual_ids'])}", flush=True)
+    return result_stats if return_stats else total_fixed
 
 
 if __name__ == "__main__":
@@ -589,7 +1045,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     if args.cmd == "repair":
-        n = repair(mode=args.mode, key=args.key)
-        sys.exit(0 if n >= 0 else 1)
+        result = repair(mode=args.mode, key=args.key, return_stats=True)
+        sys.exit(1 if result["residual_failures"] else 0)
     else:
         parser.print_help()

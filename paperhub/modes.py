@@ -52,7 +52,7 @@ FETCH_MODE_SPECS: Dict[str, ModeSpec] = {
     "monthly": ModeSpec("monthly", limit=10, trigger_day=28, trigger_hour=2),
 }
 FETCH_MODES = tuple(FETCH_MODE_SPECS)
-CONTENT_MODES = FETCH_MODES + ("topic",)
+CONTENT_MODES = FETCH_MODES + ("manual", "topic")
 
 
 def mode_spec(mode: str) -> ModeSpec:
@@ -60,4 +60,3 @@ def mode_spec(mode: str) -> ModeSpec:
         return FETCH_MODE_SPECS[mode]
     except KeyError as exc:
         raise ValueError(f"unsupported fetch mode: {mode}") from exc
-

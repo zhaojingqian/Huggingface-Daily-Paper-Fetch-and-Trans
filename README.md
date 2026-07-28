@@ -30,6 +30,10 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 
 ## 快速命令
 
+生产、cron、测试和修复统一使用
+`/root/.pyenv/versions/3.10.13/bin/python3`；系统自带 Python 版本过旧，不是
+受支持的运行时。下文命令中的 `python3` 均指这个固定解释器。
+
 ### 抓取与翻译
 
 ```bash
@@ -79,6 +83,7 @@ python3 run_repair.py --post --mode daily --days 2
 # 对 pdf_status=failed 的条目重试全文 PDF
 python3 run_repair.py --retry-pdf --mode weekly --key 2026-W22
 python3 run_repair.py --retry-pdf --mode daily --days 7
+python3 run_repair.py --retry-pdf --mode manual --days 7
 python3 run_repair.py --retry-pdf --mode topic --topic opd --days 7
 python3 run_repair.py --retry-pdf --mode topic --key opd/2026-07-05
 
@@ -92,7 +97,20 @@ python3 scripts/summarize_failures.py --json
 python3 scripts/analyze_translation_chunks.py \
   --tex-dir data/tex_backup \
   --tex-dir data/tex_backup_failed
+
+# 按共享质量门禁查找历史漏译；确认后写入重译队列
+python3 scripts/queue_quality_repairs.py --json
+python3 scripts/queue_quality_repairs.py --apply --json
 ```
+
+`run_repair.py` 的 `--key` 是严格精确操作：`repair`、`--post` 和
+daily/weekly/monthly 的 `--refetch` 都只处理指定 key，不会再隐式扩展为近
+N 天扫描。repair/refetch/retry 结束后会重新核对持久化的元数据、中文摘要和
+PDF 实体，统一输出 attempted/succeeded/failed 与 `residual_ids`；仍有真实
+残留时进程返回非零，cron/skill 不会再把“命令跑完”误当成“修复完成”。
+`manual` 已是正式内容模式：默认 repair/retry 与全模式审计都会覆盖
+daily、weekly、monthly、manual 和递归 topic，不再依赖 Web 手动队列单独
+兜底。
 
 已安装的 Codex skill 为 `$paper-trans-repair`（本机路径
 `/root/.codex/skills/paper-trans-repair`）。后续可直接要求“用
@@ -107,15 +125,70 @@ skill 自带的近窗审计命令为：
   --repo /root/workspace/paper-trans --days 14 --json
 ```
 
-`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。失败诊断会同时写入便于阅读的 `logs/pdf_errors/<id>.log` 和便于程序处理的 `<id>.json`，稳定字段包括 `phase`、`category`、`family`、`retry_strategy`、`repair_action` 和 `evidence`。`reuse_translation` 表示保留中文 tex、定向修补后重编译；只有明确分类为 `retry_translation` 才会清缓存再次调用 GPT，未知驱动异常也不会自动浪费一次全文重译。若没有翻译 tex 且源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 翻译/编译。daily/weekly/monthly 的 retry 入口还会同步 paper store 状态：已有 PDF 但 JSON 仍为 failed 时回写 `ok`；slim index 标记 `ok` 但 PDF 实体缺失时自动降级进入重试。
+`retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。失败诊断会同时写入便于阅读的 `logs/pdf_errors/<id>.log` 和便于程序处理的 `<id>.json`，稳定字段包括 `phase`、`category`、`family`、`retry_strategy`、`repair_action` 和 `evidence`。`reuse_translation` 表示保留中文 tex、定向修补后重编译；只有明确分类为 `retry_translation` 才会清缓存再次调用 GPT，未知驱动异常也不会自动浪费一次全文重译。若没有翻译 tex 且源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 翻译/编译。五个内容模式的 retry 入口都会同步 paper store 与所有引用索引：已有且通过门禁的 PDF 可回写 `ok`；slim index 标记 `ok` 但 PDF 实体缺失或无效时自动降级进入重试。
 
 失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的模型序列化残留、字体族缺失、引擎/driver 不匹配、pdfTeX 原语、环境失配、TikZ matrix 图例、宏首字母重复、未定义命令、结构损坏、数学/表格、verbatim、资源耗尽和普通 LaTeX 错误；翻译覆盖不足固定归入独立的 `quality.untranslated_prose`，不会再误报为 `compile.unknown`。`paperhub/patch_catalog.py` 为每个结构化类别登记 patch、来源和策略；`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
 
 topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套分类式 PDF retry 逻辑。paper store 的完整翻译缓存要求中文标题和中文总结同时有效；只残留标题的历史条目会重新抓取元数据并补译，同时保留原 `pdf_status`。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 
-全文翻译驱动会在发布 PDF 前做两类门禁：一是检查 `merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、undefined citation/reference 的 PDF。fallback 编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、inline `\verb` 分隔符与正则内容冲突、坏 `.aux`、旧式 FontAwesome 图标、XeLaTeX 下缺失的 `\DeclareUnicodeCharacter`、algorithm2e 关键字被翻译、不安全 citation key，以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
+全文翻译驱动会在发布 PDF 前做三类门禁：一是检查
+`merge_translate_zh.tex` 的普通正文翻译覆盖率，避免 splitter 漏译导致
+“大半 PDF 仍是英文”；二是检查 LaTeX log，拒绝 undefined command、
+undefined citation/reference；三是校验 PDF 实体。paper store、Web 和全库
+审计共享轻量 PDF 判定：文件必须大于 10 KiB，并同时具有 `%PDF-` 文件头和
+尾部 `%%EOF`，不能再只靠文件大小把中断复制的残缺 PDF 当成 `ok`。fallback
+编译会自动修补常见翻译副作用，例如自定义零参数宏与中文/中文标点粘连、
+误生成的 `\textWord` 命令、唯一可推断的 label/ref 不一致、inline `\verb`
+分隔符与正则内容冲突、坏 `.aux`、旧式 FontAwesome 图标、XeLaTeX 下缺失的
+`\DeclareUnicodeCharacter`、algorithm2e 关键字被翻译、不安全 citation key，
+以及 XeLaTeX segfault 时的 LuaLaTeX fallback。
 
-splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的 `PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。二次拆分后会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或空白/分隔符类 chunk 会降级回 preserve。相邻正文及其间纯空白会合并成上下文更完整的请求，并以 1800 字符为上限，避免过去“一句一个请求”的碎片化，也避免重新形成无界超长 chunk；作者、单位、邮箱和宏定义等元数据命令不再送给模型。splitter 版本变化时会自动丢弃旧 `temp.pkl`，避免旧翻译缓存与新节点结构错位。质量门禁会检查这些软保护区域里的长英文，但仍跳过 equation、verbatim、listing、comment、bibliography 及动态识别的代码/轨迹环境。
+splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 mask 的
+`PRESERVE/TRANSFORM` 结果，再对 preserve 节点做二次安全拆分。普通正文行
+会重新送翻译；`tabular/tabularx/longtable/array` 只翻译单元格文本，保留
+`&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。二次拆分后
+会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或
+空白/分隔符类 chunk 会降级回 preserve。相邻正文及其间纯空白会合并为
+上下文更完整、最长 1800 字符的请求；超长正文继续按句子边界拆分，作者、
+单位、邮箱、宏定义和纯环境配置不送模型。当前 **chunk v11** 还会剥离
+gpt-academic 拼在 fragment 前的英文翻译指令，只用真实论文片段检查漏译；
+inline code、URL 和 TeX 注释也不参与正文覆盖率。纯 `[key=value, ...]` 配置
+片段与 citation-heavy 的模型/数据集名称目录保持结构、不送模型，避免误判为
+英文正文。`tcolorbox`、`custombox`、
+`casebox`、`examplebox`、`mdframed` 不再按环境名整体保护，而是逐实例读取
+opening option 和首段内容：只有明确标记为 prompt、trace、trajectory、
+benchmark example、user query 或 source data 的实例保留原文，普通定理、
+说明和结论框仍继续翻译。每个返回 chunk 在合并前同时经过结构签名与语言
+门禁：不得新增/丢失关键 LaTeX 结构或 citation；中文响应中若仍有满足“至少
+4 个英文词、含语法连接词、与中文同段”的自然语言 clause，即判为未翻译并
+走单路重试。对于上游在 citation/ref 两侧切出的短英文接缝（例如
+`\cite{...}, including`），v11 只在相邻节点确为可翻译正文且合并后不超过
+1800 字符时吸收到同一 chunk；`\section`、环境边界和任意其他命令仍保持
+保护。这能拦住“整体中文、局部一句英文”的漏译。splitter 版本变化会
+自动丢弃旧 `temp.pkl`，避免旧翻译缓存与新节点结构错位。
+
+`paperhub.translation_quality` 是生产发布、`audit_project.py --strict`、
+英文分布分析和 `queue_quality_repairs.py` 共用的唯一质量定义；这些入口
+不会再各自维护不同阈值或环境排除表。队列默认只检查可回溯的 TeX；需要
+覆盖没有 TeX 备份的有效 PDF 时，显式执行只读预览：
+
+```bash
+python3 scripts/queue_quality_repairs.py --scan-pdf-text --json
+```
+
+PDF 扫描复用 `audit_project.py` 的有界文本提取缓存，并把连续英文正文、
+局部英文正文和模型拒绝回显稳定归入
+`quality.pdf_sustained_untranslated`、`quality.pdf_partial_untranslated`
+和 `quality.translation_refusal`，三类都使用 `retry_translation`。
+确认预览后用完整命令
+`python3 scripts/queue_quality_repairs.py --scan-pdf-text --apply --json`
+写入，才会把所有引用索引和 paper store 标成 `failed`，持久化
+`pdf_quality_tainted` 与对应结构化 sidecar；TeX 异常仍使用
+`quality.untranslated_prose / retry_translation`。apply 会先验证全部索引
+和 category，发现坏索引时不做部分写入。即使旧 PDF 在
+磁盘上结构完整，卡片、wrapper 和直接 PDF 路由也会继续封锁；只有新生成的
+PDF 同时通过翻译、编译和实体门禁后才清除 taint，后续编译诊断不能意外把
+旧英文 PDF 恢复成 `ok`。
 
 LaTeX 全文翻译默认使用 2 路低并发（可通过 `PAPER_TRANS_LLM_WORKERS` 调整），取代上游一次 8 路请求；遇到 429、空响应、本地异常 payload，或英文正文响应仍几乎没有中文时，只把对应 chunk 改为单路重试。补偿重试后仍有失败会终止本轮并拒绝写入 `temp.pkl`，不再把失败位置的英文原文静默合并成“可编译但未翻译”的中文 PDF。
 
@@ -127,11 +200,37 @@ LaTeX 全文翻译默认使用 2 路低并发（可通过 `PAPER_TRANS_LLM_WORKE
 
 fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontawesome5` legacy alias（含 `\faDatabase`、`\faEnvelopeO`、`\faEnvelope`、`\faGem` 等旧命令），为声明了 `CJKutf8` 但 XeLaTeX 未暴露环境的旧论文补 `CJK/CJK*` no-op guard，将已定义的 `\Imat` 被误写成 `\I` 的数学别名恢复，禁用 XeLaTeX 下容易报错的 `microtype` 特性，为可选参数列表补 `enumitem`，补充 inputenc/listing 场景常见的 `\DeclareUnicodeCharacter` no-op 和 `\inputencodingname` 兼容，为缺少 `fontspec` 的 CIDR/ACM 或 fontspec 风格模板补 `\setmainfont`、`\setsansfont`、`\setmonofont`、`\newfontfamily` no-op，并在 CIDR/ACM 文档结束前重置 `\baselinestretch` guard。从 tex 预生成 BibTeX 中间文件，guard 本地 class/style/source 中的 pdfTeX-only primitive，并在本地 class/style 硬编码不可用 `NVIDIASans_*` 或其他 T1 字体默认值时回退到容器已有字体。如果 arXiv 源码包只提供 `.bbl` 而没有对应 `.bib`，fallback 会复用已有且包含 `\bibitem` 的 `.bbl`，避免 BibTeX 生成空参考文献导致 undefined citation。若日志里先看到半截小 PDF，再看到 `.aux` 的 `File ended while scanning use of \citation`，需要优先查前一轮真正的 LaTeX/xdvipdfmx 崩溃原因。`Label(s) may have changed` 这类 rerun 提示不是发布拦截条件；真正会导致 `?` 的 undefined citation/reference 仍是硬失败。
 
-宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间没有换行输出时，外层 timeout 仍会按时收口，并会尽力清理同篇 `full_translate_driver.py` 进程，避免 retry 阶段被悬挂的旧编译卡住。
+宿主机侧 `translate_full.py` 使用非阻塞方式读取容器输出；当容器内长时间
+没有换行输出时，外层 timeout 仍会按时收口。每篇驱动在独立 session 中
+运行，由 subreaper supervisor 回收孤儿孙进程；超时或 Web 人工终止会按
+“精确驱动 argv + arXiv ID + PID starttime”递归终止同篇进程树，不误杀其他
+任务，也不把 zombie 留给容器 PID 1。短 Docker 控制命令默认 30 秒超时，
+可用 `PAPER_TRANS_DOCKER_CONTROL_TIMEOUT` 调整（上限 600 秒），避免在持有
+全局锁时无限卡住。所有 daily、weekly、monthly、manual、topic 和 Web 入口
+最终都在这里竞争 `locks/full-translation.lock`，共享容器同一时间只运行
+一篇全文任务；等待上限默认是任务 timeout 加 300 秒，可用
+`PAPER_TRANS_GLOBAL_LOCK_TIMEOUT` 覆盖。
+
+上游编译和 fallback 重编译都显式增加 `-no-shell-escape`，并在子进程环境中固定 `shell_escape=0`、`openin_any=p`、`openout_any=p`。论文 TeX 因而只能执行受限文件 I/O，不能借 shell escape 执行容器命令；这一约束同时覆盖 XeLaTeX、LuaLaTeX 和 pdfLaTeX 路径。
 
 `logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。如果编译超大图片/重资源论文时发生 `xdvipdfmx` 进程异常退出或超时（可能由 OOM 强杀导致），需确认独立容器已启用 `--memory-swappiness=60` 以允许向 Swap 换页。
 
-`scripts/weekly_cleanup.sh` 的孤立 PDF 判断会递归扫描 daily、weekly、monthly、manual 和 topic 的全部 `index.json`。topic 使用 `data/topic/<slug>/<date>/index.json` 两层目录，维护清理脚本时不能退回只扫描一层 key，也不能遗漏 topic，否则会误删仍被订阅页引用的 paper store PDF。
+`scripts/cleanup_docker_cache.sh` 与 `scripts/restart_translation_container.sh` 复用全文翻译全局锁；锁繁忙时维护任务直接记录 `SKIP`，不会删除活跃 workfolder 或重启正在工作的容器。Docker 缓存清理默认只删除超过 30 天、且内部没有近期文件的一级缓存条目，不再清空整个缓存根目录。
+
+`scripts/weekly_cleanup.sh` 通过
+`scripts/cleanup_orphan_artifacts.py --apply` 清理孤立 PDF、失败诊断
+sidecar 和 failed TeX；helper 会递归扫描 daily、weekly、monthly、manual
+和 topic 的全部 `index.json`。topic 使用
+`data/topic/<slug>/<date>/index.json` 两层目录，维护清理脚本时不能退回只
+扫描一层 key，也不能遗漏 topic；新生成但索引尚未发布的孤立候选还会保留
+3 天缓冲。真正删除前会按 `catalog(exclusive) -> paper(exclusive)` 顺序
+加锁，在锁内重新扫描引用并再次检查文件年龄；因此不会删除正在发布、刚被
+重新生成，或仍由任一索引引用的对象。默认直接运行 helper 只做 dry-run，
+必须显式传 `--apply` 才删除。任一索引损坏、读取失败或锁超时时，本轮孤立
+对象清理会 fail closed 并记为失败；pip、journal、日志、临时文件、孤立
+对象、Cursor 或 pagecache 任一步失败，脚本会尝试完其余安全步骤后以非零
+退出，cron 不会再记录“伪成功”。该任务安排在周日 08:00，晚于周日 02:00 的
+weekly 抓取与全模式 repair。
 
 ### Web 服务
 
@@ -163,6 +262,19 @@ tail -f /root/workspace/paper-trans/logs/web.log
 | `/status` | HTML/API | 系统状态页面和 API |
 
 当服务以 `BASE_PATH=/paper` 部署时，请求入口同时接受带前缀的线上路径，例如 `/paper/view/<arxiv_id>` 和 `/paper/papers/<file>`；内部 redirect 会自动保留 `/paper` 前缀。
+
+生产 Nginx 的 `/paper/papers/` 必须反代到 `web_server.py`，不能使用绕过应用
+质量判定的静态 `alias` 直出目录；这样 `pdf_quality_tainted` 的 PDF 在 wrapper、
+下载路由和直接 `/papers/<file>` 请求上使用同一封锁逻辑，同时保留健康 PDF 的
+Range/`206` 响应。
+
+`/api/paper/delete` 与 `/api/status/kill` 属于破坏性操作：只接受 POST，
+并且必须配置并提交 `TOPIC_ADMIN_TOKEN`；未配置 token 时也不会放行。删除
+请求会严格验证 mode、周期 key、arXiv ID 和最终真实路径，拒绝路径穿越。
+删除某个索引引用后，只有确认全项目没有其他索引引用、且引用扫描没有读错
+时才删除共享 PDF。`/search` 保持公开，但使用覆盖递归 topic 的全索引去重
+快照；快照 TTL 为 20 秒，手动写入和删除会主动失效，避免每次按键都重读
+全部 index 与 paper store。
 
 ### PDF 查看页说明
 
@@ -302,6 +414,17 @@ python3 -m unittest discover -s tests -v
 - mode 规格、共享 runner、原子 JSON 写入、全项目审计与失败分类保持稳定。
 - 缓存编译失败默认保留中文 tex，只有明确的翻译阶段诊断才允许再次调用 GPT。
 - `run_repair.py --refetch/--post` 对 daily/weekly/monthly 当前周期的跳过边界保持稳定：只在首次 cron 触发时间未到时跳过，触发后允许补抓临时网络失败的周期。
+- `run_repair.py --key` 保持精确范围，真实残留会进入统计并令 CLI 非零退出。
+- 全文翻译、缓存清理和容器重启共享同一把跨入口锁，维护任务忙时只跳过。
+- production/audit/queue 共用同一翻译质量谓词；实例级 prompt/example 保护
+  不会把普通 box 正文排除在翻译之外。
+- quality taint 会阻断旧 PDF 的 cache hit 与 Web 直出，只有新 PDF 通过全部
+  门禁后清除；PDF 实体同时校验 header 与 EOF。
+- `/paper/papers/` 的 Nginx 反代不得绕过应用的 taint、文件名与完整性校验；
+  健康 PDF 仍支持 Range/`206`。
+- 周日当前周 runner 覆盖五模式、按 arXiv ID 去重并同步所有引用；任一
+  residual 或索引错误必须保留 `partial`。
+- 破坏性 Web API 必须带管理 token，删除路径受限且共享 PDF 不会被单索引误删；搜索快照覆盖递归 topic 并按 TTL 复用。
 - LaTeX fallback 对 inline `\verb` 分隔符冲突只修补可疑 regex/code 形态，不改普通 inline verb。
 
 ### 线上抽查
@@ -365,21 +488,53 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 0  2 * * 0   $PYTHON $PTDIR/scripts/repair_weekly_current.py >> $RLOG 2>&1
 0  2 28 * *  $PYTHON $PTDIR/run_monthly.py >> $PTDIR/logs/cron-monthly.log 2>&1
 
-0  5 * * *   docker restart $GPT_ACADEMIC_CONTAINER >> $PTDIR/logs/docker-restart.log 2>&1
+0  5 * * *   $PTDIR/scripts/restart_translation_container.sh
 30 6 * * *   $PYTHON $PTDIR/run_repair.py --retry-pdf --mode topic --days 7 >> $PTDIR/logs/repair.log 2>&1
 30 3 * * 0   $PTDIR/scripts/cleanup_docker_cache.sh
+0  8 * * 0   $PTDIR/scripts/weekly_cleanup.sh >> $RLOG 2>&1
 
 0  1 * * *   $PYTHON $PTDIR/run_repair.py --post       --mode daily   --days 2  >> $RLOG 2>&1
 0  6 * * *   $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode daily   --days 7  >> $RLOG 2>&1
-0  4 * * 0   $PYTHON $PTDIR/run_repair.py --post       --mode weekly  --days 14 >> $RLOG 2>&1
-0  7 * * 0   $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode weekly  --days 14 >> $RLOG 2>&1
 0  4 28 * *  $PYTHON $PTDIR/run_repair.py --post       --mode monthly --days 60 >> $RLOG 2>&1
 0  7 28 * *  $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode monthly --days 60 >> $RLOG 2>&1
 ```
 
-`run_repair.py --post` 会先修复已有索引中的摘要，再补抓缺失或空 `index.json` 的周期。为避免提前抓取未到榜单生成时间的数据，当前周期只会在首次 cron 触发时间前被跳过：daily 为当天 23:00 前，weekly 为周日 02:00 前，monthly 为 28 日 02:00 前。触发时间之后如果遇到 Hugging Face 临时网络失败，后续 `--post` 会重新补抓该周期。
+`run_repair.py --post` 会先修复已有索引中的摘要，再补抓缺失或空 `index.json` 的周期。为避免提前抓取未到榜单生成时间的数据，当前周期只会在首次 cron 触发时间前被跳过：daily 为当天 23:00 前，weekly 为周日 02:00 前，monthly 为 28 日 02:00 前。触发时间之后如果遇到 Hugging Face 临时网络失败，后续 `--post` 会重新补抓该周期；显式给出 `--key` 时只检查该 key。repair/refetch/retry 任一阶段仍有持久化残留都会记录 ID 并返回非零。
 
-周日 02:00 的 `scripts/repair_weekly_current.py` 与 weekly 抓取并行启动，但会先等待 `weekly/<当前 ISO 周>/index.json` 出现，再等待抓取锁释放，随后在同一锁内串行执行摘要/翻译修复和 `pdf_status=failed` 编译重试，最长等待 3 小时；这样不会在抓取尚未创建索引时提前退出，也不会读取半成品索引或与 02:30 weekly 兜底抓取互相覆盖。每次运行会以 `runs` 追加记录本周失败类别、匹配的通用 patch、修复数量和剩余失败到 `logs/repair_history/weekly-<key>.json`。通用 patch 目录由 `paperhub/patch_catalog.py` 维护，具体实现仍集中在 `full_translate_driver.py` 和 `latex_translation_filters.py`。
+03:30 缓存清理、05:00 容器重启和周日 08:00 孤儿清理必须通过上述脚本执行，不能退回裸
+`rm -rf` 或 `docker restart`。两者会非阻塞竞争
+`locks/full-translation.lock`；翻译繁忙时跳过本轮维护。缓存默认保留 30
+天，可用 `PAPER_TRANS_CACHE_RETENTION_DAYS` 调整。
+
+周日 02:00 的 `scripts/repair_weekly_current.py` 与 weekly 抓取并行启动，但
+会先等待 `weekly/<当前 ISO 周>/index.json` 出现，再等待抓取锁释放。随后
+收集当前 ISO 周已经发布在 daily、weekly、monthly、manual、topic 五个模式
+中的论文，按 arXiv ID 去重后串行修复摘要、翻译和 PDF，再把结果同步回全库
+每一处引用索引；同一篇不会因为跨模式重复出现而重复调用模型。最长等待
+3 小时，不会读取半成品索引或与 02:30 weekly 兜底抓取互相覆盖。任何索引
+读写错误、无 sidecar 的 failed 状态或持久化 residual 都会令本轮
+`status=partial` 并使入口非零退出。每次运行以 `runs` 追加失败类别、匹配
+patch、五模式统计、同步数量和残留 ID 到
+`logs/repair_history/weekly-<key>.json`。通用 patch 目录由
+`paperhub/patch_catalog.py` 维护，具体实现集中在
+`full_translate_driver.py` 和 `latex_translation_filters.py`。
+
+索引发布和 paper store 更新统一使用
+`paperhub.publication_lock`。锁顺序固定为“weekly coordinator → catalog →
+按路径排序的 index → full-translation → 按 arXiv ID 排序的 paper”，批量
+流程不得反向嵌套。普通 fetch/topic/Web/repair 写索引时持 catalog shared
+与对应 per-index 锁；全库引用扫描持 catalog exclusive；摘要、PDF 状态和
+quality taint 通过 per-paper 锁内字段合并，不能再用旧 JSON 整份覆盖。
+`retry-pdf` 和 weekly 同步会在 index 锁内重新读取当前文件，只按 arXiv ID
+合并本轮 `pdf_status`，并保留并发发布新增的论文、rank、生成时间和其他字段。
+PDF 先复制到同目录临时文件，校验并 fsync 后才在 per-paper 锁内原子替换，
+读取方不会看到半复制文件。`locks/*.lock` 是持久诊断文件；是否繁忙只以
+`flock` 为准，不能凭文件存在与否判断或手动删除。
+
+重复启动周修复时，后启动实例会返回 `status=already_running` 且退出码为
+0，以免把正常的 cron 去重当成故障；这只表示主实例仍在处理，不表示本周已
+修复完成。监控必须继续检查主实例最终写入的
+`logs/repair_history/weekly-<key>.json`，只有最新状态为 `ok` 才能判定完成。
 
 topic 订阅不走 `--refetch` 补索引，必须由 root crontab 中的 `run_topic.py --all` 生成每日结果；如果 `/topic` 没有当天结果，优先检查 `crontab -l` 是否包含 `run_topic.py --all` 和 `--retry-pdf --mode topic` 两行，再看 `logs/cron-topic.log` 与 `logs/repair.log`。
 

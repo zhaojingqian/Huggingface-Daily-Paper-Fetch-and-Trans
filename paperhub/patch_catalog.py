@@ -201,6 +201,45 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "strategy": "retry_translation",
         "note": "扩大正文安全拆分、清理模型回显，并串行补齐 429 或中文不足的 chunk 后重新翻译。",
     },
+    "quality.pdf_sustained_untranslated": {
+        "patches": (
+            "scan_pdf_text_without_tex",
+            "split_preserved_prose",
+            "retry_failed_translation_chunks",
+        ),
+        "source": (
+            "paperhub/pdf_text_quality.py / "
+            "scripts/queue_quality_repairs.py / full_translate_driver.py"
+        ),
+        "strategy": "retry_translation",
+        "note": "无 TeX 的有效 PDF 出现连续多页英文正文时，复用扫描缓存定位并重新翻译源码。",
+    },
+    "quality.pdf_partial_untranslated": {
+        "patches": (
+            "scan_pdf_text_without_tex",
+            "split_preserved_prose",
+            "retry_failed_translation_chunks",
+        ),
+        "source": (
+            "paperhub/pdf_text_quality.py / "
+            "scripts/queue_quality_repairs.py / full_translate_driver.py"
+        ),
+        "strategy": "retry_translation",
+        "note": "无 TeX 的有效 PDF 出现局部英文正文或证明时，按命中页复核 chunk 后重新翻译。",
+    },
+    "quality.translation_refusal": {
+        "patches": (
+            "detect_translation_refusal",
+            "reject_partial_translation_cache",
+            "retry_failed_translation_chunks",
+        ),
+        "source": (
+            "paperhub/pdf_text_quality.py / "
+            "scripts/queue_quality_repairs.py / full_translate_driver.py"
+        ),
+        "strategy": "retry_translation",
+        "note": "检测模型拒绝翻译回显，拒绝发布和半成品缓存，并重新提交失败翻译。",
+    },
     "compile.latex_error": {
         "patches": ("inspect_first_latex_error",),
         "source": "logs/pdf_errors/<id>.log",

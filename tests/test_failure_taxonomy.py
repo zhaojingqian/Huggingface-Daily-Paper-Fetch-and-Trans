@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from failure_taxonomy import classify_failure
+from failure_taxonomy import classify_failure, quality_failure
 from paperhub.failure_reports import load_failure_records, summarize_failures
 from paperhub.json_io import write_json_atomic
 
@@ -97,6 +97,29 @@ class FailureTaxonomyTest(unittest.TestCase):
         )
 
         self.assertEqual(result["category"], "quality.untranslated_prose")
+
+    def test_pdf_text_quality_categories_are_stable_translation_retries(self):
+        expected_actions = {
+            "quality.pdf_sustained_untranslated": (
+                "retranslate_pdf_without_tex"
+            ),
+            "quality.pdf_partial_untranslated": (
+                "retranslate_pdf_without_tex"
+            ),
+            "quality.translation_refusal": "retry_refused_translation",
+        }
+
+        for category, action in expected_actions.items():
+            with self.subTest(category=category):
+                result = quality_failure(category, "pages=[3]")
+                self.assertEqual(result["category"], category)
+                self.assertEqual(result["family"], "translation_quality")
+                self.assertEqual(
+                    result["retry_strategy"],
+                    "retry_translation",
+                )
+                self.assertEqual(result["repair_action"], action)
+                self.assertTrue(result["retryable"])
 
     def test_missing_relative_compile_workdir_is_runtime_not_auth(self):
         result = classify_failure(

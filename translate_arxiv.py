@@ -102,12 +102,9 @@ def paper_store_write_raw(payload):
 
 def paper_store_write(arxiv_id, meta, translation):
     """将元数据 + 翻译结果合并写入 paper store"""
-    # Preserve orthogonal state such as pdf_status when repairing an incomplete
-    # summary translation.
-    existing = paper_store.read_raw(arxiv_id)
-    payload = dict(existing) if isinstance(existing, dict) else {}
-    payload.update({
-        "arxiv_id":   arxiv_id,
+    # Merge under the per-paper lock so concurrent PDF/quality state written by
+    # another mode cannot be lost by a stale summary snapshot.
+    paper_store.merge_raw(arxiv_id, {
         "stored_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "title":      meta.get("title", ""),
         "abstract":   meta.get("abstract", ""),
@@ -120,7 +117,6 @@ def paper_store_write(arxiv_id, meta, translation):
         "keywords_zh":translation.get("keywords_zh", []),
         "summary_zh": translation.get("summary_zh", ""),
     })
-    paper_store_write_raw(payload)
 
 
 

@@ -2,6 +2,95 @@
 
 ---
 
+## v4.37 — 2026-07-28
+
+### chunk v11、统一质量门禁与五模式修复闭环
+
+- **chunk v10/v11 定位结果**：v10 增加 inline prompt/schema 保护，并只对
+  “原文无结构命令、响应恰好多出一个裸章节命令”的模型幻觉做有界归一化。
+  `2607.14506` 随后证明另一类残留来自 gpt-academic 在 citation/ref 两侧
+  生成的短 `PRESERVE` 接缝；v11 仅将含普通英文正文且无结构命令的短接缝
+  吸收到相邻翻译 chunk，继续由 citation 多重集和中英混合门禁校验。
+- **编译与质量重新归类**：`2605.28556` 已复用中文 TeX 修复并通过编译、
+  覆盖和 PDF 门禁；`\parTherefore\par` 一类布局命令/英文正文粘连已沉淀为
+  通用 patch。`2605.13301` 与 `2605.29801` 的编译路径已经跑通，但分别因
+  中文覆盖不足和 prompt 内容被模型改写而保持
+  `quality.untranslated_prose / retry_translation`，不再误报为编译错误。
+
+- **chunk v9**：普通正文继续做句子级有界拆分和相邻上下文合并；纯
+  `[key=value, ...]` LaTeX 配置和 citation-heavy 模型/数据集名称目录保持
+  结构、不再误送模型。inline code、URL、注释和 gpt-academic 前置翻译 prompt
+  也不进入漏译判定。`tcolorbox`、`custombox`、`casebox`、`examplebox`、
+  `mdframed` 从“整类保护”改为实例级语义判定：只有显式 prompt、trace、
+  trajectory、benchmark example、user query/source data 实例保留英文，
+  普通解释框和定理框仍送翻译，降低保护过宽造成的英文正文残留。
+- **单 chunk 双门禁**：响应合并前比对关键 LaTeX 结构和 citation 多重集，拒绝
+  新增/丢失 section、item 或引用的输出；另识别与中文同段、含语法连接词且至少
+  4 个英文词的自然语言 clause。后者不再被高 CJK 覆盖率掩盖，直接走已有单路
+  重试，失败不会写入 `temp.pkl` 或发布 PDF。
+- **单一质量定义**：新增 `paperhub.translation_quality`，生产发布门禁、
+  `scripts/audit_project.py --strict`、全量英文分布分析和
+  `scripts/queue_quality_repairs.py` 共用同一个正文提取和
+  `is_untranslated_prose` 谓词。queue 不再另设宽松的历史阈值，生产通过而
+  全库扫描失败（或反之）的策略漂移被消除。
+- **持久化质量 taint 与 Web 封锁**：质量队列会同步把全部引用索引和 paper
+  store 标成 `failed`，保存 `pdf_quality_tainted` 与结构化
+  `quality.untranslated_prose / retry_translation` sidecar。旧 PDF 即使
+  物理存在也不能被 cache hit、卡片、wrapper 或直接 PDF 路由重新发布；
+  中途出现新的 compile 诊断也不会覆盖 taint。只有新 PDF 完整通过质量、
+  编译和实体门禁后才清除。
+- **PDF 实体判定收口**：`paperhub.paper_store.pdf_file_valid()` 由大小判断
+  升级为有界读取 `%PDF-` header 与尾部 `%%EOF`；paper store、repair、
+  Web 和 repository audit 共用该判定，能够识别超过大小阈值但复制中断的
+  残缺 PDF。
+- **无 TeX PDF 回退审计**：对历史有效 PDF 提供显式、有页数/文本大小/超时
+  上限的 `pdftotext` 审计和缓存；连续英文正文、局部英文正文、模型拒绝回显
+  分别稳定归入 `quality.pdf_sustained_untranslated`、
+  `quality.pdf_partial_untranslated`、`quality.translation_refusal`，均使用
+  `retry_translation`。队列 apply 先全量预检再原子写入所有引用和 taint，不做
+  半写入。
+- **进程生命周期闭环**：每篇容器驱动使用独立 session 和 subreaper
+  supervisor；timeout/Web kill 按精确 argv、arXiv ID 与 PID starttime 递归
+  清理同篇进程树并回收孤儿，不触碰其他任务。Docker `exec/cp/inspect`
+  等控制操作增加默认 30 秒、最大 600 秒的有界超时，避免持锁永久悬挂。
+- **全局翻译锁**：daily、weekly、monthly、manual、topic、Web 最终在
+  `translate_full.py` 竞争 `locks/full-translation.lock`。缓存清理和容器
+  重启也复用该锁，繁忙时非阻塞 `SKIP`；缓存默认只删除超过 30 天且内部
+  无近期文件的一级条目。
+- **发布一致性与孤儿清理**：索引/store/PDF 统一使用 publication lock；PDF
+  复制后校验、fsync，再在 per-paper 锁内原子替换。孤儿清理在 catalog/index
+  锁内重扫引用、保留 3 天发布缓冲，索引错误或锁失败即 fail closed。
+- **周日 02:00 五模式修复**：runner 收集当前 ISO 周已发布的 daily、
+  weekly、monthly、manual、topic 索引，按 arXiv ID 去重修复摘要/全文，
+  再同步所有跨模式引用。索引读写错误、无 sidecar 的 failed 条目和任何
+  residual 都保留为 `status=partial`，入口返回非零；运行历史记录五模式
+  统计、同步量、失败类别和通用 patch。
+- **manual 正式纳入 repair**：`paperhub.modes.CONTENT_MODES`、默认
+  repair/retry、日期范围选择和审计都覆盖 manual，不再遗漏只从 Web
+  手动提交的论文。`--key` 保持严格精确范围；attempted/succeeded/failed
+  和 `residual_ids` 以最终持久化状态为准。
+- **weekly cleanup 报真失败**：孤立 PDF 扫描递归覆盖五模式，并给新文件
+  3 天发布缓冲；任一 index 无法读取时拒绝删除。pip、journal、日志、临时
+  文件、PDF、Cursor、pagecache 任一步失败都会记录并令脚本最终非零退出，
+  不再以最后一条成功命令掩盖早期失败。
+- **固定运行时与 TeX 隔离**：生产、cron、测试统一固定到
+  `/root/.pyenv/versions/3.10.13/bin/python3`。XeLaTeX、LuaLaTeX、
+  pdfLaTeX 和 BibTeX 路径禁用 shell escape，并限制 openin/openout；arXiv
+  源码包在解压前拒绝路径穿越、越界链接、设备文件和超限归档。
+- **Web 与搜索安全**：删除、终止任务改为管理 token 保护的 POST，删除
+  路径与跨索引共享 PDF 引用均受校验；收藏写入限制请求体、字段长度和控制
+  字符。公开搜索使用覆盖递归 topic 的 20 秒去重快照，并在内部写入后主动
+  失效。
+- **Web/Nginx 一致封锁**：`/paper/papers/` 不再通过 Nginx 静态 alias 绕过
+  应用，改由应用路由执行 taint、文件名和 PDF 完整性检查；健康文件仍支持
+  Range/`206`。本地与 HTTPS 抽查同时验证被 taint 文件为 404、健康 PDF 可分段读取。
+- **仍在修复的存量**：全量可回溯 TeX 的普通正文扫描发现 69 篇
+  mixed-language 候选（同段中英混合 clause，排除表格、代码、引用和
+  prompt/trace/source-data）。69 是达到入队阈值的候选数，不表示 69 篇全文
+  未翻译；Top 30 与确定性随机边界 10 篇的抽查支持检测精度，但不代替对剩余
+  候选逐篇复核。这是待复核/重译队列而非“已修复”数字；本轮在
+  strict audit、质量队列、PDF fallback 和失败现场同时清零前不提前宣告完成。
+
 ## v4.36 — 2026-07-27
 
 ### 全量英文残留分析与 chunk v4
@@ -12,7 +101,9 @@
 - **chunk v4**：相邻正文和中间纯空白合并为完整上下文，请求上限 1,800 字符；短文本仍经过语义门禁，结构 LaTeX 保持边界；作者/单位/邮箱/宏定义不再送模型。`2607.13399` 的中间版拆分由 181 个 TRANSFORM 降至 78 个，中位长度从 173 提高至 373.5，短于 160 字符的请求从 82 降至 10；加入空白桥接和长度上限后的最终 v4 进一步降至 65 个请求。
 - **限流与漏译恢复**：默认并发从 8 降为 2；429、空响应、异常 payload，以及英文正文响应仍几乎没有中文时，仅串行重试对应 chunk。补偿后仍失败会终止翻译并拒绝缓存，避免静默发布英文回填 PDF。`casecode`、`strategycode`、tool call/response、span 标注、CCSXML、paper resources 和 comment 等代码/数据环境统一硬保护，不进入漏译统计。
 - **额度失败收口**：本轮最终实译 canary 在 65 个 chunk 中识别出 62 个请求失败；最小直连探测确认当前 `gpt-4.1-mini` 凭据返回 `insufficient_user_quota`（需预扣 `$0.010`、余额 `$0.005`）。新增 `translate.api_quota / manual_review / recharge_api_balance`，上游单任务盲重试默认关闭，确定性额度错误不再睡眠数十分钟；允许通过白名单环境变量 `PAPER_TRANS_LLM_MODEL` 做受控单次模型覆盖。
-- **当前队列**：`2606.28562`、`2606.30339`、`2607.13399`、`2607.14614`、`2607.15161` 的旧英文半成品仍由质量门禁拦截，未发布；代码与 chunk 策略已修复，但完成五篇重译仍需先补充 API 额度或提供已授权可用模型。
+- **当时队列（历史快照）**：该 5 篇旧英文半成品是 v4.36 当时的质量门禁
+  样本，后续已进入受控重译与全库扫描流程；不代表当前残留，当前状态以 v4.37
+  的质量队列、PDF fallback 审计和最终 release audit 为准。
 
 ## v4.35 — 2026-07-27
 
@@ -23,7 +114,9 @@
 - **通用 patch**：新增模型 JSON/list 残留清理、SourceSans3 字体回退、错误 pdftex graphicx driver 移除、pdfTeX primitive guard、无匹配环境结束清理、本地 class/style 字体兼容、TikZ matrix 脆弱图例降级和重复宏首字母恢复；摘要翻译兼容 list content、`reasoning_content`、奇数 JSON 反斜杠、截断响应及成功 TeX 回填。
 - **分类与效率**：旧 sidecar 为 `compile.unknown` 时会从完整驱动日志重分类；显式覆盖率失败固定为 `quality.untranslated_prose`，并以有界证据避免对 10–20MB 日志执行全量正则，近窗分类耗时由约 50 秒降至约 5 秒。
 - **Codex skill**：新增并验证本机 `$paper-trans-repair`，固化近两周全模式审计、串行重试、taxonomy/patch catalog/test 闭环、文档更新和 release gate。root crontab 保持每周日 02:00 调用 `scripts/repair_weekly_current.py`，等待 weekly 索引和共享锁后沉淀运行历史。
-- **明确剩余**：`2606.28562`、`2606.30339`、`2607.13399`、`2607.14614`、`2607.15161` 已完成一次受控全文重译且 LaTeX 可编译，但中文覆盖率仅 1.8%–30.1%，被质量门禁拒绝发布；它们统一保留为 `quality.untranslated_prose / retry_translation`，不再混入编译故障。
+- **历史说明**：上述 5 篇是当时的 `quality.untranslated_prose` 样本，用于说明
+  taxonomy 不将漏译误报为编译故障；它们的后续处理已由 v4.37 起的全库任务接管，
+  不能据此推断当前残留数量。
 
 ## v4.34 — 2026-07-20
 

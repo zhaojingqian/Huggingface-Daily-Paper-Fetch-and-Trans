@@ -1,8 +1,10 @@
+import json
 import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import topic_engine
 from paperhub import topic_store
 from topic_engine import (
     build_terms_prompt,
@@ -192,9 +194,11 @@ class TopicEngineTest(unittest.TestCase):
                     [{"arxiv_id": "2607.00001", "rank": 1, "pdf_zh_failed": True}],
                 )
 
-                def fake_retry(papers, label):
+                def fake_retry(papers, label, processed_ids=None):
                     self.assertIn("opd/2026-07-05", label)
                     papers[0]["pdf_status"] = "ok"
+                    if processed_ids is not None:
+                        processed_ids.add(papers[0]["arxiv_id"])
                     return {"ok": 1, "failed": 0, "changed": True}
 
                 with patch("run_papers.retry_failed_pdf_entries", side_effect=fake_retry):
@@ -211,7 +215,7 @@ class TopicEngineTest(unittest.TestCase):
                 topic_store.upsert_topic({"slug": "opd", "query": "opd"})
                 topic_store.save_index("opd", "2026-07-05", [{"arxiv_id": "2607.00001", "rank": 1}])
                 translated = {"title_zh": "中文标题", "summary_zh": "中文总结"}
-                with patch("topic_engine.paper_store.read_raw", return_value={}), \
+                with patch("topic_engine.paper_store.read_raw", side_effect=[{}, translated]), \
                      patch("translate_arxiv.load_api_config", return_value={}), \
                      patch("translate_arxiv.translate_and_save", return_value=translated) as translate:
                     self.assertEqual(repair_topic(topic="opd", key="2026-07-05"), 1)
@@ -219,6 +223,140 @@ class TopicEngineTest(unittest.TestCase):
                 self.assertEqual(translate.call_args[1]["week_str"], "topic/opd")
             finally:
                 self.restore_topic_dir()
+
+    def test_repair_topic_retries_english_placeholders_and_verifies_persisted_translation(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                topic_store.save_index("opd", "2026-07-05", [{"arxiv_id": "2607.00001", "rank": 1}])
+                english = {"title_zh": "English placeholder", "summary_zh": "Still English"}
+                translated = {"title_zh": "中文标题", "summary_zh": "中文总结"}
+                with patch("topic_engine.paper_store.read_raw", side_effect=[english, translated]), \
+                     patch("translate_arxiv.load_api_config", return_value={}), \
+                     patch("translate_arxiv.translate_and_save", return_value=translated) as translate:
+                    self.assertEqual(repair_topic(topic="opd", key="2026-07-05"), 1)
+                translate.assert_called_once()
+            finally:
+                self.restore_topic_dir()
+
+    def test_repair_topic_does_not_count_unpersisted_translation_as_fixed(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                topic_store.save_index("opd", "2026-07-05", [{"arxiv_id": "2607.00001", "rank": 1}])
+                incomplete = {"title_zh": "English placeholder", "summary_zh": "Still English"}
+                reported = {"title_zh": "中文标题", "summary_zh": "中文总结"}
+                with patch("topic_engine.paper_store.read_raw", side_effect=[incomplete, incomplete]), \
+                     patch("translate_arxiv.load_api_config", return_value={}), \
+                     patch("translate_arxiv.translate_and_save", return_value=reported):
+                    self.assertEqual(repair_topic(topic="opd", key="2026-07-05"), 0)
+            finally:
+                self.restore_topic_dir()
+
+    def test_topic_existing_pdf_uses_shared_validator_and_clears_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = os.path.join(tmp, "logs")
+            failed_tex = os.path.join(tmp, "failed")
+            error_dir = os.path.join(logs, "pdf_errors")
+            os.makedirs(error_dir)
+            os.makedirs(failed_tex)
+            aid = "2607.00007"
+            sidecar = os.path.join(error_dir, aid + ".json")
+            error_log = os.path.join(error_dir, aid + ".log")
+            tex = os.path.join(
+                failed_tex,
+                aid + "_merge_translate_zh.tex",
+            )
+            with open(sidecar, "w", encoding="utf-8") as handle:
+                json.dump({"retry_strategy": "reuse_translation"}, handle)
+            for path in (error_log, tex):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("stale")
+
+            with patch.object(topic_engine, "LOGS_DIR", logs), \
+                 patch.object(
+                     topic_engine,
+                     "TEX_FAILED_BACKUP_DIR",
+                     failed_tex,
+                 ), \
+                 patch.object(
+                     topic_engine.paper_store,
+                     "pdf_hit",
+                     return_value="/tmp/verified.pdf",
+                 ), \
+                 patch.object(
+                     topic_engine.paper_store,
+                     "update_pdf_status",
+                 ) as update_status:
+                self.assertTrue(topic_engine._ensure_pdf(aid))
+
+            update_status.assert_called_once_with(aid, "ok")
+            self.assertFalse(os.path.exists(sidecar))
+            self.assertFalse(os.path.exists(error_log))
+            self.assertFalse(os.path.exists(tex))
+
+    def test_topic_rejects_driver_path_when_store_pdf_fails_validation(self):
+        aid = "2607.00008"
+        with patch.object(topic_engine, "read_json", return_value={}), \
+             patch.object(
+                 topic_engine.paper_store,
+                 "pdf_hit",
+                 side_effect=[None, None],
+             ), \
+             patch.object(
+                 topic_engine.paper_store,
+                 "update_pdf_status",
+             ) as update_status, \
+             patch(
+                 "translate_full.translate_full",
+                 return_value={"pdf_path": "/tmp/unverified.pdf"},
+             ) as translate:
+            self.assertFalse(topic_engine._ensure_pdf(aid))
+
+        translate.assert_called_once_with(
+            arxiv_id=aid,
+            output_dir=topic_engine.PAPER_STORE_DIR,
+            no_cache=False,
+            timeout=3600,
+        )
+        update_status.assert_called_once_with(aid, "failed")
+
+    def test_topic_quality_taint_forces_retranslation_before_old_pdf_reuse(self):
+        aid = "2607.00009"
+        with patch.object(topic_engine, "read_json", return_value={
+            "category": "compile.undefined_command",
+            "retry_strategy": "reuse_translation",
+        }), patch.object(
+            topic_engine.paper_store,
+            "pdf_quality_tainted",
+            return_value=True,
+        ), patch.object(
+            topic_engine.paper_store,
+            "pdf_hit",
+            side_effect=["/tmp/old.pdf", "/tmp/new.pdf"],
+        ), patch.object(
+            topic_engine.paper_store,
+            "mark_pdf_verified",
+            return_value=True,
+        ) as mark_verified, patch.object(
+            topic_engine,
+            "_clear_topic_pdf_failure_artifacts",
+        ) as clear_failures, patch(
+            "translate_full.translate_full",
+            return_value={"pdf_path": "/tmp/new.pdf"},
+        ) as translate:
+            self.assertTrue(topic_engine._ensure_pdf(aid))
+
+        translate.assert_called_once_with(
+            arxiv_id=aid,
+            output_dir=topic_engine.PAPER_STORE_DIR,
+            no_cache=True,
+            timeout=3600,
+        )
+        mark_verified.assert_called_once_with(aid)
+        clear_failures.assert_called_once_with(aid)
 
 
 if __name__ == "__main__":

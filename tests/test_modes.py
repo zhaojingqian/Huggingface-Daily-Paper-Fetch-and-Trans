@@ -11,7 +11,7 @@ class ModeConfigTest(unittest.TestCase):
         sample = date(2026, 6, 28)
 
         self.assertEqual(FETCH_MODES, ("daily", "weekly", "monthly"))
-        self.assertEqual(CONTENT_MODES, FETCH_MODES + ("topic",))
+        self.assertEqual(CONTENT_MODES, FETCH_MODES + ("manual", "topic"))
         self.assertEqual(mode_spec("daily").limit, 3)
         self.assertEqual(mode_spec("weekly").key_for(sample), "2026-W26")
         self.assertEqual(mode_spec("monthly").key_for(sample), "2026-06")

@@ -47,7 +47,12 @@ class SharedPathsTest(unittest.TestCase):
         names = {os.path.basename(path) for path in translate_full.DRIVER_SUPPORT_FILES}
         self.assertEqual(
             names,
-            {"full_translate_driver.py", "latex_translation_filters.py", "failure_taxonomy.py"},
+            {
+                "full_translate_driver.py",
+                "latex_translation_filters.py",
+                "failure_taxonomy.py",
+                "translation_quality.py",
+            },
         )
 
 
