@@ -34,7 +34,11 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "note": "优先复用源码和翻译缓存，网络恢复后退避重试。",
     },
     "translate.plugin_runtime": {
-        "patches": ("inspect_plugin_runtime",),
+        "patches": (
+            "inspect_plugin_runtime",
+            "protect_tex_quoted_literals",
+            "protect_tikz_drawing_fragments",
+        ),
         "source": "full_translate_driver.py / logs/pdf_errors",
         "strategy": "retry_translation",
         "note": "检查容器插件运行时和残留进程，再决定是否清缓存重译。",
@@ -110,7 +114,10 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "note": "将安全的相对图片引用替换为资源或可编译占位图。",
     },
     "compile.macro_recursion": {
-        "patches": ("patch_recursive_macro",),
+        "patches": (
+            "patch_recursive_macro",
+            "relocate_nested_preamble_fallback",
+        ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
         "note": "限制递归宏展开并复用已有中文 TeX 重编译。",

@@ -211,6 +211,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] chunk v11 将 citation/ref 两侧被上游保留的短英文正文接缝有界吸收到
   相邻翻译 chunk；裸 `\section` 模型幻觉仅在原文无结构命令且 citation
   多重集不变时归一化，其他结构变化继续拒绝。
+- [x] fallback 前导区插入器跟踪跨行花括号和方括号，并迁移历史错误插入块；
+  混合语言门禁排除 TeX 双反引号引用文本与命令密集 TikZ 绘图片段。
 - [x] 将生产发布、repository audit、英文分布和历史质量 queue 收敛到
   `paperhub.translation_quality` 的同一正文提取与阈值。
 - [x] 为质量失败持久化 store taint，并让 cache hit、卡片、wrapper 和直接

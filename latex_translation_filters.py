@@ -1072,6 +1072,8 @@ def _natural_language_probe(text: str) -> str:
 def _mixed_language_probe(text: str) -> str:
     """Return ordinary prose while hiding literal English examples/code."""
     value = extract_translation_fragment(text)
+    if is_tikz_drawing_fragment(value):
+        return ""
     # Failure-box task/trajectory/result payloads are verbatim source data.
     # Keep their surrounding explanation prose eligible for translation.
     value = _strip_source_data_inline_macros(value)
@@ -1090,7 +1092,29 @@ def _mixed_language_probe(text: str) -> str:
             break
         value = updated
     value = re.sub(r'["“][^"”\n]*["”]', " ", value)
+    value = re.sub(r"``.*?''", " ", value, flags=re.DOTALL)
     return _natural_language_probe(value)
+
+
+def is_tikz_drawing_fragment(text: str) -> bool:
+    """Return true for command-heavy TikZ path fragments, not paper prose."""
+    value = text or ""
+    commands = re.findall(
+        r"\\(?:fill|draw|path|node|coordinate|clip)\b",
+        value,
+    )
+    lowered = value.lower()
+    return bool(
+        commands
+        and (
+            "path picture bounding box" in lowered
+            or (
+                len(commands) >= 2
+                and "rectangle" in lowered
+                and "shift=" in lowered
+            )
+        )
+    )
 
 
 def _strip_source_data_inline_macros(value: str) -> str:
@@ -1227,6 +1251,8 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
         return True
     source_value = strip_inline_code_commands(extract_translation_fragment(source))
     if is_inline_prompt_source_data_block(source_value):
+        return False
+    if is_tikz_drawing_fragment(source_value):
         return False
     if is_bracketed_key_value_option_list(source_value):
         return False
@@ -1564,7 +1590,8 @@ def _safe_top_level_line_start(text: str, position: int) -> int:
     """
     source = text or ""
     limit = max(0, min(position, len(source)))
-    depth = 0
+    brace_depth = 0
+    bracket_depth = 0
     line_start = 0
     safe_line_start = 0
     index = 0
@@ -1576,7 +1603,7 @@ def _safe_top_level_line_start(text: str, position: int) -> int:
             index += 1
             line_start = index
             in_comment = False
-            if depth == 0:
+            if brace_depth == 0 and bracket_depth == 0:
                 safe_line_start = line_start
             continue
         if in_comment:
@@ -1591,14 +1618,28 @@ def _safe_top_level_line_start(text: str, position: int) -> int:
             index += 2
             continue
         if char == "{":
-            if depth == 0:
+            if (
+                brace_depth == 0
+                and bracket_depth == 0
+                and line_start == safe_line_start
+            ):
                 safe_line_start = line_start
-            depth += 1
-        elif char == "}" and depth:
-            depth -= 1
+            brace_depth += 1
+        elif char == "}" and brace_depth:
+            brace_depth -= 1
+        elif char == "[":
+            if (
+                brace_depth == 0
+                and bracket_depth == 0
+                and line_start == safe_line_start
+            ):
+                safe_line_start = line_start
+            bracket_depth += 1
+        elif char == "]" and bracket_depth:
+            bracket_depth -= 1
         index += 1
 
-    return safe_line_start if depth else line_start
+    return safe_line_start if (brace_depth or bracket_depth) else line_start
 
 
 def insert_latex_preamble_snippet(
@@ -1860,10 +1901,35 @@ def disable_fragile_tikz_matrix_legends(text: str) -> Tuple[str, int]:
     return pattern.sub(replace, text or ""), total
 
 
+_TAGGED_PROVIDECOMMAND_FALLBACK_RE = re.compile(
+    r"(?m)^(?P<block>% paper-trans fallback[^\r\n]*\r?\n"
+    r"(?:\\providecommand[^\r\n]*(?:\r?\n|$))+)"
+)
+
+
+def _relocate_unsafe_tagged_preamble_fallbacks(text: str) -> Tuple[str, int]:
+    """Move generated providecommand blocks out of multiline TeX arguments."""
+    source = text or ""
+    moved = 0
+    matches = list(_TAGGED_PROVIDECOMMAND_FALLBACK_RE.finditer(source))
+    for match in reversed(matches):
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        safe_start = _safe_top_level_line_start(source, match.start())
+        if safe_start == line_start:
+            continue
+        block = match.group("block").rstrip("\r\n")
+        source = source[:match.start()] + source[match.end():]
+        source = source[:safe_start] + block + "\n" + source[safe_start:]
+        moved += 1
+    return source, moved
+
+
 def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
     """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
     source = text or ""
-    historical_repairs = 0
+    source, historical_repairs = _relocate_unsafe_tagged_preamble_fallbacks(
+        source
+    )
 
     # v4.36 located ``\begin{document}`` with a raw string search.  A template
     # comment containing that example token could therefore be split by the

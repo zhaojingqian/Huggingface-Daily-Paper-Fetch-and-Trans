@@ -676,6 +676,8 @@ def _patch_latex_translation_splitter():
             return False
         if _ltf.is_inline_prompt_source_data_block(stripped):
             return False
+        if _ltf.is_tikz_drawing_fragment(stripped):
+            return False
         if _ltf.is_bracketed_key_value_option_list(stripped):
             return False
         if _is_section_heading(stripped):

@@ -164,7 +164,9 @@ benchmark example、user query 或 source data 的实例保留原文，普通定
 走单路重试。对于上游在 citation/ref 两侧切出的短英文接缝（例如
 `\cite{...}, including`），v11 只在相邻节点确为可翻译正文且合并后不超过
 1800 字符时吸收到同一 chunk；`\section`、环境边界和任意其他命令仍保持
-保护。这能拦住“整体中文、局部一句英文”的漏译。splitter 版本变化会
+保护。TeX ``...'' 引用的原始输入示例以及命令密集的 TikZ path 片段属于
+论文数据/绘图代码，不触发混合语言重试。这能拦住“整体中文、局部一句英文”
+的漏译，同时避免把应保留内容误报为正文。splitter 版本变化会
 自动丢弃旧 `temp.pkl`，避免旧翻译缓存与新节点结构错位。
 
 `paperhub.translation_quality` 是生产发布、`audit_project.py --strict`、

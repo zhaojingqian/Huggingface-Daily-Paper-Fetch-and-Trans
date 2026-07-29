@@ -308,6 +308,7 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         for response in (
             "我们遵循 Values in the Wild 和 LongBench v2 的评估设置。",
             "系统使用 \\textit{first care, then order, then the business of the day} 作为示例。",
+            "输入句子为：``Here we see that constraints imposed by GS-EC make it superior than GS-GR in terms of retrieval.''",
             "调用 \\texttt{book_table(restaurant_id, date, time, guests)} 完成操作。",
             "\\fbresult{score from JSON-schema validation failure on a single field.}",
             "下面规则必须严格执行：Do NOT renumber the documents as 1,2,3,...; use their original ids.\\\\",
@@ -320,6 +321,19 @@ class LatexTranslationFiltersTest(unittest.TestCase):
                     source,
                     response,
                 ))
+
+    def test_tikz_drawing_fragment_is_not_translation_prose(self):
+        drawing = (
+            r"\fill[#1!\a] ([shift={(0,24-8*\r)}]path picture bounding box."
+            r"south west) rectangle ([shift={(8,32-8*\r)}]"
+            r"path picture bounding box.south west);"
+        )
+
+        self.assertTrue(filters.is_tikz_drawing_fragment(drawing))
+        self.assertFalse(filters.mixed_untranslated_english_clauses(drawing))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(drawing, drawing)
+        )
 
     def test_rejects_task_echo_before_merging_prompt_box_chunk(self):
         source = r"""
@@ -1485,6 +1499,49 @@ Language: Chinese
         self.assertEqual(count, 1)
         self.assertIn(r"\providecommand{\href}[2]{#2}", fixed)
         self.assertLess(fixed.index(r"\providecommand{\href}"), fixed.index(r"\begin{document}"))
+
+    def test_preamble_fallback_stays_outside_multiline_optional_argument(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\newcommand{\checkdata}[2][]{#2}" "\n"
+            r"\checkdata[" "\n"
+            r"\raisebox{-0.2em}{icon}~~Project Page]"
+            r"{\href{https://example.com}{Example}}" "\n"
+            r"\begin{document}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        fallback = fixed.index(r"\providecommand{\href}[2]{#2}")
+        optional_argument = fixed.index(r"\checkdata[")
+        self.assertLess(fallback, optional_argument)
+
+    def test_relocates_existing_fallback_from_multiline_optional_argument(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\newcommand{\checkdata}[2][]{#2}" "\n"
+            r"\checkdata[" "\n"
+            r"% paper-trans fallback for missing hyperref package" "\n"
+            r"\providecommand{\href}[2]{#2}" "\n"
+            r"\raisebox{-0.2em}{icon}~~Project Page]"
+            r"{\href{https://example.com}{Example}}" "\n"
+            r"\begin{document}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            fixed.count("% paper-trans fallback for missing hyperref package"),
+            1,
+        )
+        self.assertLess(
+            fixed.index(r"\providecommand{\href}[2]{#2}"),
+            fixed.index(r"\checkdata["),
+        )
 
     def test_add_xelatex_compatibility_fallbacks_for_common_missing_commands(self):
         text = "\\documentclass{article}\n\\begin{document}\n\\citep{x} $\\mathbb{R}$\n\\begin{appendices}A\\end{appendices}\n\\begin{tabular}{cc}\\toprule\\multirow{2}{*}{A}&B\\\\\\cmidrule(lr){1-2}\\bottomrule\\end{tabular}\n\\end{document}"
