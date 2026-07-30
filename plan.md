@@ -53,7 +53,7 @@ translate_full.py
     ↓ locks/full-translation.lock
     ↓ serialized docker exec
 full_translate_driver.py
-    ↓ chunk v11 + shared translation quality gate
+    ↓ chunk v30 + short-bridge/custom-macro prose + shared quality gate
     ↓
 data/papers/<arxiv_id>_zh.pdf
     ↓ PDF header + EOF gate / quality taint
@@ -211,6 +211,13 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] chunk v11 将 citation/ref 两侧被上游保留的短英文正文接缝有界吸收到
   相邻翻译 chunk；裸 `\section` 模型幻觉仅在原文无结构命令且 citation
   多重集不变时归一化，其他结构变化继续拒绝。
+- [x] chunk v28 修复无尾随空格时 TRANSFORM 边界被立即回并的问题，并在
+  citation/ref bridge 与 coalescer 之后强制执行最终动态上限；引用 key
+  断裂优先闭合，空白片段、TikZ path、严格专名目录和已翻译标题后的产品名
+  清单不再制造伪漏译，解释性正文仍由结构和混合语言门禁拦截。
+- [x] chunk v30 保留自定义文本宏的人类语言参数，并把展示公式旁的短
+  `\par`/heading/bullet 正文重新入队；响应合并前检查未转义花括号净平衡，
+  仅对结构签名不变的单个末尾孤立 `}` 做安全归一化，防止合并器恢复英文尾段。
 - [x] fallback 前导区插入器跟踪跨行花括号和方括号，并迁移历史错误插入块；
   混合语言门禁排除 TeX 双反引号引用文本与命令密集 TikZ 绘图片段。
 - [x] 将生产发布、repository audit、英文分布和历史质量 queue 收敛到

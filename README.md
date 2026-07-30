@@ -521,6 +521,19 @@ patch、五模式统计、同步数量和残留 ID 到
 `paperhub/patch_catalog.py` 维护，具体实现集中在
 `full_translate_driver.py` 和 `latex_translation_filters.py`。
 
+全文翻译当前使用 chunk v30。正文会先按数学邻接、章节结构和自然句边界
+拆分；含两个以上 citation 的最终请求上限为 120 字符，含 ref 的请求上限为
+350 字符，普通正文上限为 1200 字符。所有短正文吸收和相邻合并完成后还会
+再次执行最终上限检查，避免中间 helper 把已拆开的引用密集段重新拼回。
+上游若从 citation key 中间切断片段，会优先闭合引用再送模型。纯 TikZ path、
+代码/提示源码、作者元数据和严格的专名/引用目录不计入漏译正文；已翻译短标题
+后的产品名清单也不会因专名保持英文而重复重试。响应仍必须通过命令和 citation
+多重集校验，解释性英文正文不会被这些排除规则隐藏。自定义文本宏
+（如 `\compactbullet{...}`）只移除命令 token、保留自然语言参数；与展示公式
+相邻的 `\par` 短句也会进入翻译。响应花括号净平衡必须与原文一致；仅允许删除
+一个位于响应末尾、且删除后命令/citation 签名完全一致的孤立 `}`，避免上游
+合并器为补括号而恢复英文原文尾部。
+
 索引发布和 paper store 更新统一使用
 `paperhub.publication_lock`。锁顺序固定为“weekly coordinator → catalog →
 按路径排序的 index → full-translation → 按 arXiv ID 排序的 paper”，批量

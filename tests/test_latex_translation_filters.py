@@ -9,6 +9,72 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_latex_prose_probe_keeps_custom_macro_human_argument(self):
+        value = (
+            r"\compactbullet{If \(m\) is irrational, then the line can "
+            r"contain at most one integer point. Hence the bound holds.}"
+        )
+        probe = filters.latex_prose_probe(value)
+        self.assertIn("If", probe)
+        self.assertIn("Hence the bound holds", probe)
+
+    def test_latex_prose_probe_removes_citation_keys(self):
+        probe = filters.latex_prose_probe(
+            r"Ordinary explanation \citep{smith_long_benchmark_key} continues."
+        )
+        self.assertIn("Ordinary explanation", probe)
+        self.assertNotIn("smith_long_benchmark_key", probe)
+
+    def test_short_structural_bridge_prose_promotes_formula_neighbors(self):
+        self.assertTrue(filters.is_short_structural_bridge_prose(
+            r"For the first term,\par"
+        ))
+        self.assertTrue(filters.is_short_structural_bridge_prose(
+            r"\compactbullet{On turn \(2M+1\) she plays the final move.}"
+        ))
+        self.assertFalse(filters.is_short_structural_bridge_prose(
+            r"\captionof{figure}"
+        ))
+        self.assertFalse(filters.is_short_structural_bridge_prose(
+            r"\[\alpha + \beta = \gamma\]"
+        ))
+
+    def test_response_gate_rejects_changed_brace_balance(self):
+        source = (
+            r"\textbf{First, bound }\(y\). "
+            r"Then the structure of the list is restricted.\par"
+        )
+        translated = (
+            r"\textbf{首先，界定}\(y\)。"
+            r"此时列表的结构非常受限。\par}"
+        )
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, translated),
+            "latex_brace_balance_mismatch",
+        )
+
+    def test_normalize_response_removes_only_safe_trailing_brace(self):
+        source = (
+            r"\emph{If there is no adjacent equal pair}, then merge it.\par"
+        )
+        translated = r"\emph{若没有相邻相等对}，则将其合并。\par}"
+        normalized = filters.normalize_llm_translation_response(
+            source,
+            translated,
+        )
+        self.assertEqual(normalized, translated[:-1])
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
+
+    def test_compact_colored_label_with_localized_connector_is_accepted(self):
+        source = r"\textbf{\textcolor{iclrdeepblue}{SU-01} w/ TTS}"
+        response = r"\textbf{\textcolor{iclrdeepblue}{SU-01} 带 TTS}"
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
     def test_force_no_tex_shell_escape_handles_paths_quotes_and_conflicts(self):
         self.assertEqual(
             filters.force_no_tex_shell_escape(
@@ -286,6 +352,18 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             r"\section{GPT-4o}",
             r"\section{GPT-4o}",
         ))
+        for short_echo in (
+            "Similarly, we have",
+            "Since we can show",
+            "Finally, for this case, we have",
+        ):
+            with self.subTest(short_echo=short_echo):
+                self.assertTrue(
+                    filters.llm_translation_response_untranslated(
+                        short_echo,
+                        short_echo,
+                    )
+                )
 
     def test_rejects_mixed_chinese_response_with_english_prose_clause(self):
         source = (
@@ -310,6 +388,8 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             "系统使用 \\textit{first care, then order, then the business of the day} 作为示例。",
             "输入句子为：``Here we see that constraints imposed by GS-EC make it superior than GS-GR in terms of retrieval.''",
             "调用 \\texttt{book_table(restaurant_id, date, time, guests)} 完成操作。",
+            r"执行 \cmd{search 'The Joggers band lead singer son of American chemist'} 继续检索。",
+            r"Look 任务（即 look\_at\_obj\_in\_light）提升了11.0%。",
             "\\fbresult{score from JSON-schema validation failure on a single field.}",
             "下面规则必须严格执行：Do NOT renumber the documents as 1,2,3,...; use their original ids.\\\\",
         ):
@@ -335,6 +415,59 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             filters.llm_translation_response_untranslated(drawing, drawing)
         )
 
+    def test_tikz_style_fragment_is_not_rescued_as_prose(self):
+        style = (
+            "grid42/.style={kcpcell, minimum width=16pt, "
+            "minimum height=32pt,"
+        )
+
+        self.assertTrue(filters.is_tikz_style_definition_fragment(style))
+        self.assertFalse(filters.is_plain_prose_line_for_rescue(style))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(style, style)
+        )
+
+    def test_terminal_period_keeps_citation_catalog_non_prose(self):
+        source = (
+            r"\item \textbf{Coding}: DeepSWE~\citep{deepswe}, "
+            r"ProgramBench~\citep{programbench}, "
+            r"Terminal-Bench~2.1~\citep{terminal}, "
+            r"FrontierSWE~\citep{frontier}, "
+            r"SWE-Marathon~\citep{marathon}, and "
+            r"SciCode~\citep{scicode}."
+        )
+        response = (
+            r"\item \textbf{编码}：DeepSWE~\citep{deepswe}，"
+            r"ProgramBench~\citep{programbench}，"
+            r"Terminal-Bench~2.1~\citep{terminal}，"
+            r"FrontierSWE~\citep{frontier}，"
+            r"SWE-Marathon~\citep{marathon}，以及 "
+            r"SciCode~\citep{scicode}。"
+        )
+
+        self.assertTrue(filters.is_citation_heavy_proper_name_catalog(source))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
+    def test_plain_prose_rescue_keeps_math_structure_protected(self):
+        self.assertTrue(filters.is_plain_prose_line_for_rescue(
+            r"We treat scalar weights $w_i,\hat{w}_i$ as unchanged if"
+        ))
+        self.assertTrue(filters.is_plain_prose_line_for_rescue(
+            "distillation and training efficiency"
+        ))
+        for protected in (
+            r"\begin{equation}",
+            r"\section{Related Work}",
+            r"\[",
+            r"\fill[red] (0,0) rectangle (1,1);",
+        ):
+            with self.subTest(protected=protected):
+                self.assertFalse(
+                    filters.is_plain_prose_line_for_rescue(protected)
+                )
+
     def test_rejects_task_echo_before_merging_prompt_box_chunk(self):
         source = r"""
 \begin{tcolorbox}[promptbox,title={Coarse CoT Template}]
@@ -356,6 +489,52 @@ Language: Chinese
             filters.llm_translation_response_invalid(source, corrupted),
             "translation_task_echo",
         )
+
+    def test_single_line_code_output_instruction_is_protected_and_bounded(self):
+        instructions = (
+            (
+                "Return only the corrected Python code inside a single "
+                r"\promptfence{python} code block."
+            ),
+            "Then provide your assessment in exactly three lines:",
+            r"Then provide your reasoning in an \texttt{<Analysis>} block:",
+            (
+                "Do not output any additional text outside the "
+                r"\texttt{<Analysis>} block and the three classification lines."
+            ),
+            (
+                r"\item Do not output any additional text outside the "
+                r"\texttt{<Analysis>}"
+            ),
+            (
+                "You MUST output in this exact format -- no other text "
+                "outside the tags:"
+            ),
+            (
+                "Please reason step by step, and put your final answer within "
+                r"\texttt{\textbackslash boxed\{\}}."
+            ),
+        )
+
+        for instruction in instructions:
+            with self.subTest(instruction=instruction):
+                self.assertTrue(
+                    filters.is_inline_prompt_source_data_block(instruction)
+                )
+                protected, state = (
+                    filters.inline_prompt_source_data_line_protected(
+                        instruction
+                    )
+                )
+                self.assertTrue(protected)
+                self.assertFalse(state["active"])
+                next_protected, _ = (
+                    filters.inline_prompt_source_data_line_protected(
+                        "This ordinary appendix explanation must still be translated.",
+                        state,
+                    )
+                )
+                self.assertFalse(next_protected)
 
     def test_rejects_latex_structure_or_citation_loss_before_merge(self):
         source = r"""
@@ -417,6 +596,52 @@ Language: Chinese
                     "citation_structure_mismatch",
                 )
 
+    def test_citation_structure_allows_translated_optional_note(self):
+        source = (
+            r"See \citep[Figure 3]{alpha} and "
+            r"\citep[Figure~18]{beta}."
+        )
+        translated = (
+            r"见 \citep[图3]{alpha} 与 "
+            r"\citep[图18]{beta}。"
+        )
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, translated),
+            "",
+        )
+        self.assertEqual(
+            filters.llm_translation_response_invalid(
+                source,
+                translated.replace("{beta}", "{gamma}"),
+            ),
+            "citation_structure_mismatch",
+        )
+
+    def test_structural_retry_prompt_adds_preservation_instruction(self):
+        base = "Translate the paper fragment into Chinese."
+        strengthened = filters.translation_retry_system_prompt(
+            base,
+            "critical_latex_structure_mismatch",
+        )
+
+        self.assertIn("preserve every LaTeX command", strengthened)
+        self.assertIn("citation keys", strengthened)
+        self.assertEqual(
+            filters.translation_retry_system_prompt(
+                base,
+                "request_or_untranslated",
+            ),
+            base,
+        )
+        self.assertEqual(
+            filters.translation_retry_system_prompt(
+                strengthened,
+                "citation_structure_mismatch",
+            ),
+            strengthened,
+        )
+
     def test_structure_evidence_exposes_later_paragraph_loss(self):
         # This is the shape that made 2606.05553 look harmless in a 180-char
         # preview: the subsection/label and first paragraph matched, while a
@@ -458,10 +683,10 @@ Language: Chinese
             evidence["source_commands"], evidence["response_commands"]
         )
         self.assertEqual(
-            evidence["source_citations_only"], ((r"\citep{beta}", 1),)
+            evidence["source_citations_only"], ((r"\citep[]{beta}", 1),)
         )
         self.assertEqual(
-            evidence["response_citations_only"], ((r"\citep{gamma}", 1),)
+            evidence["response_citations_only"], ((r"\citep[]{gamma}", 1),)
         )
 
     def test_normalizes_single_heading_wrapper_around_bare_caption_argument(self):
@@ -578,6 +803,23 @@ Language: Chinese
             filters.llm_translation_response_untranslated(source, source)
         )
 
+    def test_citation_structure_ignores_equivalent_internal_whitespace(self):
+        source = "\\cite{alpha,\nbeta,\ngamma}"
+        translated = r"\cite{alpha, beta, gamma}"
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, translated),
+            "",
+        )
+
+        self.assertEqual(
+            filters.llm_translation_response_invalid(
+                r"\citep{alpha,beta, gamma}",
+                r"\citep{alpha, beta,gamma}",
+            ),
+            "",
+        )
+
     def test_bracketed_key_value_options_are_structural_not_untranslated(self):
         options = (
             r"[fontsize=\small, breaklines=true, breakanywhere=true, "
@@ -627,6 +869,36 @@ Language: Chinese
         self.assertFalse(
             filters.llm_translation_response_untranslated(catalog, catalog)
         )
+        for fragment in (
+            (
+                r"Qwen2.5-Omni-7B~\citep{qwen2.5omni}, "
+                r"Step-Audio-2-mini~\citep{stepaudio2}, "
+                r"Voxtral-Mini-3B~\citep{voxtral}, "
+            ),
+            (
+                r"Kimi-Audio-7B~\citep{Kimi-Audio}, "
+                r"Gemini-3-Flash~\citep{}, Seed-ASR~\citep{seedasr},"
+            ),
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertTrue(
+                    filters.is_citation_heavy_proper_name_catalog(fragment)
+                )
+                self.assertFalse(
+                    filters.llm_translation_response_untranslated(
+                        fragment,
+                        fragment,
+                    )
+                )
+        connector_catalog = (
+            r"PerceptionBench~\citep{perceptionbench}, "
+            r"Video-MME~\citep{videomme}, MMVU~\citep{mmvu}, and"
+        )
+        self.assertTrue(
+            filters.is_citation_heavy_proper_name_catalog(
+                connector_catalog
+            )
+        )
 
     def test_citation_catalog_check_does_not_hide_explanatory_prose(self):
         prose = (
@@ -640,6 +912,72 @@ Language: Chinese
         )
         self.assertTrue(
             filters.llm_translation_response_untranslated(prose, prose)
+        )
+
+    def test_translated_heading_allows_proper_name_catalog_tail(self):
+        source = (
+            r"\paragraph{Third-party results} GDPval-AA v2, AA-Briefcase, "
+            r"$\tau^3$-Banking, Harvey Lab-AA, APEX-Agents, SciCode,"
+        )
+        response = (
+            r"\paragraph{第三方结果} GDPval-AA v2，AA-Briefcase，"
+            r"$\tau^3$-Banking，Harvey Lab-AA，APEX-Agents，SciCode，"
+        )
+
+        self.assertTrue(
+            filters.is_translated_heading_proper_name_catalog(
+                source,
+                response,
+            )
+        )
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
+    def test_translated_heading_catalog_does_not_hide_explanatory_tail(self):
+        source = (
+            r"\paragraph{Results} Our method compares Alpha, Beta, Gamma, "
+            r"Delta, and Epsilon across difficult benchmarks."
+        )
+        response = (
+            r"\paragraph{结果} Our method compares Alpha, Beta, Gamma, "
+            r"Delta, and Epsilon across difficult benchmarks."
+        )
+
+        self.assertFalse(
+            filters.is_translated_heading_proper_name_catalog(
+                source,
+                response,
+            )
+        )
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
+    def test_untranslated_check_ignores_technical_version_footnote(self):
+        source = (
+            r"\footnote{Nemotron-Cascade-2:vLLM-0.17.2rc1.dev148+"
+            r"g47b7af0d8.cu128 ; DeepSeek-V3.2-Speciale: "
+            r"vLLM-v0.20-CUDA12.9.}. We"
+        )
+        response = (
+            r"\footnote{Nemotron-Cascade-2:vLLM-0.17.2rc1.dev148+"
+            r"g47b7af0d8.cu128 ; DeepSeek-V3.2-Speciale: "
+            r"vLLM-v0.20-CUDA12.9.}。我们"
+        )
+
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
+    def test_untranslated_check_keeps_natural_language_footnote(self):
+        source = (
+            r"\footnote{This ordinary explanatory footnote remains natural "
+            r"language prose and must be translated by the model.}"
+        )
+
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(source, source)
         )
 
     def test_untranslated_check_ignores_upstream_english_prompt(self):
@@ -716,6 +1054,94 @@ Language: Chinese
             ("Following paragraph.", False),
         ])
 
+    def test_default_coalescer_does_not_create_oversized_request(self):
+        merged = filters.coalesce_translation_fragments([
+            ("A" * 700, False),
+            ("B" * 700, False),
+        ])
+
+        self.assertEqual(merged, [
+            ("A" * 700, False),
+            ("B" * 700, False),
+        ])
+
+    def test_headings_force_distinct_translation_units(self):
+        source = (
+            r"\subsection{Validation} Intro text. "
+            r"\paragraph{Human study.} First result~\ref{tab:first}. "
+            r"\paragraph{Agreement.} Second result~\ref{tab:second}."
+        )
+        units = filters.split_translation_structural_units(source)
+        merged = filters.coalesce_translation_fragments([
+            (unit, False) for unit in units
+        ])
+
+        self.assertEqual(len(units), 3)
+        self.assertEqual(len(merged), 3)
+        self.assertTrue(units[1].startswith(r"\paragraph"))
+        self.assertIn(r"\ref{tab:first}", units[1])
+        self.assertIn(r"\ref{tab:second}", units[2])
+
+    def test_structure_dense_prose_uses_smaller_chunk_limit(self):
+        citations = (
+            r"Prior work \cite{a}, \citep{b}, and \citet{c} motivates this."
+        )
+        references = (
+            r"Compare \ref{tab:first} with \ref{tab:second} in our study."
+        )
+
+        self.assertEqual(
+            filters.recommended_translation_chunk_limit(citations),
+            120,
+        )
+        self.assertEqual(
+            filters.recommended_translation_chunk_limit(references),
+            350,
+        )
+        self.assertEqual(
+            filters.recommended_translation_chunk_limit(
+                "Ordinary prose without structural references."
+            ),
+            1200,
+        )
+        dense_fragments = [
+            ("A" * 120 + r"\cite{a}\cite{b}", False),
+            ("B" * 120 + r"\cite{c}", False),
+        ]
+        self.assertEqual(
+            len(filters.coalesce_translation_fragments(dense_fragments)),
+            2,
+        )
+
+    def test_final_fragment_limit_rechecks_after_intermediate_merge(self):
+        source = (
+            "Automatic speech recognition has evolved rapidly. "
+            r"Models~\citep{qwen3-asr} perform well on benchmarks "
+            r"such as LibriSpeech~\citep{librispeech}. "
+            r"Audio-language models~\citep{qwen3-omni} also support "
+            r"reasoning-based correction~\citep{reasoningforasr}."
+        )
+        bounded = filters.enforce_translation_fragment_limits([
+            (source, False),
+        ])
+
+        self.assertEqual("".join(text for text, _ in bounded), source)
+        self.assertGreater(len(bounded), 1)
+        self.assertTrue(all(not preserve for _, preserve in bounded))
+        self.assertTrue(all(
+            len(text) <= filters.recommended_translation_chunk_limit(text)
+            for text, _ in bounded
+        ))
+
+    def test_final_fragment_limit_preserves_whitespace_tail(self):
+        bounded = filters.enforce_translation_fragment_limits([
+            ("\n", False),
+        ])
+
+        self.assertEqual("".join(text for text, _ in bounded), "\n")
+        self.assertTrue(bounded[-1][1])
+        self.assertFalse(bounded[-1][0].strip())
+
     def test_coalescer_forces_pure_option_list_to_preserve(self):
         options = (
             r"[fontsize=\small, breaklines=true, breakanywhere=true, "
@@ -778,6 +1204,40 @@ Language: Chinese
             ),
             (r"\section{Method}", True),
         ])
+
+    def test_absorbs_citation_fragments_split_inside_key_list(self):
+        fragments = [
+            ("Previous translated prose ", False),
+            ("\\cite{alpha,\n", True),
+            ("beta}. Recent work studies scaling recipes and ", False),
+            ("distillation efficiency \\cite{gamma,\n", True),
+            ("delta}. These accounts characterize the method.", False),
+        ]
+
+        absorbed = filters.coalesce_translation_fragments(
+            filters.absorb_short_prose_bridges(fragments)
+        )
+
+        self.assertTrue(all(not preserve for _, preserve in absorbed))
+        combined = "".join(text for text, _ in absorbed)
+        self.assertIn("\\cite{alpha,\nbeta}", combined)
+        self.assertIn("\\cite{gamma,\ndelta}", combined)
+        self.assertFalse(any(
+            text.rstrip().endswith(("alpha,", "gamma,"))
+            for text, _ in absorbed
+        ))
+
+    def test_citation_bridge_respects_structure_dense_limit(self):
+        fragments = [
+            ("A" * 330, False),
+            (r" \cite{alpha}, including ", True),
+            ("B" * 330 + r" \cite{beta}\cite{gamma}", False),
+        ]
+
+        absorbed = filters.absorb_short_prose_bridges(fragments)
+
+        self.assertGreater(len(absorbed), 1)
+        self.assertFalse(any(len(text) > 700 for text, _ in absorbed))
 
     def test_short_prose_bridge_keeps_structural_or_overflow_fragments(self):
         structural = r"\end{abstract} including"
@@ -855,15 +1315,17 @@ Language: Chinese
             r"\parFrom (A)-(C), the result follows." "\n"
             r"\noindentThis paragraph is retained." "\n"
             r"\smallskipNext paragraph." "\n"
+            r"\par在我们的情形中，结论成立。" "\n"
             r"\parTherefore\par"
         )
 
         fixed, count = filters.separate_builtin_layout_ascii_glue(text)
 
-        self.assertEqual(count, 4)
+        self.assertEqual(count, 5)
         self.assertIn(r"\par From (A)-(C)", fixed)
         self.assertIn(r"\noindent This paragraph", fixed)
         self.assertIn(r"\smallskip Next paragraph", fixed)
+        self.assertIn(r"\par 在我们的情形中", fixed)
         self.assertIn(r"\par Therefore\par", fixed)
 
     def test_builtin_layout_ascii_glue_preserves_real_or_ambiguous_commands(self):
@@ -1555,6 +2017,26 @@ Language: Chinese
         self.assertIn(r"\providecommand{\toprule}{\hline}", fixed)
         self.assertIn(r"\providecommand{\multirow}[4][]{#4}", fixed)
         self.assertNotIn(r"\cmidrule", fixed)
+
+    def test_add_xelatex_compatibility_fallbacks_for_bbding_symbols(self):
+        text = (
+            "\\documentclass{article}\n"
+            "\\usepackage{bbding}\n"
+            "\\newcommand{\\cmark}{\\CheckmarkBold}\n"
+            "\\newcommand{\\xmark}{\\XSolidBrush}\n"
+            "\\begin{document}\\cmark\\xmark\\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+        fixed_again, second_count = (
+            filters.add_xelatex_compatibility_fallbacks(fixed)
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\CheckmarkBold}", fixed)
+        self.assertIn(r"\providecommand{\XSolidBrush}", fixed)
+        self.assertEqual(fixed_again, fixed)
+        self.assertEqual(second_count, 0)
 
     def test_preamble_fallback_ignores_tokens_inside_comments(self):
         source = (

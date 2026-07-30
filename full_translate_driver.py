@@ -27,7 +27,7 @@ arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-07-28-v11"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-07-31-v30"
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
@@ -353,7 +353,6 @@ def _patch_latex_translation_splitter():
         r"homepage|orcidlink|thanks|newcommand|renewcommand|providecommand|"
         r"DeclareMathOperator|newtheorem|def)\b"
     )
-    latex_cmd_re = _re.compile(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?")
     inline_math_re = _re.compile(r"\$[^$]*\$")
 
     def _rough_text(line: str) -> str:
@@ -376,9 +375,7 @@ def _patch_latex_translation_splitter():
                 r" \1 ",
                 rough,
         )
-        rough = latex_cmd_re.sub(" ", rough)
-        rough = _re.sub(r"\\.|[{}$^_&#~]", " ", rough)
-        return rough
+        return _ltf.latex_prose_probe(rough)
 
     def _env_is_tracked(env: str | None) -> bool:
         return env == "center" or _ltf.is_tracked_env(env)
@@ -406,7 +403,10 @@ def _patch_latex_translation_splitter():
         return letters >= min_letters and len(words) >= min_words
 
     def _line_has_translatable_prose(line: str) -> bool:
-        return _text_has_translatable_prose(line, min_letters=32, min_words=5)
+        return (
+            _text_has_translatable_prose(line, min_letters=32, min_words=5)
+            or _ltf.is_short_structural_bridge_prose(line)
+        )
 
     def _append(nodes, text: str, preserve: bool, merge: bool = True):
         if not text:
@@ -432,7 +432,12 @@ def _patch_latex_translation_splitter():
         trailing = text[trailing_len:]
         if _text_has_translatable_prose(core, min_letters=min_letters, min_words=min_words):
             _append(nodes, leading, True)
-            _append(nodes, core, False)
+            # Keep caller-created split boundaries intact. A bounded split may
+            # end exactly after a balanced citation/group without whitespace;
+            # the old implicit merge joined the adjacent TRANSFORM cores back
+            # into the original oversized request before the controlled
+            # coalescer could enforce its dynamic citation/reference cap.
+            _append(nodes, core, False, merge=False)
             _append(nodes, trailing, True)
         else:
             _append(nodes, text, True)
@@ -550,14 +555,31 @@ def _patch_latex_translation_splitter():
                     env_stack.pop()
         return env_stack
 
+    dense_split_log_count = 0
+
     def _split_long_transform_line(line: str):
-        if len(_rough_text(line)) < 420:
+        nonlocal dense_split_log_count
+        max_chars = _ltf.recommended_translation_chunk_limit(line)
+        if len(_rough_text(line)) < 420 and len(line) <= max_chars:
             return [line]
-        return _ltf.split_translation_line_bounded(
+        parts = _ltf.split_translation_line_bounded(
             line,
-            max_translate_chars=1800,
+            max_translate_chars=max_chars,
             min_sentence_chars=180,
         )
+        if (
+            max_chars < 1200
+            and len(parts) > 1
+            and dense_split_log_count < 5
+        ):
+            dense_split_log_count += 1
+            print(
+                "[driver] 🔬 structure-dense split: "
+                f"{len(line)} -> {[len(part) for part in parts]} "
+                f"(cap={max_chars})",
+                flush=True,
+            )
+        return parts
 
     def _split_preserved_text(text: str, state: dict):
         nodes = []
@@ -602,6 +624,7 @@ def _patch_latex_translation_splitter():
                 and in_soft_env
                 and not hard_active
                 and not structural_line
+                and not inline_source_data
             ):
                 if active_env.startswith("tabular") or active_env in {"longtable", "array"}:
                     for part in _split_tabular_line(line):
@@ -610,7 +633,13 @@ def _patch_latex_translation_splitter():
                     for part in _split_algorithmic_line(line):
                         _append(nodes, part.string, part.preserve)
                 else:
-                    _append_translatable_fragment(nodes, line, min_letters=12, min_words=2)
+                    for part in _split_long_transform_line(line):
+                        _append_translatable_fragment(
+                            nodes,
+                            part,
+                            min_letters=12,
+                            min_words=2,
+                        )
             else:
                 line_protected = (
                     (not state["in_document"])
@@ -676,6 +705,8 @@ def _patch_latex_translation_splitter():
             return False
         if _ltf.is_inline_prompt_source_data_block(stripped):
             return False
+        if _ltf.is_citation_heavy_proper_name_catalog(stripped):
+            return False
         if _ltf.is_tikz_drawing_fragment(stripped):
             return False
         if _ltf.is_bracketed_key_value_option_list(stripped):
@@ -684,6 +715,8 @@ def _patch_latex_translation_splitter():
             rough = _rough_text(stripped)
             letters = len(_re.findall(r"[A-Za-z]", rough))
             return letters >= 6
+        if _ltf.is_short_structural_bridge_prose(stripped):
+            return True
         if not _text_has_translatable_prose(stripped, min_letters=18, min_words=3):
             return False
 
@@ -719,12 +752,75 @@ def _patch_latex_translation_splitter():
             fragments.append((node.string, False))
         fragments = _ltf.absorb_short_prose_bridges(
             fragments,
-            max_translate_chars=1800,
+            max_translate_chars=1200,
         )
-        merged = _ltf.coalesce_translation_fragments(fragments)
+        merged = _ltf.coalesce_translation_fragments(
+            fragments,
+            max_translate_chars=1200,
+        )
+        merged = _ltf.enforce_translation_fragment_limits(
+            merged,
+            max_translate_chars=1200,
+        )
         finalized = [_Node(text, preserve=preserve) for text, preserve in merged]
         transform_after_merge = sum(1 for node in finalized if not node.preserve)
         return finalized, demoted, transform_before_merge - transform_after_merge
+
+    def _rescue_short_top_level_prose(nodes):
+        """Promote short prose lines stranded in preserved math-adjacent nodes."""
+        rescued = []
+        state = {
+            "in_document": False,
+            "env_stack": [],
+            "inline_source_data": {},
+        }
+        promoted = 0
+        for node in nodes:
+            for line in node.string.splitlines(keepends=True):
+                if r"\begin{document}" in line:
+                    state["in_document"] = True
+                state["env_stack"] = _promote_semantic_frame(
+                    line,
+                    state["env_stack"],
+                )
+                active_env = (
+                    state["env_stack"][-1][0]
+                    if state["env_stack"]
+                    else None
+                )
+                hard_active = any(
+                    semantic_source_data or _ltf.is_hard_protected_env(env)
+                    for env, semantic_source_data in state["env_stack"]
+                )
+                inline_source_data, state["inline_source_data"] = (
+                    _ltf.inline_prompt_source_data_line_protected(
+                        line,
+                        state.get("inline_source_data"),
+                    )
+                )
+                safe_top_level = active_env in {None, "document"}
+                promote = bool(
+                    node.preserve
+                    and state["in_document"]
+                    and safe_top_level
+                    and not hard_active
+                    and not inline_source_data
+                    and _ltf.is_plain_prose_line_for_rescue(line)
+                )
+                _append(
+                    rescued,
+                    line,
+                    preserve=not promote if node.preserve else False,
+                    merge=False,
+                )
+                promoted += int(promote)
+                state["env_stack"] = _update_env_stack(
+                    line,
+                    state["env_stack"],
+                )
+                if r"\end{document}" in line:
+                    state["in_document"] = False
+        return rescued, promoted
 
     def _patched_split(self, txt, project_folder, opts):
         res = _orig_split(self, txt, project_folder, opts)
@@ -740,8 +836,24 @@ def _patch_latex_translation_splitter():
         for node in self.nodes:
             parts = _split_preserved_text(node.string, state)
             for part in parts:
-                _append(expanded, part.string, part.preserve)
+                # Preserve splitter-created boundaries until the controlled
+                # coalescer applies semantic and size constraints.
+                _append(
+                    expanded,
+                    part.string,
+                    part.preserve,
+                    merge=False,
+                )
 
+        expanded, rescued_short = _rescue_short_top_level_prose(expanded)
+        structural_units = []
+        for node in expanded:
+            if node.preserve:
+                _append(structural_units, node.string, True, merge=False)
+                continue
+            for part in _ltf.split_translation_structural_units(node.string):
+                _append(structural_units, part, False, merge=False)
+        expanded = structural_units
         expanded, demoted_short, coalesced = _finalize_expanded_nodes(expanded)
         _invalidate_stale_split_cache(project_folder)
         _recompute_ranges(expanded)
@@ -754,7 +866,7 @@ def _patch_latex_translation_splitter():
             f"[driver] ✅ latex splitter expanded prose chunks: "
             f"{original_transform} -> {len(self.sp)} "
             f"(chars +{max(0, added_chars)}, short demoted={demoted_short}, "
-            f"adjacent merged={coalesced})",
+            f"rescued short={rescued_short}, adjacent merged={coalesced})",
             flush=True,
         )
         if added > 0:
@@ -1006,11 +1118,20 @@ def _patch_latex_llm_rate_limit_handling():
                 flush=True,
             )
             retry_options = dict(options)
+            retry_prompts = []
+            for index in remaining:
+                prompt = prompts[index] if index < len(prompts) else ""
+                retry_prompts.append(
+                    _ltf.translation_retry_system_prompt(
+                        prompt,
+                        invalid_reasons.get(index, ""),
+                    )
+                )
             retry_options.update({
                 "inputs_array": [inputs[index] for index in remaining],
                 "inputs_show_user_array": [visible_inputs[index] for index in remaining],
                 "history_array": [histories[index] for index in remaining],
-                "sys_prompt_array": [prompts[index] for index in remaining],
+                "sys_prompt_array": retry_prompts,
                 "max_workers": 1,
             })
             retried = yield from original(**retry_options)

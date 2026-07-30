@@ -7,6 +7,20 @@ from scripts.analyze_translation_chunks import analyze, analyze_tex
 
 
 class AnalyzeTranslationChunksTest(unittest.TestCase):
+    def test_tex_scan_detects_english_inside_custom_text_macro(self):
+        tex = (
+            "\\begin{document}\n"
+            "\\compactbullet{This ordinary mathematical explanation remains "
+            "untranslated and contains enough natural language words to be "
+            "reported by the shared publication quality gate.}\n"
+            "\\end{document}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tex_path = Path(tmp) / "paper.tex"
+            tex_path.write_text(tex, encoding="utf-8")
+            report = analyze_tex(tex_path)
+        self.assertEqual(report["long_english_lines"], 1)
+
     def test_repository_quality_threshold_is_strict(self):
         self.assertTrue(is_untranslated_prose({
             "cjk_pct": 90.0,
@@ -89,6 +103,67 @@ class AnalyzeTranslationChunksTest(unittest.TestCase):
 
         self.assertEqual(report["long_english_lines"], 1)
         self.assertIn("ordinary prose", report["samples"][0]["text"])
+
+    def test_tex_scan_ignores_author_affiliation_metadata(self):
+        tex = (
+            "\\begin{document}\n"
+            "\\icmlaffiliation{sch}{Machine Learning Department, Mohamed bin "
+            "Zayed University of Artificial Intelligence, Abu Dhabi, "
+            "United Arab Emirates}\n"
+            "这是已经翻译的正文段落，包含足够多的中文内容用于统计。\n"
+            "\\end{document}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tex_path = Path(tmp) / "paper.tex"
+            tex_path.write_text(tex, encoding="utf-8")
+
+            report = analyze_tex(tex_path)
+
+        self.assertEqual(report["long_english_lines"], 0)
+        self.assertFalse(is_untranslated_prose(report))
+
+    def test_tex_scan_ignores_tikz_path_picture_commands(self):
+        drawing = (
+            r"\fill[#1!\a] ([shift={(0,24-8*\r)}]path picture bounding "
+            r"box.south west) rectangle ([shift={(8,32-8*\r)}]path "
+            r"picture bounding box.south west);"
+        )
+        tex = (
+            "\\begin{document}\n"
+            "这是已经翻译的正文段落，包含足够多的中文内容用于统计。\n"
+            + "\n".join(drawing for _ in range(20))
+            + "\n\\end{document}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tex_path = Path(tmp) / "paper.tex"
+            tex_path.write_text(tex, encoding="utf-8")
+
+            report = analyze_tex(tex_path)
+
+        self.assertEqual(report["long_english_lines"], 0)
+        self.assertFalse(is_untranslated_prose(report))
+
+    def test_tex_scan_ignores_citation_backed_benchmark_catalog(self):
+        catalog = (
+            r"\item \textbf{Agentic}: BrowseComp~\citep{browse}, "
+            r"DeepSearchQA~\citep{deep}, Toolathlon~\citep{tool}, "
+            r"MCPMark~\citep{mcp}, AutomationBench~\citep{automation}, "
+            r"OSWorld~\citep{osworld}."
+        )
+        tex = (
+            "\\begin{document}\n"
+            "这是已经翻译的正文段落，包含足够多的中文内容用于统计。\n"
+            + catalog
+            + "\n\\end{document}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tex_path = Path(tmp) / "paper.tex"
+            tex_path.write_text(tex, encoding="utf-8")
+
+            report = analyze_tex(tex_path)
+
+        self.assertEqual(report["long_english_lines"], 0)
+        self.assertFalse(is_untranslated_prose(report))
 
     def test_tex_scan_detects_partial_mixed_prose_at_high_cjk_ratio(self):
         tex = (

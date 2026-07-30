@@ -100,8 +100,7 @@ def rough_text(line: str) -> str:
         r" \1 ",
         value,
     )
-    value = LATEX_COMMAND_RE.sub(" ", value)
-    return re.sub(r"\\.|[{}$^_&#~]", " ", value)
+    return filters.latex_prose_probe(value)
 
 
 def analyze_tex(path) -> Dict[str, object]:
@@ -158,7 +157,13 @@ def analyze_tex(path) -> Dict[str, object]:
         protected = any(
             semantic_source_data or filters.is_hard_protected_env(env)
             for env, semantic_source_data in env_stack
-        ) or inline_source_data
+        ) or (
+            inline_source_data
+            or filters.is_latex_metadata_line(code)
+            or filters.is_tikz_drawing_fragment(code)
+            or filters.is_tikz_style_definition_fragment(code)
+            or filters.is_citation_heavy_proper_name_catalog(code)
+        )
         structural = any(filters.is_tracked_env(env) for env in begins + ends)
         if in_document and not protected and not structural:
             rough = rough_text(code)

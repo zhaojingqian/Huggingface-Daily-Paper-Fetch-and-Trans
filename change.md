@@ -6,6 +6,27 @@
 
 ### chunk v11、统一质量门禁与五模式修复闭环
 
+- **2026-07-31 chunk v30 与 25 篇修复闭环**：25 篇目标论文已全部恢复为
+  可发布中文 PDF。最后一篇 `2605.13301` 从 `cjk_pct=64.2%`、49 个高置信
+  混合英文 clause 降至 `cjk_pct=72.4%`、`long_english_lines=0`、
+  `mixed_english_clause_count=0`，编译健康检查通过。根因是 splitter 的通用
+  LaTeX 命令清理会把 `\compactbullet{...}` 等自定义文本宏的整个正文参数
+  删除，以及展示公式旁的短 `\par` 句被留在 PRESERVE 节点；v30 改为只移除
+  命令 token，并识别短 bridge/heading/bullet 正文。响应新增未转义花括号
+  净平衡门禁，并仅安全删除结构/citation 签名不变的单个末尾孤立 `}`，避免
+  上游 `join_most` 把已经译好的中文尾部重新替换成英文。全项目审计同时把
+  35 个索引中的 50 处历史 `failed`/store `ok` 状态同步为 `ok`；审计仍明确
+  保留 69 篇历史高置信英文残留队列，以及本批结束后新产生的
+  `2607.24223`、`2607.25308` 两个失败任务，不与本次 25 篇完成量混算。
+
+- **2026-07-30 chunk v28**：修复 bounded splitter 的 TRANSFORM 片段在无
+  尾随空格时被 `_append_translatable_fragment` 立即拼回的问题；所有
+  citation/ref bridge 与 coalescer 完成后再次强制执行 120/350/1200 字符
+  动态上限，并优先闭合被上游从 citation key 中间切断的片段。最终质量扫描
+  精确排除 TikZ `path picture bounding box` 命令、严格引用/专名目录和已翻译
+  标题后的产品名清单，空白尾片段不再进入模型。XeLaTeX fallback 新增
+  `\CheckmarkBold` / `\XSolidBrush` 的安全 `bbding` 兼容定义。
+
 - **2026-07-29 增量修复**：兼容 fallback 插入器现在同时跟踪跨行 `{}` 与
   `[]`，并会把历史上误插进多行可选参数的 tagged `\providecommand` 迁回
   顶层前导区；`2607.23588` 复用中文 TeX 后恢复，编译健康与中文覆盖率门禁
