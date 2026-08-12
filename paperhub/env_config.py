@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small .env loader for local Paper Hub runtime settings."""
+"""Load the shared workspace environment and PaperHub's scoped settings."""
 
 import os
 
@@ -9,14 +9,7 @@ from paperhub.paths import ROOT_DIR
 _LOADED = False
 
 
-def load_env():
-    """Load KEY=VALUE pairs from .env without overwriting real environment."""
-    global _LOADED
-    if _LOADED:
-        return
-    _LOADED = True
-
-    path = os.path.join(ROOT_DIR, ".env")
+def _load_env_file(path):
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -30,6 +23,25 @@ def load_env():
                     os.environ[key] = value
     except FileNotFoundError:
         return
+
+
+def load_env():
+    """Load common paths first, then PaperHub secrets, without overwrites."""
+    global _LOADED
+    if _LOADED:
+        return
+    _LOADED = True
+
+    workspace_root = os.environ.get(
+        "WORKSPACE_ROOT",
+        os.path.dirname(os.path.dirname(ROOT_DIR)),
+    )
+    _load_env_file(os.path.join(workspace_root, ".env"))
+    paper_env = os.environ.get(
+        "PAPER_TRANS_ENV_FILE",
+        os.path.join(workspace_root, ".env.d", "paper.env"),
+    )
+    _load_env_file(paper_env)
 
 
 def get_env(name, default=""):

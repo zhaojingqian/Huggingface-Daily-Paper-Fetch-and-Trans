@@ -16,10 +16,19 @@ from datetime import datetime
 from pathlib import Path
 
 from paperhub import paper_store
+from paperhub.env_config import get_env
 from paperhub.paths import PAPER_STORE_DIR, TEX_BACKUP_DIR
 
 # 读取 gpt-academic 配置
-GPT_ACADEMIC_CONFIG = "/root/workspace/gpt-academic/config_private.py"
+GPT_ACADEMIC_CONFIG = get_env(
+    "GPT_ACADEMIC_CONFIG",
+    os.path.join(
+        os.environ.get("XDG_DATA_HOME", "/root/.local/share"),
+        "paper-trans",
+        "runtime",
+        "config_private.py",
+    ),
+)
 PROXY = "http://127.0.0.1:7890"
 HEADERS = {
     "User-Agent": (

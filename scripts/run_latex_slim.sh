@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${GPT_ACADEMIC_SLIM_IMAGE:-paper-trans-latex-slim:latest}"
 CONTAINER="${GPT_ACADEMIC_SLIM_CONTAINER:-gpt-academic-latex-slim}"
-CONFIG="${GPT_ACADEMIC_CONFIG:-/root/workspace/gpt-academic/config_private.py}"
+CONFIG="${GPT_ACADEMIC_CONFIG:-${XDG_DATA_HOME:-/root/.local/share}/paper-trans/runtime/config_private.py}"
 MEMORY="${GPT_ACADEMIC_SLIM_MEMORY:-1400m}"
 MEMORY_SWAP="${GPT_ACADEMIC_SLIM_MEMORY_SWAP:-3000m}"
 
