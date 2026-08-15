@@ -1,11 +1,33 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from paperhub import latex_pipeline
 
 
 class LatexPipelineMacroTest(unittest.TestCase):
+    def test_quality_gate_reuses_precomputed_report(self):
+        report = {
+            "ok": True,
+            "cjk_pct": 92.0,
+            "long_english_lines": 0,
+            "prose_lines": 4,
+            "samples": [],
+        }
+        with mock.patch.object(
+            latex_pipeline,
+            "translation_quality_report",
+            side_effect=AssertionError("report should be reused"),
+        ):
+            self.assertTrue(
+                latex_pipeline.translation_quality_ok(
+                    "/unused",
+                    "2606.00001",
+                    report=report,
+                )
+            )
+
     def test_macro_restore_does_not_copy_package_environment_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
