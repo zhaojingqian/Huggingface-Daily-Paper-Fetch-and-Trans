@@ -123,6 +123,24 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
 
     if phase == "translate":
         if re.search(
+            r"configure\(\) got an unexpected keyword argument|"
+            r"latex pipeline has not been configured",
+            plugin,
+            re.I,
+        ):
+            return _result(
+                "infrastructure.driver_incompatible",
+                "infrastructure",
+                "retry_translation",
+                "refresh_container_driver",
+                "容器内 driver 与 TeX pipeline 支持模块版本不一致；先复制同一 bundle，再重新翻译。",
+                _evidence(
+                    plugin,
+                    r"configure\(\) got an unexpected keyword argument|"
+                    r"latex pipeline has not been configured",
+                ),
+            )
+        if re.search(
             r"insufficient[_ ](?:user[_ ])?quota|insufficient.*balance|"
             r"balance .* is insufficient|额度不足|余额不足",
             plugin,

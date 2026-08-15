@@ -27,10 +27,23 @@ def load_failure_records(error_dir: str) -> List[Dict[str, object]]:
             # for deterministic infrastructure/API causes even when an older
             # sidecar already chose a generic plugin class.
             phase = str(data.get("phase") or "translate")
+            log_path = base / f"{path.stem}.log"
+            raw_log = ""
+            if log_path.is_file():
+                raw_log = log_path.read_text(encoding="utf-8", errors="replace")[:12000]
             embedded_plugin = "\n".join(
                 str(data.get(key) or "")
                 for key in ("plugin_error_full", "evidence")
             )
+            if (
+                data.get("category") in {
+                    "translate.network_timeout",
+                    "translate.plugin_exception",
+                    "translate.plugin_runtime",
+                }
+                and "configure() got an unexpected keyword argument" in raw_log
+            ):
+                embedded_plugin += "\n" + raw_log
             embedded_latex = str(data.get("tex_log_tail") or "")
             embedded = classify_failure(
                 phase,
@@ -44,6 +57,7 @@ def load_failure_records(error_dir: str) -> List[Dict[str, object]]:
                     "translate.api_quota",
                     "translate.api_auth",
                     "quality.translation_chunk_invalid",
+                    "infrastructure.driver_incompatible",
                 }
                 and embedded.get("category") != data.get("category")
             ):
@@ -62,9 +76,8 @@ def load_failure_records(error_dir: str) -> List[Dict[str, object]]:
             # labelled a translation-coverage rejection as compile.unknown. Prefer
             # the richer driver log when it can turn an unknown into a stable class.
             if data.get("category") in {"compile.unknown", "unknown.unstructured"}:
-                log_path = base / f"{path.stem}.log"
                 if log_path.is_file():
-                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    log_text = raw_log or log_path.read_text(encoding="utf-8", errors="replace")
                     coverage_pos = log_text.find("翻译覆盖率检查失败")
                     if coverage_pos < 0:
                         coverage_pos = log_text.lower().find("translation coverage")

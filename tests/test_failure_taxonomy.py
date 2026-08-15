@@ -76,6 +76,19 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertFalse(auth["retryable"])
         self.assertEqual(timeout["retry_strategy"], "retry_translation")
 
+    def test_stale_container_bundle_has_its_own_infrastructure_category(self):
+        result = classify_failure(
+            "translate",
+            plugin_error=(
+                "TypeError: configure() got an unexpected keyword argument "
+                "'check_pdf_integrity'"
+            ),
+        )
+
+        self.assertEqual(result["category"], "infrastructure.driver_incompatible")
+        self.assertEqual(result["repair_action"], "refresh_container_driver")
+        self.assertEqual(result["retry_strategy"], "retry_translation")
+
     def test_translation_quota_failure_is_not_blindly_retried(self):
         quota = classify_failure(
             "translate",
@@ -242,6 +255,25 @@ class FailureTaxonomyTest(unittest.TestCase):
             self.assertEqual(
                 record["reclassified_from"], "translate.plugin_exception"
             )
+
+    def test_stale_network_sidecar_is_refined_from_bundle_error_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_json_atomic(
+                os.path.join(tmp, "2608.10905.json"),
+                {
+                    "arxiv_id": "2608.10905",
+                    "phase": "translate",
+                    "category": "translate.network_timeout",
+                    "retry_strategy": "retry_translation",
+                },
+            )
+            with open(os.path.join(tmp, "2608.10905.log"), "w", encoding="utf-8") as handle:
+                handle.write("TypeError: configure() got an unexpected keyword argument 'check_pdf_integrity'")
+
+            record = load_failure_records(tmp)[0]
+
+            self.assertEqual(record["category"], "infrastructure.driver_incompatible")
+            self.assertEqual(record["reclassified_from"], "translate.network_timeout")
 
     def test_stale_plugin_sidecar_is_refined_from_chunk_gate_error(self):
         with tempfile.TemporaryDirectory() as tmp:
