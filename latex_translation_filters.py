@@ -487,6 +487,14 @@ _CRITICAL_LATEX_COMMAND_RE = re.compile(
     r"\\(?P<name>begin|end|item|caption|captionof|section|subsection|subsubsection|"
     r"paragraph|subparagraph|label|ref|eqref|autoref|cref|Cref)\*?\b"
 )
+_MOVABLE_REFERENCE_COMMANDS = frozenset({
+    "cite", "citep", "citet", "citealt", "citealp", "ref", "eqref",
+    "pageref", "autoref", "cref", "Cref",
+})
+_REFERENCE_RESTORE_COMMAND_RE = re.compile(
+    r"\\(?:ref|eqref|autoref|cref|Cref|pageref)\*?"
+    r"(?:\[[^\]]*\]){0,2}\{[^{}]*\}"
+)
 
 _SINGLE_HEADING_WRAPPER_RE = re.compile(
     r"\A\s*\\(?:section|subsection|subsubsection|paragraph|subparagraph)"
@@ -590,7 +598,7 @@ def _critical_commands_equivalent(
     """Allow citation/reference commands to move with Chinese word order."""
     if source_commands == response_commands:
         return True
-    movable = {"cite", "citep", "citet", "citealt", "citealp", "ref", "eqref", "pageref", "autoref", "cref", "Cref"}
+    movable = _MOVABLE_REFERENCE_COMMANDS
     source_fixed = tuple(command for command in source_commands if command not in movable)
     response_fixed = tuple(command for command in response_commands if command not in movable)
     if source_fixed != response_fixed:
@@ -719,6 +727,40 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
         # The safe trailing-brace repair above is valid for fragments that
         # also contain critical commands. All broader wrapper normalization
         # below remains restricted to command-free source fragments.
+        # A bounded retry can translate the prose correctly but omit a trailing
+        # movable reference when the splitter boundary falls immediately
+        # before it. Restore only exact reference payloads that exist in the
+        # source, and only when every non-movable command/citation still agrees.
+        source_fixed = tuple(
+            command for command in source_commands
+            if command not in _MOVABLE_REFERENCE_COMMANDS
+        )
+        response_fixed = tuple(
+            command for command in _critical_latex_signature(response_value)[0]
+            if command not in _MOVABLE_REFERENCE_COMMANDS
+        )
+        if source_fixed == response_fixed:
+            source_refs = Counter(
+                _REFERENCE_RESTORE_COMMAND_RE.findall(source_value)
+            )
+            response_refs = Counter(
+                _REFERENCE_RESTORE_COMMAND_RE.findall(response_value)
+            )
+            missing_refs = list((source_refs - response_refs).elements())
+            if missing_refs:
+                candidate = response_value.rstrip() + "".join(
+                    "~" + reference for reference in missing_refs
+                )
+                candidate_commands, candidate_citations = _critical_latex_signature(
+                    candidate
+                )
+                if (
+                    _critical_commands_equivalent(source_commands, candidate_commands)
+                    and source_citations == candidate_citations
+                    and _unescaped_brace_balance(source_value)
+                    == _unescaped_brace_balance(candidate)
+                ):
+                    response_value = candidate
         return response_value
 
     # A second recurring model error translates the ordinary word "section"

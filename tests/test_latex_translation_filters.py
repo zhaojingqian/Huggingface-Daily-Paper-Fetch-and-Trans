@@ -102,6 +102,18 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             "",
         )
 
+    def test_normalize_response_restores_missing_trailing_reference(self):
+        source = r"The result is shown in Figure~\ref{fig:overview}."
+        translated = "结果见图。"
+
+        normalized = filters.normalize_llm_translation_response(source, translated)
+
+        self.assertIn(r"\ref{fig:overview}", normalized)
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
+
     def test_structural_command_data_can_pass_through_unchanged(self):
         fragment = r"{CommonPile-GitHub} {\hfds{common-pile/github_archive_filtered}}"
 
