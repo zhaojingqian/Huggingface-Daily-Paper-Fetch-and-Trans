@@ -200,7 +200,7 @@ def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
     global _last_quality_report
     report = translation_quality_report(workfolder)
     _last_quality_report = report
-    return _translation_quality_ok(workfolder, arxiv_id_)
+    return _translation_quality_ok(workfolder, arxiv_id_, report=report)
 
 
 def repair_terminal_translation_residuals(workfolder: str, arxiv_id_: str) -> bool:

@@ -59,9 +59,13 @@ def translation_quality_report(workfolder: str) -> dict:
     return report
 
 
-def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
+def translation_quality_ok(
+    workfolder: str,
+    arxiv_id_: str,
+    report: dict | None = None,
+) -> bool:
     """Log and apply the one translated-TeX quality predicate."""
-    report = translation_quality_report(workfolder)
+    report = report if report is not None else translation_quality_report(workfolder)
     if not report.get("ok"):
         print(
             f"[driver] ❌ 翻译覆盖率检查失败: {arxiv_id_} "
