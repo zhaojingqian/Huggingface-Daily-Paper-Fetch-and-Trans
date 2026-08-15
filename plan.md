@@ -52,9 +52,9 @@ data/papers/<arxiv_id>.json
 translate_full.py
     ↓ locks/full-translation.lock
     ↓ serialized docker exec
-full_translate_driver.py (986 lines: lifecycle + gates)
+full_translate_driver.py (813 lines: lifecycle + diagnostics)
     ├─ translation_runtime.py (gpt-academic adapters + bounded scheduler)
-    └─ latex_pipeline.py (TeX repair + compile fallback)
+    └─ latex_pipeline.py (TeX repair + publication gates + compile fallback)
     ↓ chunk v45 policy + structural guards + shared quality gate
     ↓
 data/papers/<arxiv_id>_zh.pdf
@@ -187,7 +187,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 修复 topic PDF 编译失败：为 listing/inputenc 补 `\inputencodingname`，为 CIDR/ACM/fontspec 风格模板补安全 no-op 和 `baselinestretch` guard reset，恢复 `2606.26080`、`2606.29823`。
 - [x] `retry-pdf` 增加 paper store 状态一致性同步，自动把已有中文 PDF 但 JSON 仍 failed 的历史残留回写为 `ok`。
 - [x] `retry-pdf` 增加 ok-but-missing 降级重试：索引标 `pdf_status=ok` 但 paper store PDF 缺失时自动进入缓存重编译/全文重译，补回 `2606.29296`、`2606.29445` 等缺失 PDF。
-- [x] 将 `full_translate_driver.py` 的 TeX patch/编译迁移到 `paperhub/latex_pipeline.py`，将 gpt-academic 适配迁移到 `paperhub/translation_runtime.py`，driver 收敛到 986 行。
+- [x] 将 `full_translate_driver.py` 的 TeX patch/编译/门禁迁移到 `paperhub/latex_pipeline.py`，将 gpt-academic 适配迁移到 `paperhub/translation_runtime.py`，driver 收敛到 813 行；编译 patch 同时绑定 `latex_toolbox` 与 `latex_actions`，并恢复源文件丢失的自定义宏。
 - [x] 建立稳定的翻译/编译失败 taxonomy、JSON sidecar、聚合报告和 retry strategy，后续按 category 直接定位。
 - [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。
 - [x] 为 gpt-academic LaTeX splitter 增加普通正文扩展翻译补丁，避免 preserve 节点吞掉正文。

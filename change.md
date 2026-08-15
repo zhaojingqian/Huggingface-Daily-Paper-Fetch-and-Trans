@@ -2,6 +2,15 @@
 
 ---
 
+## v4.39 — 2026-08-16
+
+### 门禁边界重构与编译超时/宏恢复修复
+
+- **职责收敛**：`full_translate_driver.py` 从 986 行降到 813 行；容器内 PDF、翻译质量和编译健康门禁统一由 `paperhub/latex_pipeline.py` 持有，driver 只保留生命周期、源码缓存、请求生命周期和诊断。
+- **编译超时**：同时替换 `latex_toolbox` 与 `latex_actions` 保存的 `compile_latex_with_timeout` 引用，避免插件主路径绕过 300 秒进程组超时并长期卡在 `xdvipdfmx`。
+- **通用 patch**：从原始 sibling/preamble 恢复翻译阶段丢失且仍被使用的自定义宏，使用幂等 `providecommand`；`2608.13179` 已通过 compile-only 修复，中文覆盖 87.4%、编译健康通过。
+- **验证与发布**：focused 192 项通过；全量审计无坏 JSON、索引总数错配或缺失翻译，远端提交 `271b8de` 已同步。
+
 ## v4.38 — 2026-08-15
 
 ### 翻译层减法重构、DeepSeek 源注册与 50 并发
