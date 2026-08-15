@@ -992,6 +992,21 @@ Language: Chinese
             filters.llm_translation_response_untranslated(command, command)
         )
 
+    def test_inline_translation_prompt_template_is_source_data(self):
+        template = (
+            r"Translate the following sentence from English to \{lang\}.\\ "
+            r"For example:\\ sentence: Television reports show white smoke "
+            r"coming from the plant.\\ translation: \{trans\}"
+        )
+        self.assertTrue(filters.is_inline_prompt_source_data_block(template))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(template, template)
+        )
+
+    def test_bracketed_heading_with_reference_is_structural(self):
+        heading = r"[Strength and character of Assumption~\ref{ass:approx}]"
+        self.assertTrue(filters.is_bracketed_heading_fragment(heading))
+
     def test_multiline_verbatim_input_stays_one_structural_unit(self):
         lines = (
             r"\VerbatimInput[",

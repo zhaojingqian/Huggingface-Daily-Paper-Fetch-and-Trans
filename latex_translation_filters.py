@@ -1104,6 +1104,13 @@ PROMPT_TEMPLATE_LINE_RE = re.compile(
     r"|\b(?:query|answer)\s*:"
     r")"
 )
+TRANSLATION_PROMPT_TEMPLATE_RE = re.compile(
+    r"(?is)\btranslate\s+the\s+following\s+"
+    r"(?:sentence|text|paragraph)\s+from\s+english\s+to\s+"
+    r"(?:\\\s*)?\{?\s*lang\s*(?:\\\s*)?\}?.*?"
+    r"\bfor\s+example\b.*?"
+    r"\b(?:sentence|translation)\s*:"
+)
 
 # Some appendices print an LLM's *own* XML/JSON prompt verbatim without a
 # dedicated LaTeX code environment.  Passing those instructions back to the
@@ -1173,6 +1180,8 @@ def is_inline_prompt_source_data_block(text: str) -> bool:
     """
     value = extract_translation_fragment(text)
     if _is_single_line_source_instruction(value):
+        return True
+    if TRANSLATION_PROMPT_TEMPLATE_RE.search(value):
         return True
     if not value.strip() or not INLINE_SOURCE_DATA_START_RE.search(value):
         return False
@@ -2030,6 +2039,14 @@ def is_bracketed_heading_fragment(text: str) -> bool:
     ):
         return False
     inner = value[1:-1].strip()
+    # A heading may carry a trailing reference; the command name is not part
+    # of the title and must not lower the title-likeness score.
+    inner = re.sub(
+        r"\\(?:ref|eqref|autoref|cref|Cref|pageref|cite[a-z]*)\\*?"
+        r"(?:\[[^\]]*\])*\{[^{}]*\}",
+        " ",
+        inner,
+    )
     if re.search(r"[.!?。！？:]", inner):
         return False
     tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", inner)
