@@ -14,9 +14,6 @@ from typing import Dict
 import latex_translation_filters as filters
 
 
-LATEX_COMMAND_RE = re.compile(
-    r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?"
-)
 COMMAND_RE = re.compile(r"^\s*\\([A-Za-z@]+)")
 WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z-]{2,}\b")
 
