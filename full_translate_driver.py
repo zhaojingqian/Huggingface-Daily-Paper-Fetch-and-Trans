@@ -8,6 +8,10 @@ import sys, os, glob, time, shutil
 import latex_translation_filters as _ltf
 from failure_taxonomy import classify_failure
 try:
+    from translation_policy import bounded_int as _bounded_policy_int
+except ImportError:
+    from paperhub.translation_policy import bounded_int as _bounded_policy_int
+try:
     # Container deployment copies this support module beside the driver.
     from residual_translation import (
         candidate_line_numbers as _residual_candidate_lines,
@@ -103,20 +107,11 @@ _cfg.read_single_conf_with_lru_cache = _patched_read
 
 import requests as _req
 _OrigSession = _req.Session
-def _bounded_positive_int_env(name, default, minimum, maximum):
-    """Read an operator-controlled timeout without making the driver fragile."""
-    try:
-        value = int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, min(maximum, value))
-
-
-_LLM_HTTP_TIMEOUT = _bounded_positive_int_env(
+_LLM_HTTP_TIMEOUT = _bounded_policy_int(
     "PAPER_TRANS_LLM_HTTP_TIMEOUT",
     120,
-    5,
-    3600,
+    minimum=5,
+    maximum=3600,
 )
 
 # arXiv source retrieval is deliberately bounded separately from LLM requests.
@@ -124,26 +119,28 @@ _LLM_HTTP_TIMEOUT = _bounded_positive_int_env(
 # periodically can otherwise hold the global translation lock forever.  Keep
 # these knobs operator-configurable, but put safe ceilings on each attempt and
 # on the complete proxy/direct fallback sequence.
-_SOURCE_DOWNLOAD_CONNECT_TIMEOUT = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_CONNECT_TIMEOUT", 15, 5, 60,
+_SOURCE_DOWNLOAD_CONNECT_TIMEOUT = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_CONNECT_TIMEOUT", 15, minimum=5, maximum=60,
 )
-_SOURCE_DOWNLOAD_READ_TIMEOUT = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_READ_TIMEOUT", 90, 15, 300,
+_SOURCE_DOWNLOAD_READ_TIMEOUT = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_READ_TIMEOUT", 90, minimum=15, maximum=300,
 )
-_SOURCE_DOWNLOAD_ATTEMPT_SECONDS = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_ATTEMPT_SECONDS", 300, 60, 1800,
+_SOURCE_DOWNLOAD_ATTEMPT_SECONDS = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_ATTEMPT_SECONDS", 300, minimum=60, maximum=1800,
 )
-_SOURCE_DOWNLOAD_TOTAL_SECONDS = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_TOTAL_SECONDS", 600, 120, 3600,
+_SOURCE_DOWNLOAD_TOTAL_SECONDS = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_TOTAL_SECONDS", 600, minimum=120, maximum=3600,
 )
-_SOURCE_DOWNLOAD_RATE_GRACE_SECONDS = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_RATE_GRACE_SECONDS", 45, 10, 300,
+_SOURCE_DOWNLOAD_RATE_GRACE_SECONDS = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_RATE_GRACE_SECONDS", 45, minimum=10, maximum=300,
 )
-_SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_MIN_BYTES_PER_SECOND", 8 * 1024, 1024, 512 * 1024,
+_SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_MIN_BYTES_PER_SECOND", 8 * 1024,
+    minimum=1024, maximum=512 * 1024,
 )
-_SOURCE_DOWNLOAD_MAX_BYTES = _bounded_positive_int_env(
-    "PAPER_TRANS_SOURCE_MAX_BYTES", 512 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024 * 1024,
+_SOURCE_DOWNLOAD_MAX_BYTES = _bounded_policy_int(
+    "PAPER_TRANS_SOURCE_MAX_BYTES", 512 * 1024 * 1024,
+    minimum=1024 * 1024, maximum=2 * 1024 * 1024 * 1024,
 )
 
 
