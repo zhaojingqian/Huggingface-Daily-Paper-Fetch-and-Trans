@@ -35,6 +35,11 @@ def _recovery_file() -> str:
     return os.environ.get("PAPER_TRANS_RECOVERY_FILE", "").strip()
 
 
+def _canonical_recovery_source(value) -> str:
+    """Normalize only transport whitespace used to identify a chunk."""
+    return str(value or "").replace("\r\n", "\n").strip()
+
+
 def _load_translation_recovery(sources):
     """Load valid chunk responses from the disposable-runtime recovery ledger."""
     path = _recovery_file()
@@ -52,19 +57,41 @@ def _load_translation_recovery(sources):
     model = os.environ.get("PAPER_TRANS_EFFECTIVE_MODEL", "")
     if payload.get("model", "") != model:
         return {}
-    recovered = {}
+    stored_by_index = {}
+    stored_by_source = {}
     for item in payload.get("items", []):
         if not isinstance(item, dict):
             continue
         index = item.get("index")
+        source = _canonical_recovery_source(item.get("source"))
+        if not isinstance(index, int) or not source:
+            continue
+        stored_by_index[index] = item
+        stored_by_source.setdefault(source, []).append(item)
+
+    recovered = {}
+    used_items = set()
+    for index, source_value in enumerate(sources):
+        source = _canonical_recovery_source(source_value)
+        item = stored_by_index.get(index)
+        if item is None or _canonical_recovery_source(item.get("source")) != source:
+            candidates = stored_by_source.get(source, [])
+            item = next(
+                (candidate for candidate in candidates
+                 if id(candidate) not in used_items),
+                None,
+            )
+        if item is None:
+            continue
+        used_items.add(id(item))
         response = str(item.get("response") or "")
-        if not isinstance(index, int) or not 0 <= index < len(sources):
+        if not response:
             continue
-        if item.get("source") != sources[index] or not response:
+        if _ltf.llm_translation_response_quota_failed(response):
             continue
-        if _ltf.llm_translation_response_invalid(sources[index], response):
+        if _ltf.llm_translation_response_invalid(source_value, response):
             continue
-        if _ltf.llm_translation_response_untranslated(sources[index], response):
+        if _ltf.llm_translation_response_untranslated(source_value, response):
             continue
         recovered[index] = response
     return recovered
@@ -81,6 +108,8 @@ def _save_translation_recovery(sources, payload):
             break
         response = str(response or "")
         if not response:
+            continue
+        if _ltf.llm_translation_response_quota_failed(response):
             continue
         if _ltf.llm_translation_response_invalid(sources[index], response):
             continue
@@ -812,6 +841,10 @@ def _patch_latex_llm_rate_limit_handling():
         ]
         recovered = _load_translation_recovery(validation_sources)
         if recovered and not args and inputs:
+            print(
+                f"[driver] ♻️  已加载 {len(recovered)} 个已完成 chunk 恢复账本",
+                flush=True,
+            )
             missing = [
                 index for index in range(len(inputs))
                 if index not in recovered
