@@ -17,6 +17,7 @@ from pathlib import Path
 
 from paperhub import paper_store
 from paperhub.env_config import get_env, http_proxies
+from paperhub.http_client import fetch_text
 from paperhub.paths import PAPER_STORE_DIR, ROOT_DIR, TEX_BACKUP_DIR
 
 # 读取 gpt-academic 配置
@@ -44,45 +45,6 @@ HEADERS = {
 def _has_chinese(text):
     """检查字符串中是否包含中文字符"""
     return paper_store.has_chinese(text)
-
-
-def _fetch_with_retry(url, max_retries=4, timeout=30):
-    """带指数退避的 HTTP 请求：代理失败切直连，HTTP/网络错误重试。"""
-    use_proxy = True
-    last_exc = None
-    for attempt in range(max_retries):
-        proxies = http_proxies(use_proxy)
-        try:
-            resp = requests.get(url, headers=HEADERS, proxies=proxies, timeout=timeout)
-            resp.raise_for_status()
-            return resp.text
-        except requests.exceptions.ProxyError as e:
-            if use_proxy:
-                print("  ⚠️ arXiv 代理失败，切换直连...", flush=True)
-                use_proxy = False
-                last_exc = e
-                continue
-            last_exc = e
-        except (requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"  ⚠️ arXiv 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
-            if use_proxy:
-                print("  ⚠️ 切换直连重试...", flush=True)
-                use_proxy = False
-            elif attempt < max_retries - 1:
-                print(f"  ⚠️ 等待 {wait}s 后重试...", flush=True)
-                time.sleep(wait)
-        except Exception as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"  ⚠️ arXiv 请求失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
-            if attempt < max_retries - 1:
-                print(f"  ⚠️ 等待 {wait}s 后重试...", flush=True)
-                time.sleep(wait)
-    raise last_exc or Exception("arXiv 请求失败")
 
 
 # ── Paper Store 读写 ──────────────────────────────────────────────────────────
@@ -279,7 +241,13 @@ def fetch_arxiv_metadata(arxiv_id, use_proxy=True):
     url = f"https://export.arxiv.org/abs/{arxiv_id}"
 
     try:
-        html = _fetch_with_retry(url, timeout=30)
+        html = fetch_text(
+            url,
+            headers=HEADERS,
+            use_proxy=use_proxy,
+            timeout=30,
+            log_prefix="arxiv",
+        )
 
         # 标题
         title = ""

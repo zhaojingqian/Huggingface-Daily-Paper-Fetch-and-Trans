@@ -6,10 +6,8 @@
 import re
 import sys
 import json
-import time
-import requests
 from collections import OrderedDict
-from paperhub.env_config import http_proxies
+from paperhub.http_client import fetch_text
 from paperhub.modes import mode_spec
 
 HEADERS = {
@@ -20,48 +18,6 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en-US,en;q=0.9",
 }
-
-
-def _fetch_with_retry(url, max_retries=4, timeout=30):
-    """
-    带指数退避的 HTTP 请求：先走代理，代理失败自动切直连，网络/SSL 错误最多重试 max_retries 次。
-    """
-    use_proxy = True
-    last_exc = None
-    for attempt in range(max_retries):
-        proxies = http_proxies(use_proxy)
-        try:
-            resp = requests.get(url, headers=HEADERS, proxies=proxies, timeout=timeout)
-            resp.raise_for_status()
-            return resp.text
-        except requests.exceptions.ProxyError as e:
-            if use_proxy:
-                print("[fetch] 代理失败，切换直连...", flush=True)
-                use_proxy = False
-                last_exc = e
-                continue
-            last_exc = e
-        except (requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"[fetch] 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
-            if attempt < max_retries - 1:
-                if use_proxy:
-                    print(f"[fetch] 切换直连重试...", flush=True)
-                    use_proxy = False
-                else:
-                    print(f"[fetch] 等待 {wait}s 后重试...", flush=True)
-                    time.sleep(wait)
-        except Exception as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"[fetch] 请求失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
-            if attempt < max_retries - 1:
-                print(f"[fetch] 等待 {wait}s 后重试...", flush=True)
-                time.sleep(wait)
-    raise last_exc or Exception("请求失败")
 
 
 def _parse_papers(html, limit):
@@ -130,7 +86,12 @@ def fetch_hf_papers(mode, key, limit=10, use_proxy=True):  # noqa: use_proxy kep
     print(f"[fetch] {mode.upper()} {key} -> {url}", flush=True)
 
     try:
-        html = _fetch_with_retry(url)
+        html = fetch_text(
+            url,
+            headers=HEADERS,
+            use_proxy=use_proxy,
+            log_prefix="fetch",
+        )
         papers = _parse_papers(html, limit)
         print(f"[fetch] 找到 {len(papers)} 篇", flush=True)
         return papers

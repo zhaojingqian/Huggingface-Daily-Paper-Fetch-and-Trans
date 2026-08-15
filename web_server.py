@@ -9,10 +9,10 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from datetime import datetime, date
 import urllib.request
 import xml.etree.ElementTree as ET
-import requests
 
 from paperhub import paper_store, topic_store
-from paperhub.env_config import admin_token, http_proxies
+from paperhub.env_config import admin_token
+from paperhub.http_client import fetch_text
 from paperhub.json_io import write_json_atomic
 from paperhub.publication_lock import (
     LOCK_EXCLUSIVE,
@@ -295,50 +295,16 @@ def _update_job(arxiv_id, **kw):
         _save_jobs(jobs)
 
 
-def _fetch_with_retry(url, max_retries=4, timeout=30):
-    """带指数退避的 HTTP 请求：先走代理，代理失败自动切直连。"""
-    use_proxy = True
-    last_exc = None
-    for attempt in range(max_retries):
-        proxies = http_proxies(use_proxy)
-        try:
-            resp = requests.get(url, headers=HTTP_HEADERS, proxies=proxies, timeout=timeout)
-            resp.raise_for_status()
-            return resp.text
-        except requests.exceptions.ProxyError as e:
-            if use_proxy:
-                print("[submit] arXiv 代理失败，切换直连...", flush=True)
-                use_proxy = False
-                last_exc = e
-                continue
-            last_exc = e
-        except (requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"[submit] arXiv 连接错误 (尝试 {attempt+1}/{max_retries}): {type(e).__name__}", flush=True)
-            if use_proxy:
-                print("[submit] 切换直连重试...", flush=True)
-                use_proxy = False
-            elif attempt < max_retries - 1:
-                print(f"[submit] 等待 {wait}s 后重试...", flush=True)
-                time.sleep(wait)
-        except Exception as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"[submit] arXiv 请求失败 (尝试 {attempt+1}/{max_retries}): {e}", flush=True)
-            if attempt < max_retries - 1:
-                print(f"[submit] 等待 {wait}s 后重试...", flush=True)
-                time.sleep(wait)
-    raise last_exc or Exception("arXiv 请求失败")
-
-
 def fetch_arxiv_meta(arxiv_id):
     """从 arXiv API 获取论文元数据"""
     clean_id = arxiv_id.strip().split("v")[0]
     url = "https://export.arxiv.org/api/query?id_list=" + clean_id
-    xml_data = _fetch_with_retry(url, timeout=30)
+    xml_data = fetch_text(
+        url,
+        headers=HTTP_HEADERS,
+        timeout=30,
+        log_prefix="submit",
+    )
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     root = ET.fromstring(xml_data)
     entry = root.find("atom:entry", ns)

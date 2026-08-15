@@ -378,6 +378,7 @@ paper-trans/
 ├── paperhub/
 │   ├── paths.py                 # 共享路径、paper store、容器默认名常量
 │   ├── env_config.py            # 本地 .env 读取 helper
+│   ├── http_client.py           # 统一代理/直连回退与有限退避的 HTTP GET
 │   ├── modes.py                 # mode 限额、周期和 cron 语义
 │   ├── runner.py                # daily/weekly/monthly 共享 CLI runner
 │   ├── json_io.py               # 原子 JSON 读写
