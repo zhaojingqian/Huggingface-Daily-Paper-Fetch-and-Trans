@@ -67,6 +67,18 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             "latex_brace_balance_mismatch",
         )
 
+    def test_normalize_response_restores_missing_text_macro_opening_brace(self):
+        source = r"\textbf{Quality control}: resolution is constrained."
+        translated = r"\textbf质量控制 }：分辨率受限。"
+
+        normalized = filters.normalize_llm_translation_response(source, translated)
+
+        self.assertEqual(normalized, r"\textbf{质量控制 }：分辨率受限。")
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
+
     def test_reference_commands_may_follow_chinese_word_order(self):
         source = r"Accordingly, see Eq.~\eqref{eq:bayes} in Appendix~\ref{app:proof}."
         translated = r"因此，见附录~\ref{app:proof} 中的式~\eqref{eq:bayes}。"
@@ -2611,6 +2623,15 @@ Language: Chinese
         self.assertTrue(filters.is_person_name_catalog(names))
         self.assertFalse(filters.is_person_name_catalog(prose))
         self.assertFalse(filters.llm_translation_response_untranslated(names, names))
+
+    def test_contact_metadata_with_footnote_wrapper_is_structural(self):
+        source = (
+            r"\footnotetext{$\dagger$ Corresponding authors: "
+            r"lichao@example.com, qwye@example.org.}"
+        )
+
+        self.assertTrue(filters.is_contact_metadata_fragment(source))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
     def test_standalone_repository_path_is_structural(self):
         path = r"icloud-photos-downloader/icloud\_photos\_downloader"

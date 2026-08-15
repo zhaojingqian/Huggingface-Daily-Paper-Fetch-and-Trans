@@ -678,6 +678,21 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
     response_value = _rewrap_braced_prose_response(source_value, response_value)
     source_commands, source_citations = _critical_latex_signature(source_value)
 
+    # A model can preserve the command token but drop the opening brace of a
+    # text macro (``\\textbf质量控制 }``).  That output is structurally
+    # equivalent to the source after restoring exactly one missing argument
+    # delimiter; accepting it here avoids burning both bounded retries on a
+    # deterministic TeX typo.  Keep the repair narrow to known text commands,
+    # equal command/citation signatures, and a final brace balance match.
+    repaired = _repair_missing_text_command_braces(
+        source_value,
+        response_value,
+        source_commands,
+        source_citations,
+    )
+    if repaired != response_value:
+        response_value = repaired
+
     # Splitter boundaries can leave one or two braces belonging to the
     # surrounding TeX node outside the fragment.  Preserve that boundary when
     # the model drops it, but only when critical command/citation signatures
@@ -798,6 +813,72 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
     if inner_commands != source_commands or inner_citations != source_citations:
         return response_value
     return inner
+
+
+_TEXT_COMMAND_TOKEN_RE = re.compile(
+    r"\\(?P<name>textbf|textit|texttt|textsc|textrm|textsf|textsl|textup|"
+    r"textmd|textnormal|emph|underline|sout|uwave|colorbox|fcolorbox|"
+    r"captionof)\*?",
+    re.IGNORECASE,
+)
+
+
+def _command_argument_opening(text: str, end: int) -> int:
+    """Return the index after optional options, or ``-1`` for malformed use."""
+    index = end
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index < len(text) and text[index] == "*":
+        index += 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+    while index < len(text) and text[index] == "[":
+        closing = text.find("]", index + 1)
+        if closing < 0:
+            return -1
+        index = closing + 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+    return index
+
+
+def _repair_missing_text_command_braces(
+    source: str,
+    response: str,
+    source_commands: Tuple[str, ...],
+    source_citations: Tuple[Tuple[str, int], ...],
+) -> str:
+    """Restore one dropped opening brace in a known text macro response."""
+    source_matches = list(_TEXT_COMMAND_TOKEN_RE.finditer(source))
+    response_matches = list(_TEXT_COMMAND_TOKEN_RE.finditer(response))
+    if not source_matches or len(source_matches) != len(response_matches):
+        return response
+    if _critical_latex_signature(response)[0] != source_commands:
+        return response
+    if _critical_latex_signature(response)[1] != source_citations:
+        return response
+
+    malformed = []
+    for source_match, response_match in zip(source_matches, response_matches):
+        if source_match.group("name").lower() != response_match.group("name").lower():
+            return response
+        source_open = _command_argument_opening(source, source_match.end())
+        response_open = _command_argument_opening(response, response_match.end())
+        if source_open < 0 or response_open < 0:
+            return response
+        if source[source_open:source_open + 1] == "{" and response[response_open:response_open + 1] != "{":
+            malformed.append(response_open)
+        elif source[source_open:source_open + 1] != response[response_open:response_open + 1]:
+            return response
+    if len(malformed) != 1:
+        return response
+    opening = malformed[0]
+    candidate = response[:opening] + "{" + response[opening:]
+    if _unescaped_brace_balance(candidate) != _unescaped_brace_balance(source):
+        return response
+    if _critical_latex_signature(candidate) != (source_commands, source_citations):
+        return response
+    return candidate
 
 
 def normalize_llm_translation_payload(payload, sources: Iterable[str]) -> List[int]:
@@ -1819,14 +1900,20 @@ def is_structured_identifier_path(text: str) -> bool:
 def is_person_name_catalog(text: str) -> bool:
     """Recognize a standalone comma-separated author/contributor list."""
     value = extract_translation_fragment(text or "").strip()
+    # Author blocks often carry superscript affiliations and Unicode list
+    # punctuation (``、``) after the splitter detaches a footnote wrapper.
+    # Remove those non-name payloads before applying the conservative name
+    # shape check; a four-name block is still metadata, not prose.
+    value = MATH_SPAN_RE.sub(" ", value)
+    value = re.sub(r"\\(?:and|ampersand)\b", ",", value, flags=re.IGNORECASE)
     if re.search(r"[.!?。！？]", value):
         return False
     parts = [
         part.strip()
-        for part in re.split(r"\s*(?:,|;|\\and\b)\s*", value)
+        for part in re.split(r"\s*(?:,|;|，|、)\s*", value)
         if part.strip()
     ]
-    if len(parts) < 6:
+    if len(parts) < 3:
         return False
 
     def name_like(part: str) -> bool:
@@ -1840,6 +1927,30 @@ def is_person_name_catalog(text: str) -> bool:
         )
 
     return sum(name_like(part) for part in parts) / len(parts) >= 0.85
+
+
+_CONTACT_METADATA_RE = re.compile(
+    r"(?i)\b(?:corresponding|contact)\s+authors?\b|\bauthors?\s*:"
+)
+_EMAIL_ADDRESS_RE = re.compile(
+    r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"
+)
+
+
+def is_contact_metadata_fragment(text: str) -> bool:
+    """Recognize a footnote/line containing author contact metadata."""
+    value = extract_translation_fragment(text or "").strip()
+    if not value or len(value) > 700:
+        return False
+    if not _CONTACT_METADATA_RE.search(value) or not _EMAIL_ADDRESS_RE.search(value):
+        return False
+    # Keep ordinary explanatory prose eligible even when it mentions an
+    # address. Contact metadata has at most a short label, names, and emails.
+    probe = MATH_SPAN_RE.sub(" ", value)
+    probe = re.sub(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?", " ", probe)
+    probe = _EMAIL_ADDRESS_RE.sub(" ", probe)
+    words = re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", probe)
+    return len(words) <= 24
 
 
 def is_affiliation_metadata_fragment(text: str) -> bool:
@@ -2074,7 +2185,11 @@ def is_plain_prose_line_for_rescue(text: str) -> bool:
     value = (text or "").strip()
     if not value or value.startswith("%"):
         return False
-    if is_latex_metadata_line(value) or is_affiliation_metadata_fragment(value):
+    if (
+        is_latex_metadata_line(value)
+        or is_affiliation_metadata_fragment(value)
+        or is_contact_metadata_fragment(value)
+    ):
         return False
     if is_formatting_label_fragment(value) or is_unbalanced_latex_fragment(value):
         return False
@@ -2292,6 +2407,7 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
     if (
         is_structured_identifier_path(raw_source)
         or is_person_name_catalog(raw_source)
+        or is_contact_metadata_fragment(raw_source)
         or is_affiliation_metadata_fragment(raw_source)
         or is_graphics_path_fragment(raw_source)
         or is_formatting_label_fragment(raw_source)

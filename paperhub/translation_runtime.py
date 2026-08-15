@@ -23,7 +23,9 @@ except ImportError:
         retry_worker_count as _retry_worker_count,
     )
 
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v48-inline-code-prose"
+SPLITTER_CACHE_VERSION = (
+    "paper-trans-splitter-2026-08-15-v50-contact-metadata-brace-repair"
+)
 
 
 def _patch_latex_translation_splitter():
@@ -92,6 +94,7 @@ def _patch_latex_translation_splitter():
         if (
             _ltf.is_latex_key_value_option_list(stripped)
             or _ltf.is_affiliation_metadata_fragment(stripped)
+            or _ltf.is_contact_metadata_fragment(stripped)
             or _ltf.is_structural_input_command_fragment(stripped)
             or _ltf.is_graphics_path_fragment(stripped)
             or _ltf.is_formatting_label_fragment(stripped)
@@ -435,6 +438,7 @@ def _patch_latex_translation_splitter():
             return False
         if (
             _ltf.is_affiliation_metadata_fragment(stripped)
+            or _ltf.is_contact_metadata_fragment(stripped)
             or _ltf.is_structural_input_command_fragment(stripped)
             or _ltf.is_graphics_path_fragment(stripped)
             or _ltf.is_formatting_label_fragment(stripped)
