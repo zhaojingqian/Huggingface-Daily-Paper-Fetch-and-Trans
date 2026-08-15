@@ -23,7 +23,7 @@ except ImportError:
         retry_worker_count as _retry_worker_count,
     )
 
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v45-policy-bounded"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v46-heading-args"
 
 
 def _patch_latex_translation_splitter():

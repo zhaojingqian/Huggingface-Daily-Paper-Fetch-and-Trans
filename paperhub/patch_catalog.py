@@ -158,6 +158,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
     "compile.undefined_command": {
         "patches": (
             "patch_xelatex_compatibility_fallbacks",
+            "patch_aaai_xelatex_affiliations",
             "patch_fontawesome_legacy_aliases",
             "inspect_input_tex_siblings_for_fallbacks",
             "patch_spurious_cjk_command_escapes",
@@ -240,6 +241,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "patches": (
             "split_math_adjacent_short_prose",
             "split_heading_structure_units",
+            "split_heading_arguments_from_body",
             "preserve_bounded_split_boundaries",
             "enforce_normal_chunk_limit",
             "adaptively_subdivide_failed_structure_chunks",
@@ -276,6 +278,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "adaptively_subdivide_failed_structure_chunks",
             "protect_split_citation_payloads",
             "protect_structural_source_data",
+            "protect_email_and_tool_catalog_fragments",
             "restore_splitter_boundary_braces",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",

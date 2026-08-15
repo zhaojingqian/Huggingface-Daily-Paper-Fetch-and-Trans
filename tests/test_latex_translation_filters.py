@@ -115,6 +115,36 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertFalse(filters.is_structural_command_data_fragment(sentence))
         self.assertTrue(filters.llm_translation_response_untranslated(sentence, sentence))
 
+    def test_structural_author_command_can_pass_through_names(self):
+        source = r"\tocauthor{Subrat Prasad Panda, Blaise Genest, Arvind Easwaran}"
+
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+        self.assertEqual(filters.llm_translation_response_invalid(source, source), "")
+
+    def test_email_metadata_with_braced_local_parts_can_pass_through(self):
+        source = r"Email: \{osei.b, m.habib, vivan.poddar, fayazi\}@utah.edu"
+
+        self.assertTrue(filters.is_structural_command_data_fragment(source))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+
+    def test_marked_acronym_expansion_is_not_mixed_prose(self):
+        response = (
+            r"中文说明：\textbf{LEMUR}：\textbf{Le}arning to Align with "
+            r"\textbf{Mu}lti-Objective \textbf{R}einforcement Learning from "
+            r"Preference Feedback。"
+        )
+
+        self.assertEqual(filters.mixed_untranslated_english_clauses(response), [])
+
+    def test_verb_catalog_can_pass_through_opaque_tool_names(self):
+        source = (
+            r"\verb|Google Flights--6|, \verb|Google Flights--23|, "
+            r"\verb|Google Flights--35|"
+        )
+
+        self.assertTrue(filters.is_structural_command_data_fragment(source))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+
     def test_compact_colored_label_with_localized_connector_is_accepted(self):
         source = r"\textbf{\textcolor{iclrdeepblue}{SU-01} w/ TTS}"
         response = r"\textbf{\textcolor{iclrdeepblue}{SU-01} 带 TTS}"
@@ -1020,6 +1050,14 @@ Language: Chinese
             filters.llm_translation_response_untranslated(prose, prose)
         )
 
+    def test_detached_style_option_tail_is_structural(self):
+        fragment = "title={#1}, attach boxed title to top left={ xshift=8pt, yshift=-8pt"
+
+        self.assertTrue(filters.is_latex_key_value_option_list(fragment))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(fragment, fragment)
+        )
+
     def test_pure_latex_math_fragments_are_structural(self):
         fragments = (
             r"\text{Softmax}^*\left(\frac{\mathbf{Q}_t^{(l)}\left(\mathbf{P}^{(l)}_t\mathbf{W}_K^{(l)}\right)^\top}{\sqrt{d_k}}\right)&\text{Softmax}^*(\mathbf{Q}_t^{(l)})",
@@ -1383,11 +1421,38 @@ Language: Chinese
             (unit, False) for unit in units
         ])
 
-        self.assertEqual(len(units), 3)
-        self.assertEqual(len(merged), 3)
-        self.assertTrue(units[1].startswith(r"\paragraph"))
-        self.assertIn(r"\ref{tab:first}", units[1])
-        self.assertIn(r"\ref{tab:second}", units[2])
+        self.assertEqual(len(units), 6)
+        self.assertEqual(len(merged), 6)
+        self.assertTrue(units[2].startswith(r"\paragraph"))
+        self.assertNotIn(r"\ref{tab:first}", units[2])
+        self.assertIn("First result", units[3])
+        self.assertIn(r"\ref{tab:first}", units[3])
+        self.assertIn(r"\ref{tab:second}", units[5])
+
+    def test_heading_argument_split_keeps_balanced_nested_commands(self):
+        source = r"\paragraph{A result~\citep{smith2026}.} The body follows."
+
+        units = filters.split_translation_structural_units(source)
+
+        self.assertEqual(units[0], r"\paragraph{A result~\citep{smith2026}.}")
+        self.assertEqual(units[1], " The body follows.")
+
+    def test_xelatex_aaai_affiliation_fallback_is_idempotent(self):
+        source = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage[preprint]{aaai2027}" "\n"
+            r"\begin{document}" "\n"
+            r"\affiliations{}" "\n"
+            r"\maketitle"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(source)
+        again, second_count = filters.add_xelatex_compatibility_fallbacks(fixed)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(again, fixed)
+        self.assertIn(r"\providecommand{\aaai@affiliations}{}", fixed)
 
     def test_structure_dense_prose_uses_normal_first_pass_limit(self):
         citations = (

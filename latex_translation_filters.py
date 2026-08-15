@@ -846,7 +846,11 @@ def translation_retry_system_prompt(prompt: str, reason: str) -> str:
         instruction = (
             "\n\nOn this retry, translate every natural-language English word in the "
             "fragment; do not copy an English sentence or heading. Keep only "
-            "proper names, math, URLs, and LaTeX commands unchanged."
+            "proper names, math, URLs, and LaTeX commands unchanged. If the "
+            "fragment is an outer-brace-wrapped prose entry such as "
+            "{A scientific document corpus.}, the braces are TeX grouping, "
+            "not an identifier list: translate the prose inside them and "
+            "return the same outer braces."
         )
     else:
         instruction = STRUCTURAL_RETRY_INSTRUCTION
@@ -1184,6 +1188,22 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
     if len(value) < 7 or (not bracketed and not allow_unbracketed):
         return False
     inner = value[1:-1] if bracketed else value
+    # A splitter can detach the tail of a macro option while its final group
+    # brace remains in the next chunk (for example ``title={#1}, ...
+    # xshift=8pt``).  It is still configuration data, not translatable prose;
+    # recognize the narrow TeX markers before the balanced-list parser rejects
+    # the intentionally incomplete boundary.
+    if (
+        not bracketed
+        and _unescaped_brace_balance(inner) > 0
+        and re.search(
+            r"\{#\d+\}|\b(?:xshift|yshift|left|right|top|bottom|arc|sep|"
+            r"width|height|line\s+width)\s*=|\b(?:pt|em|mm|ex)\b",
+            inner,
+            re.IGNORECASE,
+        )
+    ):
+        return True
     if not bracketed and inner.rstrip().endswith(","):
         inner = inner.rstrip()[:-1].rstrip()
     items = _split_top_level_option_items(inner)
@@ -1537,6 +1557,33 @@ def is_short_structural_bridge_prose(text: str) -> bool:
     return letters >= 12 and len(words) >= 3
 
 
+def _hide_marked_acronym_expansions(text: str) -> str:
+    """Hide explicitly lettered acronym expansions from the prose probe.
+
+    A paper may deliberately retain an English expansion so its emphasized
+    initials spell a method name.  Requiring an all-caps head and two or more
+    marked initials keeps this exception narrower than a generic title/name
+    allow-list.
+    """
+    value = str(text or "")
+    head_re = re.compile(r"\\(?:textbf|textit)\{[A-Z]{2,}\}")
+    marker_re = re.compile(
+        r"\\(?:textbf|textit)\{[A-Z][a-z]?\}[A-Za-z][A-Za-z-]*"
+    )
+    for head in list(head_re.finditer(value)):
+        window_end = min(len(value), head.end() + 320)
+        window = value[head.end():window_end]
+        markers = list(marker_re.finditer(window))
+        if len(markers) < 2:
+            continue
+        start = head.end() + markers[0].start()
+        tail = value[start:window_end]
+        terminal = re.search(r"[,.;:!?)]|$", tail)
+        end = start + (terminal.start() if terminal else len(tail))
+        value = value[:start] + " " + value[end:]
+    return value
+
+
 def _mixed_language_probe(text: str) -> str:
     """Return ordinary prose while hiding literal English examples/code."""
     value = extract_translation_fragment(text)
@@ -1559,6 +1606,7 @@ def _mixed_language_probe(text: str) -> str:
         " ",
         value,
     )
+    value = _hide_marked_acronym_expansions(value)
     for _ in range(3):
         updated = re.sub(
             r"\\(?:emph|textit|texttt|underline|verb)\*?(?:\[[^\]]*\])?\{[^{}]*\}",
@@ -1872,15 +1920,33 @@ def is_structural_command_data_fragment(text: str) -> bool:
     if not value or len(value) > 500:
         return False
     if re.fullmatch(
-        r"(?is)(?:e[- ]?mail|email address)\s*:\s*[^\s@{}]+(?:\s*,\s*[^\s@{}]+)*@[^\s{}]+",
+        r"(?is)(?:e[- ]?mail|email address)\s*:\s*"
+        r"(?:\\?[{}]|[A-Za-z0-9._%+\-\s,])+@[^\s{}]+",
         value,
     ):
         return True
+    verb_pattern = re.compile(
+        r"\\verb\*?(?P<delimiter>[^A-Za-z0-9\s])"
+        r".*?(?P=delimiter)",
+        re.DOTALL,
+    )
+    verb_matches = verb_pattern.findall(value)
+    if verb_matches:
+        residual = verb_pattern.sub(" ", value)
+        residual = re.sub(r"\\[A-Za-z@]+\*?", " ", residual)
+        residual_words = [
+            word.lower() for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", residual)
+        ]
+        if not residual_words or all(
+            word in {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "use", "with"}
+            for word in residual_words
+        ):
+            return True
     commands = re.findall(r"\\([A-Za-z@]+)", value)
     opaque_commands = {
         "hfds", "dataset", "datasetpath", "repo", "repository", "path",
         "url", "nolinkurl", "href", "includegraphics", "lstinline",
-        "verb", "email", "emails", "handle",
+        "verb", "email", "emails", "handle", "tocauthor",
     }
     if not commands or not any(name.lower() in opaque_commands for name in commands):
         return False
@@ -2219,6 +2285,34 @@ def starts_translation_structural_unit(text: str) -> bool:
     return bool(TRANSLATION_STRUCTURAL_UNIT_RE.match((text or "").lstrip()))
 
 
+def _split_leading_heading_argument(text: str) -> List[str]:
+    """Separate a heading argument from the prose that follows it.
+
+    Keeping ``\\paragraph{...}`` with the following sentence makes the model
+    disproportionately likely to copy the short heading while translating the
+    body.  The command and its balanced argument form one request; the tail is
+    a second request.  Only a leading heading is split, so arbitrary braces in
+    ordinary prose remain untouched.
+    """
+    value = str(text or "")
+    match = re.match(
+        r"(?s)(?P<leading>\s*\\(?:section|subsection|subsubsection|"
+        r"paragraph|subparagraph)\*?\s*)\{",
+        value,
+    )
+    if not match:
+        return [value] if value else []
+    opening = match.end() - 1
+    closing = _matching_unescaped_brace(value, opening)
+    if closing < 0:
+        return [value]
+    heading_end = closing + 1
+    tail = value[heading_end:]
+    if not tail.strip():
+        return [value]
+    return [value[:heading_end], tail]
+
+
 def split_translation_structural_units(text: str) -> List[str]:
     """Split prose before headings so distinct semantic units stay separate."""
     value = str(text or "")
@@ -2229,11 +2323,15 @@ def split_translation_structural_units(text: str) -> List[str]:
     if not starts:
         return [value] if value else []
     boundaries = [0] + [start for start in starts if start > 0] + [len(value)]
-    return [
+    units = [
         value[boundaries[index]:boundaries[index + 1]]
         for index in range(len(boundaries) - 1)
         if boundaries[index] < boundaries[index + 1]
     ]
+    result: List[str] = []
+    for unit in units:
+        result.extend(_split_leading_heading_argument(unit))
+    return result
 
 
 def recommended_translation_chunk_limit(
@@ -2325,6 +2423,7 @@ def coalesce_translation_fragments(
             if (
                 not preserve
                 and not starts_translation_structural_unit(text)
+                and not starts_translation_structural_unit(result[-1][0])
                 and len(combined) <= combined_limit
             ):
                 previous, _ = result[-1]
@@ -2346,6 +2445,10 @@ def coalesce_translation_fragments(
             result
             and result[-1][1] == preserve
             and (preserve or not starts_translation_structural_unit(text))
+            and (
+                preserve
+                or not starts_translation_structural_unit(result[-1][0])
+            )
             and (
                 preserve
                 or len(combined) <= combined_limit
@@ -3078,6 +3181,21 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         # environments rather than the package declaration alone.
         and not _latex_command_defined(source, "CJK")
     )
+    # AAAI templates define ``\aaai@affiliations`` only in the pdfTeX branch
+    # of some releases.  The translated pipeline uses XeLaTeX, so a source
+    # that guards ``\affiliations`` with ``\ifpdf`` can reach ``\maketitle``
+    # with the internal macro undefined.  A no-op is safe when the class did
+    # define it and restores the XeLaTeX branch when it did not.
+    needs_aaai_affiliations_fallback = bool(
+        re.search(
+            r"\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\s*"
+            r"\{[^}]*\baaai20\d{2}\b[^}]*\}",
+            source,
+            flags=re.IGNORECASE,
+        )
+        and r"\affiliations" in source
+        and not _latex_command_defined(source, "aaai@affiliations")
+    )
 
     total = historical_repairs + legacy_cjk_setup_repairs
     if needs_inputencoding:
@@ -3210,6 +3328,20 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\ifcsname CJKfamily\endcsname\else\def\CJKfamily#1{}\fi",
         ])
         source, changed = _insert_latex_preamble_snippet(source, insertion, ["CJK"])
+        total += int(changed)
+
+    if needs_aaai_affiliations_fallback:
+        insertion = "\n".join([
+            r"% paper-trans fallback for AAAI XeLaTeX affiliation branch",
+            r"\makeatletter",
+            r"\providecommand{\aaai@affiliations}{}",
+            r"\makeatother",
+        ])
+        source, changed = _insert_latex_preamble_snippet(
+            source,
+            insertion,
+            ["aaai@affiliations", "affiliations"],
+        )
         total += int(changed)
 
     return source, total
