@@ -1006,6 +1006,16 @@ Language: Chinese
         self.assertFalse(
             filters.llm_translation_response_untranslated(template, template)
         )
+        state = {}
+        first, state = filters.inline_prompt_source_data_line_protected(
+            r"Translate the following sentence from English to \{lang\}.",
+            state,
+        )
+        second, state = filters.inline_prompt_source_data_line_protected(
+            r"For example: sentence: Television reports show white smoke.",
+            state,
+        )
+        self.assertEqual((first, second), (True, True))
 
     def test_bracketed_heading_with_reference_is_structural(self):
         heading = r"[Strength and character of Assumption~\ref{ass:approx}]"

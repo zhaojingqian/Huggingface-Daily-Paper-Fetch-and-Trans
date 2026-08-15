@@ -1111,6 +1111,11 @@ TRANSLATION_PROMPT_TEMPLATE_RE = re.compile(
     r"\bfor\s+example\b.*?"
     r"\b(?:sentence|translation)\s*:"
 )
+TRANSLATION_PROMPT_TEMPLATE_START_RE = re.compile(
+    r"(?is)\btranslate\s+the\s+following\s+"
+    r"(?:sentence|text|paragraph)\s+from\s+english\s+to\s+"
+    r"(?:\\\s*)?\{?\s*lang\b"
+)
 
 # Some appendices print an LLM's *own* XML/JSON prompt verbatim without a
 # dedicated LaTeX code environment.  Passing those instructions back to the
@@ -1219,9 +1224,13 @@ def inline_prompt_source_data_line_protected(line: str, state=None):
     current = dict(state or {})
     value = str(line or "")
     active = bool(current.get("active"))
+    template_active = bool(current.get("translation_template_active"))
     lines = int(current.get("lines", 0))
+    template_lines = int(current.get("translation_template_lines", 0))
     single_line = _is_single_line_source_instruction(value)
-    start = is_inline_prompt_source_data_block(value) or bool(
+    complete_template = bool(TRANSLATION_PROMPT_TEMPLATE_RE.search(value))
+    template_start = bool(TRANSLATION_PROMPT_TEMPLATE_START_RE.search(value))
+    start = complete_template or bool(
         INLINE_SOURCE_DATA_START_RE.search(value)
         and (
             INLINE_SOURCE_DATA_TAG_RE.search(value)
@@ -1229,9 +1238,11 @@ def inline_prompt_source_data_line_protected(line: str, state=None):
             or "template" in value.lower()
         )
     )
-    protected = single_line or active or start
+    protected = single_line or active or start or template_active or template_start
     if protected:
         lines += max(1, value.count("\n") + 1)
+    if template_active or (template_start and not complete_template):
+        template_lines += max(1, value.count("\n") + 1)
     close = bool(INLINE_SOURCE_DATA_END_RE.search(value))
     current["active"] = bool(
         (active or (start and not single_line))
@@ -1239,6 +1250,14 @@ def inline_prompt_source_data_line_protected(line: str, state=None):
         and lines < 1200
     )
     current["lines"] = lines if current["active"] else 0
+    current["translation_template_active"] = bool(
+        (template_active or (template_start and not complete_template))
+        and not close
+        and template_lines < 12
+    )
+    current["translation_template_lines"] = (
+        template_lines if current["translation_template_active"] else 0
+    )
     return protected, current
 
 
