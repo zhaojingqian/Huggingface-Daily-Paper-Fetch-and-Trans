@@ -24,7 +24,7 @@ class TranslateFullCommandTest(unittest.TestCase):
         self.assertIn("latex_pipeline.py", bundled)
         with open(translate_full.DRIVER_SCRIPT, encoding="utf-8") as handle:
             source = handle.read()
-        self.assertIn("from translation_quality import", source)
+        self.assertIn("translation_quality_ok as _translation_quality_ok", source)
 
     def test_passes_only_supported_llm_overrides_to_container(self):
         with mock.patch.dict(

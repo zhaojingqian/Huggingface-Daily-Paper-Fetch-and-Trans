@@ -9,10 +9,6 @@ import latex_translation_filters as _ltf
 from failure_taxonomy import classify_failure
 try:
     # Container deployment copies this support module beside the driver.
-    from translation_quality import (
-        analyze_tex as _analyze_translated_tex,
-        is_untranslated_prose as _is_untranslated_prose,
-    )
     from residual_translation import (
         candidate_line_numbers as _residual_candidate_lines,
         normalize_residual_response as _normalize_residual_response,
@@ -21,10 +17,6 @@ try:
     )
 except ImportError:
     # Keep direct host-side diagnostics/imports usable from the repository.
-    from paperhub.translation_quality import (
-        analyze_tex as _analyze_translated_tex,
-        is_untranslated_prose as _is_untranslated_prose,
-    )
     from paperhub.residual_translation import (
         candidate_line_numbers as _residual_candidate_lines,
         normalize_residual_response as _normalize_residual_response,
@@ -35,14 +27,26 @@ except ImportError:
 try:
     from latex_pipeline import (
         configure as _configure_latex_pipeline,
+        _compile_health_report,
         install_gpt_academic_patches as _install_gpt_academic_latex_patches,
+        latex_compile_health_ok as _latex_compile_health_ok,
+        latex_compile_health_only_stale_refs as _latex_compile_health_only_stale_refs,
+        pdf_integrity_ok as _pdf_integrity_ok,
         patch_and_recompile,
+        translation_quality_ok as _translation_quality_ok,
+        translation_quality_report as _translation_quality_report,
     )
 except ImportError:
     from paperhub.latex_pipeline import (
         configure as _configure_latex_pipeline,
+        _compile_health_report,
         install_gpt_academic_patches as _install_gpt_academic_latex_patches,
+        latex_compile_health_ok as _latex_compile_health_ok,
+        latex_compile_health_only_stale_refs as _latex_compile_health_only_stale_refs,
+        pdf_integrity_ok as _pdf_integrity_ok,
         patch_and_recompile,
+        translation_quality_ok as _translation_quality_ok,
+        translation_quality_report as _translation_quality_report,
     )
 
 sys.path.insert(0, '/gpt')
@@ -189,56 +193,15 @@ _plugin_msgs_full: list[str] = []
 _last_quality_report: dict = {}
 
 
-def translation_quality_report(workfolder: str) -> dict:
-    """Apply the shared repository/publication translated-TeX quality gate."""
-    trans_tex = os.path.join(workfolder, "merge_translate_zh.tex")
-    if not os.path.exists(trans_tex):
-        return {"ok": False, "reason": "missing merge_translate_zh.tex"}
-    report = _analyze_translated_tex(trans_tex)
-    report["ok"] = not _is_untranslated_prose(report)
-    report["samples"] = [
-        (sample["line"], sample["text"])
-        for sample in report.get("samples", [])
-    ]
-    return report
-
-
-def check_pdf_integrity(pdf_path: str) -> bool:
-    """Check that the PDF file exists, is larger than 50KB, and can be successfully parsed with pages."""
-    if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) < 50 * 1024:
-        return False
-    try:
-        import pypdf
-        reader = pypdf.PdfReader(pdf_path)
-        return len(reader.pages) > 0
-    except Exception as e:
-        print(f"[driver] ⚠️ PDF 完整性检查失败 ({os.path.basename(pdf_path)}): {e}", flush=True)
-        return False
+translation_quality_report = _translation_quality_report
+check_pdf_integrity = _pdf_integrity_ok
 
 
 def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
     global _last_quality_report
     report = translation_quality_report(workfolder)
     _last_quality_report = report
-    if not report.get("ok"):
-        print(
-            f"[driver] ❌ 翻译覆盖率检查失败: {arxiv_id_} "
-            f"cjk_pct={report.get('cjk_pct', 0):.1f}% "
-            f"long_english_lines={report.get('long_english_lines', 0)} "
-            f"prose_lines={report.get('prose_lines', 0)}",
-            flush=True,
-        )
-        for line_no, sample in report.get("samples", []):
-            print(f"[driver]    untranslated line {line_no}: {sample}", flush=True)
-        return False
-
-    print(
-        f"[driver] ✅ 翻译覆盖率检查通过: {arxiv_id_} "
-        f"cjk_pct={report.get('cjk_pct', 0):.1f}% "
-        f"long_english_lines={report.get('long_english_lines', 0)}",
-        flush=True,
-    )
-    return True
+    return _translation_quality_ok(workfolder, arxiv_id_)
 
 
 def repair_terminal_translation_residuals(workfolder: str, arxiv_id_: str) -> bool:
@@ -347,148 +310,12 @@ def repair_terminal_translation_residuals(workfolder: str, arxiv_id_: str) -> bo
     return repaired > 0 and bool(report.get("ok"))
 
 
-def _compile_health_report(workfolder: str) -> dict:
-    """Read one TeX log and classify all compile-health facts once."""
-    import re as _re
-
-    log_path = os.path.join(workfolder, "merge_translate_zh.log")
-    if not os.path.exists(log_path):
-        return {"exists": False, "complete": False, "failures": [], "warnings": []}
-    with open(log_path, encoding="utf-8", errors="replace") as f:
-        log = f.read()
-
-    primitive_re = _re.compile(
-        r"\\(?:" + "|".join(_re.escape(name) for name in _ltf.PDFTEX_PRIMITIVE_NAMES) + r")\b"
-    )
-    fatal_undefined = False
-    pdftex_undefined = False
-    for match in _re.finditer(r"Undefined control sequence", log):
-        context = log[match.start(): match.start() + 300]
-        if primitive_re.search(context):
-            pdftex_undefined = True
-        else:
-            fatal_undefined = True
-
-    failures = []
-    if fatal_undefined:
-        failures.append("undefined control sequence")
-    if _re.search(r"Missing number, treated as zero", log):
-        failures.append("missing number")
-
-    promoted = []
-    if _re.search(r"(?<!Package natbib Warning: )Citation .* undefined", log):
-        promoted.append("undefined citation")
-    if _re.search(r"Reference .* undefined", log):
-        promoted.append("undefined reference")
-    if _re.search(r"There were undefined references", log):
-        promoted.append("undefined references")
-
-    warnings = []
-    if _re.search(r"Package natbib Warning: .* undefined", log):
-        warnings.append("natbib undefined")
-    if pdftex_undefined:
-        warnings.append("pdftex primitive undef")
-
-    sample = ""
-    sample_re = _re.compile(
-        r".{0,120}(Missing number, treated as zero|"
-        r"(?<!Package natbib Warning: )Citation .* undefined|"
-        r"Reference .* undefined|There were undefined references|"
-        r"Label\(s\) may have changed|Rerun to get cross-references right|"
-        r"Package natbib Warning: .* undefined).{0,160}",
-        flags=_re.DOTALL,
-    )
-    sample_match = sample_re.search(log)
-    if sample_match:
-        sample = " ".join(sample_match.group(0).split())[:260]
-    fatal_sample = ""
-    if fatal_undefined:
-        for match in _re.finditer(r"Undefined control sequence", log):
-            context = log[match.start(): match.start() + 300]
-            if not primitive_re.search(context):
-                fatal_sample = " ".join(context[:200].split())[:260]
-                break
-
-    return {
-        "exists": True,
-        "complete": (
-            "Output written on merge_translate_zh.xdv" in log
-            or "Output written on merge_translate_zh.pdf" in log
-        ),
-        "failures": failures,
-        "promoted": promoted,
-        "warnings": warnings,
-        "sample": sample,
-        "fatal_sample": fatal_sample,
-    }
-
-
-def latex_compile_health_ok(workfolder: str, arxiv_id_: str, strict: bool = False) -> bool:
-    """Reject PDFs that compiled but still have unresolved TeX/cite/ref issues."""
-    report = _compile_health_report(workfolder)
-    if not report["exists"]:
-        print(
-            f"[driver] ⚠️  找不到编译日志，跳过健康检查: "
-            f"{os.path.join(workfolder, 'merge_translate_zh.log')}",
-            flush=True,
-        )
-        return True
-    if not report["complete"]:
-        print(
-            f"[driver] ❌ 编译健康检查失败: {arxiv_id_} 找不到输出写入标记，"
-            "编译日志不完整（可能已被 OOM 强杀）",
-            flush=True,
-        )
-        return False
-
-    failures = list(report["failures"])
-    warnings = list(report["warnings"])
-    if strict:
-        failures.extend(report["promoted"])
-    else:
-        warnings.extend(report["promoted"])
-
-    if warnings and not failures:
-        print(
-            f"[driver] ⚠️  编译健康警告(非致命): {arxiv_id_} "
-            f"warnings={', '.join(warnings)}",
-            flush=True,
-        )
-    if failures:
-        print(
-            f"[driver] ❌ 编译健康检查失败: {arxiv_id_} "
-            f"issues={', '.join(failures + warnings)}",
-            flush=True,
-        )
-        if report["sample"]:
-            print(f"[driver]    log: {report['sample']}", flush=True)
-        if report["fatal_sample"]:
-            print(f"[driver]    log: {report['fatal_sample']}", flush=True)
-        return False
-
-    print(f"[driver] ✅ 编译健康检查通过: {arxiv_id_}", flush=True)
-    return True
-
-
-def latex_compile_health_only_stale_refs(workfolder: str) -> bool:
-    """True when the shared health report contains only rerunnable ref warnings."""
-    report = _compile_health_report(workfolder)
-    if not report["exists"] or not report["complete"] or report["failures"]:
-        return False
-    if "undefined citation" in report["promoted"]:
-        return False
-    return bool(
-        "undefined reference" in report["promoted"]
-        or "undefined references" in report["promoted"]
-    )
+latex_compile_health_ok = _latex_compile_health_ok
+latex_compile_health_only_stale_refs = _latex_compile_health_only_stale_refs
 
 
 _configure_latex_pipeline(
     arxiv_cache_dir=ARXIV_CACHE_DIR,
-    check_pdf_integrity=check_pdf_integrity,
-    translation_quality_ok=translation_quality_ok,
-    latex_compile_health_ok=latex_compile_health_ok,
-    latex_compile_health_only_stale_refs=latex_compile_health_only_stale_refs,
 )
 
 
