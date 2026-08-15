@@ -23,7 +23,7 @@ except ImportError:
         retry_worker_count as _retry_worker_count,
     )
 
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v46-heading-args"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v47-inline-code-prose"
 
 
 def _patch_latex_translation_splitter():
@@ -118,6 +118,14 @@ def _patch_latex_translation_splitter():
         return (
             _text_has_translatable_prose(line, min_letters=32, min_words=5)
             or _ltf.is_short_structural_bridge_prose(line)
+            or (
+                _re.search(r"\\(?:texttt|verb)\b", line)
+                and _text_has_translatable_prose(
+                    line,
+                    min_letters=16,
+                    min_words=3,
+                )
+            )
         )
 
     def _append(nodes, text: str, preserve: bool, merge: bool = True):
