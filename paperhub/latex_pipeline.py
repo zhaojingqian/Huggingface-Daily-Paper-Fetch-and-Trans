@@ -459,18 +459,6 @@ def _extract_env_blocks(content, env):
     return blocks
 
 
-def _discover_tcb_listing_envs(content):
-    """从 \\newtcblisting{...} 定义中发现自定义 verbatim/listing 环境。"""
-    import re as _re
-    envs = set()
-    for pat in (
-        r'\\newtcblisting\s*\{([A-Za-z][A-Za-z0-9*_-]*)\}',
-        r'\\DeclareTCBListing\s*\{([A-Za-z][A-Za-z0-9*_-]*)\}',
-    ):
-        envs.update(_re.findall(pat, content))
-    return sorted(envs)
-
-
 def _discover_tcolorbox_envs(content):
     """从 \\newtcolorbox{...} 定义中发现普通 tcolorbox 环境。"""
     import re as _re
