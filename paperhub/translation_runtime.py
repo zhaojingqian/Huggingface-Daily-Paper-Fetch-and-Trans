@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-15-v50-contact-metadata-brace-repair"
+    "paper-trans-splitter-2026-08-15-v51-source-refusal-protection"
 )
 
 

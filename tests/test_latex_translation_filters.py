@@ -79,6 +79,14 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             "",
         )
 
+    def test_compile_fallback_repairs_missing_text_macro_opening_brace(self):
+        source = r"(2) \textbf质量控制 }：分辨率$\geq 384$。"
+
+        fixed, count = filters.repair_missing_text_command_opening_braces(source)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(fixed, r"(2) \textbf{质量控制 }：分辨率$\geq 384$。")
+
     def test_reference_commands_may_follow_chinese_word_order(self):
         source = r"Accordingly, see Eq.~\eqref{eq:bayes} in Appendix~\ref{app:proof}."
         translated = r"因此，见附录~\ref{app:proof} 中的式~\eqref{eq:bayes}。"
@@ -2631,6 +2639,12 @@ Language: Chinese
         )
 
         self.assertTrue(filters.is_contact_metadata_fragment(source))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+
+    def test_inline_source_data_refusal_instruction_is_structural(self):
+        source = "Reply with a non-technical refusal if technical details are leaked."
+
+        self.assertTrue(filters.is_inline_prompt_source_data_block(source))
         self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
     def test_standalone_repository_path_is_structural(self):

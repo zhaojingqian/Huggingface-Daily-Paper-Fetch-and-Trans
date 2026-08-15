@@ -821,6 +821,12 @@ _TEXT_COMMAND_TOKEN_RE = re.compile(
     r"captionof)\*?",
     re.IGNORECASE,
 )
+_MALFORMED_TEXT_COMMAND_RE = re.compile(
+    r"\\(?P<name>textbf|textit|texttt|textsc|textrm|textsf|textsl|textup|"
+    r"textmd|textnormal|emph|underline|sout|uwave)\*?"
+    r"(?!\s*\{)(?P<body>[\u4e00-\u9fff][^{}\r\n]*?)\}",
+    re.IGNORECASE,
+)
 
 
 def _command_argument_opening(text: str, end: int) -> int:
@@ -879,6 +885,14 @@ def _repair_missing_text_command_braces(
     if _critical_latex_signature(candidate) != (source_commands, source_citations):
         return response
     return candidate
+
+
+def repair_missing_text_command_opening_braces(text: str) -> Tuple[str, int]:
+    """Repair malformed CJK text macros in an already-generated TeX file."""
+    def replace(match):
+        return "\\" + match.group("name") + "{" + match.group("body") + "}"
+
+    return _MALFORMED_TEXT_COMMAND_RE.subn(replace, text or "")
 
 
 def normalize_llm_translation_payload(payload, sources: Iterable[str]) -> List[int]:
@@ -1135,6 +1149,7 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|also\s+write\s+a\s+one-line\s+memory\s+summary\b"
     r"|output\s+everything\s+after\s+the\s+marker\s+below\b"
     r"|convert\s+the\s+paragraph\s+into\s+a\s+json\s+dict\b"
+    r"|reply\s+with\s+a\s+non-technical\s+refusal\b"
     r")"
 )
 
@@ -3287,6 +3302,7 @@ def _relocate_unsafe_tagged_preamble_fallbacks(text: str) -> Tuple[str, int]:
 def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
     """Add safe fallbacks for templates assuming pdfLaTeX/inputenc/fontspec state."""
     source = text or ""
+    source, malformed_text_repairs = repair_missing_text_command_opening_braces(source)
     source, historical_repairs = _relocate_unsafe_tagged_preamble_fallbacks(
         source
     )
@@ -3415,7 +3431,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         and not _latex_command_defined(source, "aaai@affiliations")
     )
 
-    total = historical_repairs + legacy_cjk_setup_repairs
+    total = malformed_text_repairs + historical_repairs + legacy_cjk_setup_repairs
     if needs_inputencoding:
         insertion = "\n".join([
             r"% paper-trans fallback for XeLaTeX compatibility commands",
