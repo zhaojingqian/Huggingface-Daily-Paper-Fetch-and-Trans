@@ -16,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 
 from paperhub import paper_store
-from paperhub.env_config import get_env
-from paperhub.paths import PAPER_STORE_DIR, TEX_BACKUP_DIR
+from paperhub.env_config import get_env, http_proxies
+from paperhub.paths import PAPER_STORE_DIR, ROOT_DIR, TEX_BACKUP_DIR
 
 # 读取 gpt-academic 配置
 GPT_ACADEMIC_CONFIG = get_env(
@@ -29,7 +29,6 @@ GPT_ACADEMIC_CONFIG = get_env(
         "config_private.py",
     ),
 )
-PROXY = "http://127.0.0.1:7890"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -47,17 +46,12 @@ def _has_chinese(text):
     return paper_store.has_chinese(text)
 
 
-def _get_proxies(use_proxy):
-    # Empty string values explicitly disable proxy, including env-level proxy.
-    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
-
-
 def _fetch_with_retry(url, max_retries=4, timeout=30):
     """带指数退避的 HTTP 请求：代理失败切直连，HTTP/网络错误重试。"""
     use_proxy = True
     last_exc = None
     for attempt in range(max_retries):
-        proxies = _get_proxies(use_proxy)
+        proxies = http_proxies(use_proxy)
         try:
             resp = requests.get(url, headers=HEADERS, proxies=proxies, timeout=timeout)
             resp.raise_for_status()
@@ -242,7 +236,7 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3, response_format=N
     if response_format:
         payload["response_format"] = response_format
 
-    proxies = {"http": PROXY, "https": PROXY}
+    proxies = http_proxies(True)
     last_exc = None
 
     for attempt in range(max_retries):

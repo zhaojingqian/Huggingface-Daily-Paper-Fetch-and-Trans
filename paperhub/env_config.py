@@ -11,6 +11,7 @@ _LOADED = False
 # The generated gpt-academic runtime config is authoritative in production;
 # this fallback keeps standalone metadata translation on the same model.
 DEFAULT_TRANSLATION_MODEL = "deepseek-v4-flash-0731"
+DEFAULT_HTTP_PROXY = "http://127.0.0.1:7890"
 
 
 def _load_env_file(path):
@@ -51,6 +52,14 @@ def load_env():
 def get_env(name, default=""):
     load_env()
     return os.environ.get(name, default)
+
+
+def http_proxies(use_proxy=True):
+    """Return the shared requests proxy mapping for host-side integrations."""
+    if not use_proxy:
+        return {"http": "", "https": ""}
+    proxy = get_env("PAPER_TRANS_PROXY", DEFAULT_HTTP_PROXY) or DEFAULT_HTTP_PROXY
+    return {"http": proxy, "https": proxy}
 
 
 def admin_token():

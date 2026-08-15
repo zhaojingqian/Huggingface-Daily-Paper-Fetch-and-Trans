@@ -13,7 +13,7 @@ from urllib.parse import quote_plus
 import requests
 
 from paperhub import paper_store, topic_store
-from paperhub.env_config import get_env
+from paperhub.env_config import get_env, http_proxies
 from paperhub.json_io import read_json, write_json_atomic
 from paperhub.paths import (
     LOGS_DIR,
@@ -22,7 +22,6 @@ from paperhub.paths import (
 )
 
 
-PROXY = "http://127.0.0.1:7890"
 ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
 TOPIC_MODEL_DEFAULT = "claude-opus-4-8-thinking"
 TOPIC_SYSTEM_PROMPT = (
@@ -65,16 +64,12 @@ KNOWN_TOPIC_HINTS = {
 }
 
 
-def _get_proxies(use_proxy):
-    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
-
-
 def _http_get(url, timeout=30, max_retries=3):
     use_proxy = True
     last_exc = None
     for attempt in range(max_retries):
         try:
-            resp = requests.get(url, timeout=timeout, proxies=_get_proxies(use_proxy))
+            resp = requests.get(url, timeout=timeout, proxies=http_proxies(use_proxy))
             resp.raise_for_status()
             return resp.text
         except requests.exceptions.ProxyError as e:
@@ -117,7 +112,7 @@ def _call_topic_llm(messages, max_tokens=1200):
         "Content-Type": "application/json",
         "Authorization": "Bearer " + cfg["api_key"],
     }
-    proxies = _get_proxies(True)
+    proxies = http_proxies(True)
     last_exc = None
     for attempt in range(3):
         try:
@@ -125,12 +120,12 @@ def _call_topic_llm(messages, max_tokens=1200):
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except requests.exceptions.ProxyError as e:
-            proxies = _get_proxies(False)
+            proxies = http_proxies(False)
             last_exc = e
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.SSLError) as e:
             last_exc = e
             if proxies.get("https"):
-                proxies = _get_proxies(False)
+                proxies = http_proxies(False)
             elif attempt < 2:
                 time.sleep(2 ** attempt)
         except Exception as e:

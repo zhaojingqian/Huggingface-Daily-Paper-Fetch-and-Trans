@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 from paperhub import paper_store, topic_store
-from paperhub.env_config import admin_token
+from paperhub.env_config import admin_token, http_proxies
 from paperhub.json_io import write_json_atomic
 from paperhub.publication_lock import (
     LOCK_EXCLUSIVE,
@@ -79,7 +79,6 @@ UMAMI_SCRIPT = (
 )
 GPT_ACADEMIC_CONTAINER = gpt_academic_container()
 
-PROXY = "http://127.0.0.1:7890"
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -296,17 +295,12 @@ def _update_job(arxiv_id, **kw):
         _save_jobs(jobs)
 
 
-def _get_proxies(use_proxy):
-    # Empty string values explicitly disable proxy, including env-level proxy.
-    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
-
-
 def _fetch_with_retry(url, max_retries=4, timeout=30):
     """带指数退避的 HTTP 请求：先走代理，代理失败自动切直连。"""
     use_proxy = True
     last_exc = None
     for attempt in range(max_retries):
-        proxies = _get_proxies(use_proxy)
+        proxies = http_proxies(use_proxy)
         try:
             resp = requests.get(url, headers=HTTP_HEADERS, proxies=proxies, timeout=timeout)
             resp.raise_for_status()

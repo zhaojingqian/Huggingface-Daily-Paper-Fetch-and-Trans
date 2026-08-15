@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.render_gpt_academic_config import render_config, write_config
+from paperhub import env_config
 
 
 RUNTIME_ENV = {
@@ -19,6 +20,24 @@ RUNTIME_ENV = {
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_http_proxies_share_configured_endpoint_and_disable_cleanly(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PAPER_TRANS_PROXY": "http://proxy.example:8080"},
+            clear=True,
+        ), mock.patch.object(env_config, "_LOADED", True):
+            self.assertEqual(
+                env_config.http_proxies(True),
+                {
+                    "http": "http://proxy.example:8080",
+                    "https": "http://proxy.example:8080",
+                },
+            )
+            self.assertEqual(
+                env_config.http_proxies(False),
+                {"http": "", "https": ""},
+            )
+
     @mock.patch.dict(os.environ, RUNTIME_ENV, clear=True)
     def test_renderer_preserves_types_without_exposing_shell_syntax(self):
         namespace = {}

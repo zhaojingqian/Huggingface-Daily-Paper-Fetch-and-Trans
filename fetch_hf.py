@@ -11,7 +11,7 @@ import requests
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
-PROXY = "http://127.0.0.1:7890"
+from paperhub.env_config import http_proxies
 
 HEADERS = {
     "User-Agent": (
@@ -23,12 +23,6 @@ HEADERS = {
 }
 
 
-def _get_proxies(use_proxy):
-    # Returning empty string values explicitly disables proxy (including env vars).
-    # Returning None would fall through to env-level proxy settings.
-    return {"http": PROXY, "https": PROXY} if use_proxy else {"http": "", "https": ""}
-
-
 def _fetch_with_retry(url, max_retries=4, timeout=30):
     """
     带指数退避的 HTTP 请求：先走代理，代理失败自动切直连，网络/SSL 错误最多重试 max_retries 次。
@@ -36,7 +30,7 @@ def _fetch_with_retry(url, max_retries=4, timeout=30):
     use_proxy = True
     last_exc = None
     for attempt in range(max_retries):
-        proxies = _get_proxies(use_proxy)
+        proxies = http_proxies(use_proxy)
         try:
             resp = requests.get(url, headers=HEADERS, proxies=proxies, timeout=timeout)
             resp.raise_for_status()

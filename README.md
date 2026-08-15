@@ -490,7 +490,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 | 绑定地址 | 默认 `127.0.0.1`，可用 `BIND_HOST` 覆盖 |
 | 路径前缀 | `BASE_PATH=/paper` |
 | Docker 容器 | 代码默认 `gpt-academic-latex-slim`，可用 `GPT_ACADEMIC_CONTAINER` 覆盖；当前生产使用 full-TeX slim |
-| 网络代理 | `http://127.0.0.1:7890`，失败时部分请求会切直连 |
+| 网络代理 | 默认 `http://127.0.0.1:7890`，可用 `PAPER_TRANS_PROXY` 统一覆盖；失败时部分请求会切直连 |
 | Web 日志 | `logs/web.log` |
 
 systemd unit：
