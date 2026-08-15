@@ -300,6 +300,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_grader_output_directives",
             "protect_compiler_command_fragments",
             "preserve_citations_after_urls",
+            "protect_email_href_catalogs",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",

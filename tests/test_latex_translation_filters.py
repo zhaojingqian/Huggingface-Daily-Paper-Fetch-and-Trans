@@ -1039,6 +1039,16 @@ Language: Chinese
             filters.llm_translation_response_untranslated(source, response)
         )
 
+    def test_email_href_catalog_is_structural_metadata(self):
+        source = (
+            r"\href{yukang.cao@ntu.edu.sg}{yukang.cao@ntu.edu.sg}, "
+            r"\href{mailto:chenyang.si@nju.edu.cn}{chenyang.si@nju.edu.cn},"
+        )
+        self.assertTrue(filters.is_structural_command_data_fragment(source))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, source)
+        )
+
     def test_normalize_restores_missing_or_extra_citations(self):
         source = r"We report results~\cite{alpha2026} in this section."
         restored = filters.normalize_llm_translation_response(

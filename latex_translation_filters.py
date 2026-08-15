@@ -2348,6 +2348,12 @@ def is_structural_command_data_fragment(text: str) -> bool:
         and re.search(r"@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value)
     ):
         return True
+    if re.fullmatch(
+        r"(?is)\s*(?:\\href(?:\[[^\]]*\])?\{(?:mailto:)?[^{}\s@]+@[^{}\s@]+\}"
+        r"\{[^{}\s@]+@[^{}\s@]+\}\s*(?:[,;]\s*)?)+",
+        value,
+    ):
+        return True
     if (
         re.match(
             r"(?i)^\s*(?:g\+\+|gcc|g\+|clang\+\+|clang|rustc|javac|java|"
