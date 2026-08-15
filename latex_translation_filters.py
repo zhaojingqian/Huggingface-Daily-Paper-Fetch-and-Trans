@@ -16,6 +16,38 @@ from pathlib import PurePosixPath
 from typing import Iterable, List, Optional, Set, Tuple
 
 
+def rank_main_tex_candidate(path: str, content: str, candidates: Iterable[str]) -> int:
+    """Rank a TeX file as an entrypoint without guessing from prose volume.
+
+    A source tree may contain both an entrypoint (usually ``main.tex``) and a
+    body file with its own commented/documentclass preamble.  Word-count
+    scoring cannot distinguish them and can select the body, dropping the
+    entrypoint's layout/packages.  Prefer a conventional entrypoint and use
+    the explicit ``input/include`` relationship as the general tie-breaker.
+    """
+    value = _without_unescaped_comments(content or "")
+    basename = PurePosixPath(str(path).replace("\\", "/")).name.lower()
+    names = {
+        PurePosixPath(str(candidate).replace("\\", "/")).name.lower(): candidate
+        for candidate in candidates
+    }
+    stems = {PurePosixPath(name).stem: candidate for name, candidate in names.items()}
+    references = {
+        PurePosixPath(ref.strip()).name.lower()
+        for ref in re.findall(r"\\(?:input|include)\s*\{([^{}]+)\}", value)
+    }
+    referenced_stems = {PurePosixPath(ref).stem for ref in references}
+
+    score = 0
+    if basename in {"main.tex", "paper.tex", "root.tex", "manuscript.tex", "article.tex"}:
+        score += 100
+    if basename in {"paper_body.tex", "body.tex", "content.tex"}:
+        score -= 100
+    if referenced_stems & set(stems):
+        score += 20
+    return score
+
+
 SOFT_TEXT_ENVS = frozenset({
     "tabular", "tabular*", "tabularx", "longtable", "array",
     "algorithmic", "algorithmic*", "algorithm2e",

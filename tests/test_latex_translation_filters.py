@@ -9,6 +9,15 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_main_tex_rank_prefers_entrypoint_over_imported_body(self):
+        candidates = ["extract/paper_body.tex", "extract/main.tex"]
+        body = r"\documentclass{article} \section{Body} \ref{x} \cite{key}"
+        entrypoint = r"\documentclass{qwenreport} \input{paper_body.tex}"
+        self.assertGreater(
+            filters.rank_main_tex_candidate("extract/main.tex", entrypoint, candidates),
+            filters.rank_main_tex_candidate("extract/paper_body.tex", body, candidates),
+        )
+
     def test_latex_prose_probe_keeps_custom_macro_human_argument(self):
         value = (
             r"\compactbullet{If \(m\) is irrational, then the line can "

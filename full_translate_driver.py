@@ -270,6 +270,7 @@ if _latex_toolbox_spec:
             for w in expected_words:
                 if w in content:
                     s += 1
+            s += _ltf.rank_main_tex_candidate(texf, content, candidates)
             scores.append(s)
         best = candidates[int(_np.argmax(scores))]
         print(f"[driver] ✅ 主 Tex 文件 (多候选, scores={dict(zip([_os.path.basename(c) for c in candidates], scores))}): {best}", flush=True)
