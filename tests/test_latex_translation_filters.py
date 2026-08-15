@@ -1021,6 +1021,24 @@ Language: Chinese
         heading = r"[Strength and character of Assumption~\ref{ass:approx}]"
         self.assertTrue(filters.is_bracketed_heading_fragment(heading))
 
+    def test_normalize_restores_dropped_leading_paragraph_heading(self):
+        source = r"\paragraph{Immediate Reward} we first update the reward."
+        response = "我们首先更新奖励。"
+        normalized = filters.normalize_llm_translation_response(source, response)
+        self.assertTrue(normalized.startswith(r"\paragraph{Immediate Reward}"))
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
+
+    def test_email_macro_is_structural_metadata(self):
+        source = r"\emailtext{~Email: \{name\}@ornith.ai}"
+        response = r"\emailtext{~邮箱：\{name\}@ornith.ai}"
+        self.assertTrue(filters.is_structural_command_data_fragment(source))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
     def test_multiline_verbatim_input_stays_one_structural_unit(self):
         lines = (
             r"\VerbatimInput[",

@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-16-v58-prompt-lines"
+    "paper-trans-splitter-2026-08-16-v59-structure-normalize"
 )
 
 
@@ -950,6 +950,11 @@ def _patch_latex_llm_rate_limit_handling():
                         parts = adaptive_part_sources[start:start + count]
                         if len(group) != count:
                             continue
+                        combined = "".join(group)
+                        combined = _ltf.normalize_llm_translation_response(
+                            source,
+                            combined,
+                        )
                         if any(
                             _ltf.llm_translation_response_failed(response)
                             or _ltf.llm_translation_response_invalid(
@@ -963,7 +968,6 @@ def _patch_latex_llm_rate_limit_handling():
                             for part, response in zip(parts, group)
                         ):
                             continue
-                        combined = "".join(group)
                         if (
                             not _ltf.llm_translation_response_invalid(source, combined)
                             and not _ltf.llm_translation_response_untranslated(

@@ -693,6 +693,34 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
     if repaired != response_value:
         response_value = repaired
 
+    # A short leading paragraph heading can be dropped when the upstream
+    # splitter detaches its body.  Restore the exact source heading only when
+    # the response otherwise has the same citations and no competing critical
+    # command; this keeps structure deterministic without inventing a title.
+    heading_match = _SINGLE_HEADING_WRAPPER_RE.match(source_value)
+    if heading_match:
+        heading_open = heading_match.end() - 1
+        heading_close = _matching_unescaped_brace(source_value, heading_open)
+        if heading_close >= 0:
+            source_heading = source_value[:heading_close + 1]
+            response_commands, response_citations = _critical_latex_signature(
+                response_value
+            )
+            source_heading_commands, source_heading_citations = (
+                _critical_latex_signature(source_heading)
+            )
+            candidate = source_heading + response_value
+            if (
+                source_heading_commands
+                and not response_commands
+                and response_citations == source_heading_citations
+                and _critical_latex_signature(candidate)
+                == (source_commands, source_citations)
+                and _unescaped_brace_balance(candidate)
+                == _unescaped_brace_balance(source_value)
+            ):
+                response_value = candidate
+
     # Splitter boundaries can leave one or two braces belonging to the
     # surrounding TeX node outside the fragment.  Preserve that boundary when
     # the model drops it, but only when critical command/citation signatures
@@ -2276,6 +2304,11 @@ def is_structural_command_data_fragment(text: str) -> bool:
     if not value or len(value) > 500:
         return False
     if is_latex_configuration_command_fragment(value):
+        return True
+    if (
+        re.search(r"\\(?:emailtext|email)\b", value, flags=re.IGNORECASE)
+        and re.search(r"@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value)
+    ):
         return True
     if re.fullmatch(
         r"(?is)(?:e[- ]?mail|email address)\s*:\s*"
