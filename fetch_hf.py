@@ -7,17 +7,10 @@ import re
 import sys
 import json
 from collections import OrderedDict
-from paperhub.http_client import fetch_text
+from paperhub.http_client import DEFAULT_HEADERS, fetch_text
 from paperhub.modes import mode_spec
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+HEADERS = dict(DEFAULT_HEADERS)
 
 
 def _parse_papers(html, limit):
