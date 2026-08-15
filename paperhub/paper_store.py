@@ -211,29 +211,6 @@ def update_pdf_status(arxiv_id, status):
         return False
 
 
-def mark_pdf_quality_tainted(arxiv_id, reason="quality.untranslated_prose", tainted_at=""):
-    """Persist a quality taint independently from the mutable retry diagnosis."""
-    try:
-        with paper_publication_lock(
-            arxiv_id,
-            lock_dir=_paper_lock_dir(),
-        ):
-            data = read_raw(arxiv_id)
-            if not data:
-                return False
-            data["pdf_status"] = "failed"
-            data[PDF_QUALITY_TAINT_FIELD] = True
-            data[PDF_QUALITY_TAINT_REASON_FIELD] = str(
-                reason or "quality.unknown"
-            )
-            if tainted_at:
-                data[PDF_QUALITY_TAINT_AT_FIELD] = str(tainted_at)
-            _write_raw_unlocked(data)
-            return True
-    except Exception:
-        return False
-
-
 def mark_pdf_verified(arxiv_id):
     """Atomically clear a quality taint after a newly generated PDF is verified."""
     try:
