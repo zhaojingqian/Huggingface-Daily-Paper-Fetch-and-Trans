@@ -23,6 +23,41 @@ def load_failure_records(error_dir: str) -> List[Dict[str, object]]:
         data = read_json(str(path), {})
         if isinstance(data, dict):
             aid = str(data.get("arxiv_id") or path.stem)
+            # Stable precedence rules evolve. Re-evaluate embedded raw evidence
+            # for deterministic infrastructure/API causes even when an older
+            # sidecar already chose a generic plugin class.
+            phase = str(data.get("phase") or "translate")
+            embedded_plugin = "\n".join(
+                str(data.get(key) or "")
+                for key in ("plugin_error_full", "evidence")
+            )
+            embedded_latex = str(data.get("tex_log_tail") or "")
+            embedded = classify_failure(
+                phase,
+                embedded_latex if phase != "translate" else "",
+                embedded_plugin if phase == "translate" else embedded_plugin,
+            )
+            if (
+                embedded.get("category")
+                in {
+                    "infrastructure.disk_full",
+                    "translate.api_quota",
+                    "translate.api_auth",
+                    "quality.translation_chunk_invalid",
+                }
+                and embedded.get("category") != data.get("category")
+            ):
+                old_category = data.get("category")
+                preserved = {
+                    key: value
+                    for key, value in data.items()
+                    if key not in embedded and key not in {"category", "family"}
+                }
+                data = {
+                    **preserved,
+                    **embedded,
+                    "reclassified_from": old_category,
+                }
             # Older sidecars could only see the final compile result and therefore
             # labelled a translation-coverage rejection as compile.unknown. Prefer
             # the richer driver log when it can turn an unknown into a stable class.

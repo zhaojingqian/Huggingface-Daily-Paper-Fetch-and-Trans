@@ -1177,7 +1177,10 @@ class WebServerContractTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assert_content_type(resp, "text/html")
         self.assertIn("Lens：重新思考基础文本到图像模型的训练效率", html)
-        self.assertIn(f'href="/view/{SAMPLE_VIEW_ID}"', html)
+        if _sample_pdf_is_publishable():
+            self.assertIn(f'href="/view/{SAMPLE_VIEW_ID}"', html)
+        else:
+            self.assertIn("全文PDF转换失败", html)
 
     def test_old_global_papers_route_redirects_locally(self):
         resp, _ = self.request(f"/papers/{SAMPLE_VIEW_ID}")

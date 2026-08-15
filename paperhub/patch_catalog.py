@@ -5,11 +5,36 @@ from typing import Dict, Iterable, List
 
 
 PATCH_CATALOG: Dict[str, Dict[str, object]] = {
+    "infrastructure.disk_full": {
+        "patches": (
+            "preflight_translation_disk_watermark",
+            "cleanup_completed_retry_runtime_cache",
+            "daily_watermark_cache_cleanup",
+        ),
+        "source": (
+            "translate_full.py / scripts/cleanup_docker_cache.sh / "
+            "scripts/send_maintenance_alert.py"
+        ),
+        "strategy": "retry_later",
+        "note": (
+            "Errno 28 归为基础设施故障；翻译前检查磁盘，批量 retry 每篇结束后"
+            "清理可再生容器缓存，并由每日水位清理与 Gmail 告警兜底。"
+        ),
+    },
     "translate.api_quota": {
-        "patches": ("recharge_or_switch_authorized_model",),
-        "source": "config_private.py / PAPER_TRANS_LLM_MODEL",
+        "patches": (
+            "recharge_or_switch_authorized_model",
+            "propagate_quota_abort_to_outer_coordinator",
+        ),
+        "source": (
+            "config_private.py / PAPER_TRANS_LLM_MODEL / run_papers.py / "
+            "run_repair.py / topic_engine.py / scripts/send_maintenance_alert.py"
+        ),
         "strategy": "manual_review",
-        "note": "余额不足不做盲目重试；充值或显式切换到同一凭据可用且质量验证通过的模型。",
+        "note": (
+            "余额不足向最外层传播 abort_reason，停止剩余 index/topic/mode；"
+            "充值或显式切换到同一凭据可用且质量验证通过的模型。"
+        ),
     },
     "translate.api_auth": {
         "patches": ("fix_api_credentials",),
@@ -196,7 +221,11 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "note": "将插件相对工作目录锚定到容器绝对路径。",
     },
     "translate.source_missing": {
-        "patches": ("normalize_tex_include_target", "restore_source_manifest"),
+        "patches": (
+            "normalize_tex_include_target",
+            "preserve_dynamic_tex_include_targets",
+            "restore_source_manifest",
+        ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "restore_source",
         "note": "清理 input/include 路径空白并校验源码清单，再继续翻译。",
@@ -205,15 +234,24 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "patches": (
             "split_math_adjacent_short_prose",
             "split_heading_structure_units",
-            "cap_reference_dense_chunks",
             "preserve_bounded_split_boundaries",
-            "enforce_final_dynamic_chunk_limits",
-            "cap_short_prose_bridge_merges",
+            "enforce_normal_chunk_limit",
+            "adaptively_subdivide_failed_structure_chunks",
+            "repair_terminal_translation_residual_lines",
             "protect_split_citation_payloads",
+            "protect_short_citation_name_catalogs",
+            "allow_translated_prefix_name_catalogs",
             "detect_short_exact_english_echo",
             "normalize_citation_identity",
             "protect_translation_artifacts",
             "exclude_code_metadata_tikz_and_catalog_false_positives",
+            "protect_http_endpoint_catalogs",
+            "protect_detached_citation_key_lists",
+            "protect_structured_identifier_paths",
+            "protect_person_name_catalogs",
+            "protect_tool_call_result_fragments",
+            "protect_unbracketed_latex_option_lists",
+            "protect_pure_latex_math_fragments",
             "preserve_custom_text_macro_arguments",
             "promote_short_structural_bridge_prose",
             "validate_unescaped_brace_balance",
@@ -223,7 +261,17 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "按数学邻接、标题结构和引用密度细分正文，保留自定义文本宏参数并提升公式旁短 bridge；禁止后续合并越过动态上限，合并前校验花括号净平衡，再串行补齐失败 chunk。",
+        "note": "正常正文保持 1200 字符上下文；结构门禁失败时仅细分该 slot 串行重试。高覆盖 TeX 若只剩少量英文接缝，仅定向重译门禁行并按质量分数逐行提交，不再整篇重译。",
+    },
+    "quality.translation_chunk_invalid": {
+        "patches": (
+            "adaptively_subdivide_failed_structure_chunks",
+            "protect_split_citation_payloads",
+            "protect_structural_source_data",
+        ),
+        "source": "full_translate_driver.py / latex_translation_filters.py",
+        "strategy": "retry_translation",
+        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；只修改共享谓词或失败 slot 策略。",
     },
     "quality.pdf_sustained_untranslated": {
         "patches": (

@@ -15,6 +15,19 @@ from collections import Counter
 from pathlib import PurePosixPath
 from typing import Iterable, List, Optional, Set, Tuple
 
+try:
+    # The container bundles this module beside the driver as a flat support
+    # file; the host imports it through the paperhub package.
+    from translation_policy import (
+        DEFAULT_TRANSLATION_CHUNK_LIMIT,
+        translation_chunk_limit,
+    )
+except ImportError:
+    from paperhub.translation_policy import (
+        DEFAULT_TRANSLATION_CHUNK_LIMIT,
+        translation_chunk_limit,
+    )
+
 
 def rank_main_tex_candidate(path: str, content: str, candidates: Iterable[str]) -> int:
     """Rank a TeX file as an entrypoint without guessing from prose volume.
@@ -540,8 +553,8 @@ def _critical_latex_signature(
     This is intentionally a small structural subset, not a textual similarity
     check: normal Chinese translation may change every word, but it must not
     create a section, drop list items, or change a citation from the chunk.
-    Structural command order remains significant. Citation placement may move
-    naturally in Chinese. The command, star, keys, numeric locators, and
+    Non-reference structural command order remains significant. Reference
+    placement may move naturally in Chinese. The command, star, keys, numeric locators, and
     duplicate counts must remain exact; natural-language optional notes such
     as ``Figure`` may be translated.
     """
@@ -568,6 +581,25 @@ def _critical_latex_signature(
         for match in CITATION_IDENTITY_RE.finditer(value)
     ).items()))
     return commands, citations
+
+
+def _critical_commands_equivalent(
+    source_commands: Tuple[str, ...],
+    response_commands: Tuple[str, ...],
+) -> bool:
+    """Allow citation/reference commands to move with Chinese word order."""
+    if source_commands == response_commands:
+        return True
+    movable = {"cite", "citep", "citet", "citealt", "citealp", "ref", "eqref", "pageref", "autoref", "cref", "Cref"}
+    source_fixed = tuple(command for command in source_commands if command not in movable)
+    response_fixed = tuple(command for command in response_commands if command not in movable)
+    if source_fixed != response_fixed:
+        return False
+    return Counter(
+        command for command in source_commands if command in movable
+    ) == Counter(
+        command for command in response_commands if command in movable
+    )
 
 
 def llm_translation_structure_evidence(source: str, response: str):
@@ -749,7 +781,7 @@ def llm_translation_response_invalid(source: str, response: str) -> str:
 
     source_commands, source_citations = _critical_latex_signature(source)
     response_commands, response_citations = _critical_latex_signature(value)
-    if source_commands != response_commands:
+    if not _critical_commands_equivalent(source_commands, response_commands):
         return "critical_latex_structure_mismatch"
     if source_citations != response_citations:
         return "citation_structure_mismatch"
@@ -850,6 +882,19 @@ _CATALOG_PROSE_WORDS = {
 }
 _CATALOG_CONNECTOR_WORDS = {"and", "or", "plus", "with"}
 
+# These commands render an external source/code file.  Their optional style
+# list and path are TeX syntax, never translatable prose; a stateful line
+# policy below keeps a multiline invocation intact.
+STRUCTURAL_INPUT_COMMAND_RE = re.compile(
+    r"\\(?:VerbatimInput|verbatiminput|lstinputlisting|inputminted|"
+    r"includegraphics\*?|prompttext)\b",
+    re.IGNORECASE,
+)
+AFFILIATION_MARKER_RE = re.compile(
+    r"^\s*(?:\\(?:textsuperscript|affmark)\s*\{[^{}]+\}\s*)+",
+    re.IGNORECASE,
+)
+
 # High-precision signal for a *partial* Chinese translation.  These are
 # grammatical glue words, not a generic English-word blacklist: model names,
 # paper titles, table labels, code and citations must remain legal output.
@@ -886,14 +931,16 @@ INLINE_SOURCE_DATA_TAG_RE = re.compile(r"(?i)</?([a-z][a-z0-9_-]{2,})\b[^>]*>")
 INLINE_SOURCE_DATA_JSON_KEY_RE = re.compile(r'"[A-Za-z][A-Za-z0-9_-]{1,}"\s*:')
 INLINE_SOURCE_DATA_START_RE = re.compile(
     r"(?is)(?:"
-    r"\bprompt\s+(?:upsampler|engineer)\b(?=.*\b(?:json|xml|template)\b)"
+    r"\b[A-Z][A-Z0-9_]*_PROMPT_TEMPLATE\s*="
+    r"|\bprompt\s+(?:upsampler|engineer)\b(?=.*\b(?:json|xml|template)\b)"
     r"|\b(?:write|return|output)\b(?=.*<final_prompt>)(?=.*\b(?:json|template)\b)"
     r"|\b(?:all\s+top-level\s+keys|output_json_template|user\s+visual\s+request)\b"
     r"|\bstructured\s+json\b(?=.*\b(?:template|schema|every\s+top-level)\b)"
     r")"
 )
 INLINE_SOURCE_DATA_END_RE = re.compile(
-    r"(?i)(?:\\end\{(?:Verbatim|verbatim|lstlisting|minted|tcblisting)\}"
+    r"(?i)(?:\\end\{(?:Verbatim|verbatim|lstlisting|minted|tcblisting|"
+    r"tcolorbox|mybox)\}"
     r"|\\(?:section|subsection|subsubsection)\*?\{)"
 )
 SINGLE_LINE_OUTPUT_INSTRUCTION_RE = re.compile(
@@ -912,6 +959,9 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|you\s+must\s+output\b(?=.*\bexact\s+format\b)"
     r"|please\s+reason\s+step\s+by\s+step\b"
     r"(?=.*\bfinal\s+answer\b)(?=.*(?:boxed|\\texttt))"
+    r"|also\s+write\s+a\s+one-line\s+memory\s+summary\b"
+    r"|output\s+everything\s+after\s+the\s+marker\s+below\b"
+    r"|convert\s+the\s+paragraph\s+into\s+a\s+json\s+dict\b"
     r")"
 )
 
@@ -1082,21 +1132,31 @@ def _top_level_assignment(item: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-def is_bracketed_key_value_option_list(text: str) -> bool:
-    r"""Recognize a pure ``[key=value, ...]`` LaTeX configuration fragment.
-
-    Require at least two balanced assignments and reject sentence-like values.
-    This intentionally does not classify ordinary optional item labels such as
-    ``[This English prose ...]`` as structure.
-    """
+def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
+    """Recognize balanced LaTeX option data while rejecting prose values."""
     value = (text or "").strip()
-    if len(value) < 7 or not value.startswith("[") or not value.endswith("]"):
+    bracketed = value.startswith("[") and value.endswith("]")
+    if len(value) < 7 or (not bracketed and not allow_unbracketed):
         return False
-    items = _split_top_level_option_items(value[1:-1])
-    if not items or len(items) < 2 or any(not item for item in items):
+    inner = value[1:-1] if bracketed else value
+    if not bracketed and inner.rstrip().endswith(","):
+        inner = inner.rstrip()[:-1].rstrip()
+    items = _split_top_level_option_items(inner)
+    # Upstream can split the contents of a macro argument away from its
+    # opening command while leaving one or two outer macro-closing braces on
+    # the option fragment (for example ``title={#1}}``). Peel only trailing
+    # unmatched closers, then retain all strict key/value and prose checks.
+    if not bracketed:
+        trimmed_closers = 0
+        while items is None and trimmed_closers < 2 and inner.rstrip().endswith("}"):
+            inner = inner.rstrip()[:-1].rstrip()
+            trimmed_closers += 1
+            items = _split_top_level_option_items(inner)
+    minimum_items = 2 if bracketed else 3
+    if not items or len(items) < minimum_items or any(not item for item in items):
         return False
 
-    assignments = []
+    assignment_count = 0
     key_re = re.compile(
         r"/?[A-Za-z][A-Za-z0-9_.:/-]*"
         r"(?:[ \t]+[A-Za-z][A-Za-z0-9_.:/-]*){0,5}"
@@ -1107,7 +1167,11 @@ def is_bracketed_key_value_option_list(text: str) -> bool:
     for item in items:
         assignment = _top_level_assignment(item)
         if assignment is None:
-            return False
+            # tcolorbox/pgf lists commonly include bare boolean style keys
+            # such as ``breakable`` alongside assignments.
+            if not key_re.fullmatch(item):
+                return False
+            continue
         key, option_value = assignment
         if (
             not key
@@ -1120,8 +1184,55 @@ def is_bracketed_key_value_option_list(text: str) -> bool:
         prose_probe = re.sub(r"[^A-Za-z\s]", " ", prose_probe)
         if prose_value_re.search(prose_probe):
             return False
-        assignments.append(assignment)
-    return len(assignments) >= 2
+        assignment_count += 1
+    return assignment_count >= 2
+
+
+def is_bracketed_key_value_option_list(text: str) -> bool:
+    r"""Recognize a pure ``[key=value, ...]`` LaTeX configuration fragment."""
+    value = (text or "").strip()
+    if not value.startswith("[") or not value.endswith("]"):
+        return False
+    return _is_key_value_option_list(value, allow_unbracketed=False)
+
+
+def is_latex_key_value_option_list(text: str) -> bool:
+    r"""Recognize bracketed or splitter-detached LaTeX configuration lists.
+
+    Upstream can detach the contents of ``[...]`` into a standalone chunk.
+    Requiring three items and two assignments for the unbracketed form avoids
+    treating ordinary comma-separated paper prose as configuration.
+    """
+    return _is_key_value_option_list(text, allow_unbracketed=True)
+
+
+def is_pure_latex_math_fragment(text: str) -> bool:
+    r"""Recognize splitter-detached equations with no natural-language prose.
+
+    Some upstream equation chunks lose their surrounding math environment and
+    contain only commands such as ``\mathbf``, ``\text{diag}``, indices and
+    operators. A fragment containing ordinary grammatical glue remains
+    translatable.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value:
+        return False
+    commands = re.findall(r"\\[A-Za-z@]+", value)
+    math_symbols = re.findall(r"[{}_^=&+*/<>]", value)
+    if len(commands) < 4 or len(math_symbols) < 8:
+        return False
+
+    probe = re.sub(r"\\[A-Za-z@]+", " ", value)
+    words = [word.lower() for word in re.findall(r"\b[A-Za-z]{2,}\b", probe)]
+    prose_glue = {
+        "a", "an", "the", "and", "or", "of", "to", "in", "on", "for",
+        "with", "from", "that", "this", "these", "those", "where", "which",
+        "is", "are", "was", "were", "be", "denote", "denotes", "let", "then",
+        "such", "given", "we", "our", "by", "as", "if", "when",
+    }
+    if any(word in prose_glue for word in words):
+        return False
+    return len(words) <= len(commands) + 8
 
 
 def strip_inline_code_commands(text: str) -> str:
@@ -1168,7 +1279,7 @@ def is_citation_heavy_proper_name_catalog(text: str) -> bool:
     """
     value = strip_inline_code_commands(extract_translation_fragment(text))
     citations = CITATION_COMMAND_RE.findall(value)
-    if len(citations) < 3:
+    if len(citations) < 2:
         return False
     remainder = CITATION_COMMAND_RE.sub(" ", value)
     remainder = re.sub(r"\$[^$]*\$", " ", remainder)
@@ -1195,7 +1306,13 @@ def is_citation_heavy_proper_name_catalog(text: str) -> bool:
         token for token in tokens
         if token.lower() not in _CATALOG_CONNECTOR_WORDS
     ]
-    if len(tokens) < len(citations) or len(tokens) > len(citations) * 4 + 3:
+    # A splitter boundary may leave a version-only item (for example
+    # ``2.0~\citep{...}``) without an alphabetic token.  Allow one such item,
+    # while the prose-word and name-shape checks below remain strict.
+    if (
+        len(tokens) < max(1, len(citations) - 1)
+        or len(tokens) > len(citations) * 4 + 3
+    ):
         return False
     lowered = [token.lower() for token in tokens]
     if any(
@@ -1319,6 +1436,41 @@ SHORT_TEXT_WRAPPER_RE = re.compile(
 )
 
 
+def is_translated_prefix_proper_name_catalog(
+    source: str,
+    response: str,
+) -> bool:
+    """Allow translated short prose followed only by cited proper names."""
+    if len(CITATION_COMMAND_RE.findall(source or "")) < 3:
+        return False
+    if len(re.findall(r"[\u4e00-\u9fff]", response or "")) < 4:
+        return False
+
+    response_probe = _natural_language_probe(response or "")
+    tokens = re.findall(
+        r"\b[A-Za-z][A-Za-z0-9]*(?:[-_.+][A-Za-z0-9]+)*\b",
+        response_probe,
+    )
+    tokens = [
+        token for token in tokens
+        if token.lower() not in _CATALOG_CONNECTOR_WORDS
+    ]
+    if len(tokens) < 3:
+        return False
+    lowered = [token.lower() for token in tokens]
+    if any(
+        token.islower() and word not in _CATALOG_NAME_WORDS
+        for token, word in zip(tokens, lowered)
+    ):
+        return False
+    name_like = sum(
+        bool(re.search(r"[A-Z0-9_.+-]", token))
+        or word in _CATALOG_NAME_WORDS
+        for token, word in zip(tokens, lowered)
+    )
+    return name_like / len(tokens) >= 0.8
+
+
 def is_short_structural_bridge_prose(text: str) -> bool:
     r"""Recognize short prose stranded beside display math or custom wrappers.
 
@@ -1353,20 +1505,30 @@ def _mixed_language_probe(text: str) -> str:
     # distinguish that source data from normal paper prose.
     if "\\\\" in value and PROMPT_TEMPLATE_LINE_RE.search(value):
         return ""
+    # Acronym expansions are often lettered with nested ``\underline`` and
+    # ``\texttt`` commands (for example ``\underline{\texttt{M}}ulti-...``).
+    # Hide the complete expansion from the English-clause detector while
+    # leaving ordinary explanatory prose visible.
+    value = re.sub(
+        r"\\underline\{\\texttt\{[A-Z]\}\}[A-Za-z][A-Za-z-]*",
+        " ",
+        value,
+    )
     for _ in range(3):
         updated = re.sub(
-            r"\\(?:emph|textit|texttt|verb)\*?(?:\[[^\]]*\])?\{[^{}]*\}",
+            r"\\(?:emph|textit|texttt|underline|verb)\*?(?:\[[^\]]*\])?\{[^{}]*\}",
             " ",
             value,
         )
         if updated == value:
             break
         value = updated
-    # Dataset/task identifiers are often rendered as escaped snake_case
-    # without a \texttt wrapper. Their component words (for example
-    # ``look\_at\_obj\_in\_light``) must not look like an English clause.
+    # Dataset/task/citation identifiers may be rendered as escaped snake_case
+    # or reach this probe as a raw splitter-detached key tail. Their component
+    # words (for example ``look\_at\_obj\_in\_light`` or
+    # ``when_cl_requires_learning_2026}``) are not an English clause.
     value = re.sub(
-        r"\b[A-Za-z0-9]+(?:\\_[A-Za-z0-9]+){1,}\b",
+        r"\b[A-Za-z0-9]+(?:(?:\\_+|_)[A-Za-z0-9]+){1,}\b",
         " ",
         value,
     )
@@ -1406,16 +1568,267 @@ def is_tikz_style_definition_fragment(text: str) -> bool:
     ))
 
 
+def is_http_endpoint_catalog(text: str) -> bool:
+    """Recognize a standalone list of HTTP method/path signatures."""
+    value = extract_translation_fragment(text or "").strip()
+    endpoint_re = re.compile(
+        r"(?<![A-Za-z])(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/\S+"
+    )
+    matches = endpoint_re.findall(value)
+    if len(matches) < 2:
+        return False
+    remainder = endpoint_re.sub(" ", value)
+    remainder = re.sub(r"[\\{}\[\](),;|&+_=?.:/~-]+", " ", remainder)
+    return not re.search(r"\b[A-Za-z]{2,}\b", remainder)
+
+
+def is_detached_citation_key_list(text: str) -> bool:
+    """Recognize a splitter-detached ``{bib_key,...}`` argument."""
+    value = extract_translation_fragment(text or "").strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        return False
+    keys = [item.strip() for item in value[1:-1].split(",")]
+    if len(keys) < 3 or any(not key for key in keys):
+        return False
+    key_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+-]*")
+    if any(not key_re.fullmatch(key) for key in keys):
+        return False
+    key_like = sum(
+        "_" in key or bool(re.search(r"\d", key)) or len(key) >= 12
+        for key in keys
+    )
+    return key_like >= max(2, len(keys) // 2)
+
+
+def is_structured_identifier_path(text: str) -> bool:
+    r"""Recognize a standalone repository/package path, not slash prose.
+
+    Splitter output can expose identifiers such as
+    ``icloud-photos-downloader/icloud\_photos\_downloader`` as an isolated
+    slot. Translating that value would corrupt it, while retrying an exact
+    model echo can fail the whole paper. Require the entire fragment to be a
+    path and at least one explicit identifier separator so ordinary prose such
+    as ``input/output`` remains eligible for translation.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    value = re.sub(r"[.,;:]$", "", value).strip()
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.+\\-]*"
+        r"(?:/[A-Za-z0-9][A-Za-z0-9_.+\\-]*)+",
+        value,
+    ):
+        return False
+    return bool(re.search(r"(?:\\_|[_+.-])", value))
+
+
+def is_person_name_catalog(text: str) -> bool:
+    """Recognize a standalone comma-separated author/contributor list."""
+    value = extract_translation_fragment(text or "").strip()
+    if re.search(r"[.!?。！？]", value):
+        return False
+    parts = [
+        part.strip()
+        for part in re.split(r"\s*(?:,|;|\\and\b)\s*", value)
+        if part.strip()
+    ]
+    if len(parts) < 6:
+        return False
+
+    def name_like(part: str) -> bool:
+        words = re.findall(r"[A-Za-z][A-Za-z'.-]*", part)
+        return (
+            1 <= len(words) <= 5
+            and all(
+                word[0].isupper() or re.fullmatch(r"[A-Z]\.?", word)
+                for word in words
+            )
+        )
+
+    return sum(name_like(part) for part in parts) / len(parts) >= 0.85
+
+
+def is_affiliation_metadata_fragment(text: str) -> bool:
+    """Recognize superscripted author-affiliation metadata, not paper prose."""
+    value = extract_translation_fragment(text or "").strip()
+    if not value or not AFFILIATION_MARKER_RE.match(value):
+        return False
+    probe = re.sub(
+        r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?",
+        " ",
+        value,
+    )
+    tokens = re.findall(
+        r"\b[A-Za-z][A-Za-z0-9]*(?:[-_.+][A-Za-z0-9]+)*\b",
+        probe,
+    )
+    if not tokens or len(tokens) > 18:
+        return False
+    # Institution names are normally title-cased/acronym-like.  Requiring a
+    # strong name shape prevents a superscripted sentence from being hidden.
+    name_like = sum(
+        token[0].isupper()
+        or token.isupper()
+        or bool(re.search(r"\d", token))
+        for token in tokens
+    )
+    return name_like / len(tokens) >= 0.7
+
+
+def is_graphics_path_fragment(text: str) -> bool:
+    """Recognize an isolated image path/options fragment."""
+    value = extract_translation_fragment(text or "").strip()
+    if not value or not re.search(
+        r"(?i)\.(?:pdf|png|jpe?g|eps|svg)(?:\}|\s|$)",
+        value,
+    ):
+        return False
+    # A path or includegraphics tail has no grammatical sentence words.  Keep
+    # this conservative so prose that merely mentions a file remains eligible.
+    if re.search(
+        r"(?i)\b(?:the|this|that|is|are|shows|showing|we|our|figure)\b",
+        value,
+    ):
+        return False
+    return bool(
+        re.search(r"[/{]", value)
+        and len(re.findall(r"\b[A-Za-z]{2,}\b", value)) <= 12
+    )
+
+
+def is_formatting_label_fragment(text: str) -> bool:
+    """Recognize command-wrapped model/series labels without natural prose."""
+    value = extract_translation_fragment(text or "").strip()
+    if not re.search(r"\\(?:textcolor|textbf|textit)\b", value):
+        return False
+    probe = latex_prose_probe(value)
+    words = re.findall(r"\b[A-Za-z][A-Za-z0-9+.-]*\b", probe)
+    if not words:
+        return False
+    name_like = sum(
+        word[0].isupper() or word.isupper() or any(ch.isdigit() for ch in word)
+        for word in words
+    )
+    return name_like >= 2 and name_like / len(words) >= 0.6
+
+
+def is_unbalanced_latex_fragment(text: str) -> bool:
+    """Protect short command fragments split across a surrounding TeX group."""
+    value = extract_translation_fragment(text or "").strip()
+    return bool(
+        value
+        and len(value) <= 320
+        and re.search(r"\\[A-Za-z@]+", value)
+        and _unescaped_brace_balance(value) != 0
+    )
+
+
+def _scan_structural_input_line(value: str, state: dict) -> tuple[dict, bool]:
+    """Advance delimiter state for one external-source input command line."""
+    current = dict(state or {})
+    bracket_depth = int(current.get("bracket_depth", 0))
+    brace_depth = int(current.get("brace_depth", 0))
+    optional_seen = bool(current.get("optional_seen"))
+    optional_closed = bool(current.get("optional_closed"))
+    required_seen = bool(current.get("required_seen"))
+    escaped = False
+    for char in str(value or ""):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "[" and brace_depth == 0:
+            bracket_depth += 1
+            optional_seen = True
+            continue
+        if char == "]" and bracket_depth:
+            bracket_depth -= 1
+            optional_closed = optional_seen and bracket_depth == 0
+            continue
+        if char == "{" and bracket_depth == 0:
+            if brace_depth == 0:
+                required_seen = True
+            brace_depth += 1
+            continue
+        if char == "}" and brace_depth:
+            brace_depth -= 1
+
+    lines = int(current.get("lines", 0)) + 1
+    complete = required_seen and bracket_depth == 0 and brace_depth == 0
+    current.update({
+        "active": not complete and lines < 64,
+        "bracket_depth": bracket_depth,
+        "brace_depth": brace_depth,
+        "optional_seen": optional_seen,
+        "optional_closed": optional_closed,
+        "required_seen": required_seen,
+        "lines": lines if not complete and lines < 64 else 0,
+    })
+    return current, complete
+
+
+def structural_input_command_line_protected(text: str, state=None):
+    """Return ``(protected, state)`` for one source-input command line."""
+    value = str(text or "")
+    current = dict(state or {})
+    active = bool(current.get("active"))
+    match = STRUCTURAL_INPUT_COMMAND_RE.search(value)
+    if not active and not match:
+        return False, {}
+    fragment = value if active else value[match.start():]
+    next_state, complete = _scan_structural_input_line(fragment, current)
+    if complete:
+        return True, {}
+    return True, next_state
+
+
+def structural_input_command_fragment_protected(text: str, state=None):
+    """Apply the source-input command policy to a possibly multiline fragment."""
+    current = dict(state or {})
+    protected = False
+    for line in str(text or "").splitlines(keepends=True) or [str(text or "")]:
+        line_protected, current = structural_input_command_line_protected(
+            line,
+            current,
+        )
+        protected = protected or line_protected
+    return protected, current
+
+
+def is_structural_input_command_fragment(text: str) -> bool:
+    """Return true when a complete fragment contains a source-input command."""
+    return bool(STRUCTURAL_INPUT_COMMAND_RE.search(str(text or "")))
+
+
+def is_tool_call_result_fragment(text: str) -> bool:
+    """Recognize a standalone rendered function call followed by its result."""
+    value = extract_translation_fragment(text or "").strip()
+    return bool(
+        re.match(
+            r"^\\texttt\{[A-Za-z][A-Za-z0-9]*(?:\\_+[A-Za-z0-9]+)*"
+            r"\([^{}]*\)\}\s*(?:\\;|\$|\s)*\\(?:to|rightarrow)\b",
+            value,
+        )
+    )
+
+
 def is_plain_prose_line_for_rescue(text: str) -> bool:
     """Identify short top-level prose lines stranded beside display math."""
     value = (text or "").strip()
     if not value or value.startswith("%"):
         return False
-    if is_latex_metadata_line(value):
+    if is_latex_metadata_line(value) or is_affiliation_metadata_fragment(value):
+        return False
+    if is_formatting_label_fragment(value) or is_unbalanced_latex_fragment(value):
         return False
     if is_inline_prompt_source_data_block(value):
         return False
     if is_tikz_drawing_fragment(value) or is_tikz_style_definition_fragment(value):
+        return False
+    if is_http_endpoint_catalog(value):
+        return False
+    if is_detached_citation_key_list(value):
         return False
     if is_bracketed_key_value_option_list(value):
         return False
@@ -1497,7 +1910,7 @@ def mixed_untranslated_english_clauses(text: str):
 
 def absorb_short_prose_bridges(
     fragments: Iterable[Tuple[str, bool]],
-    max_translate_chars: int = 1200,
+    max_translate_chars: int = DEFAULT_TRANSLATION_CHUNK_LIMIT,
 ) -> List[Tuple[str, bool]]:
     r"""Attach short preserved prose around citations to a neighboring chunk.
 
@@ -1619,19 +2032,45 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
     """Detect prose-like source chunks whose response still lacks Chinese."""
     if llm_translation_response_failed(response):
         return True
-    source_value = strip_inline_code_commands(extract_translation_fragment(source))
+    raw_source = extract_translation_fragment(source)
+    if (
+        is_structured_identifier_path(raw_source)
+        or is_person_name_catalog(raw_source)
+        or is_affiliation_metadata_fragment(raw_source)
+        or is_graphics_path_fragment(raw_source)
+        or is_formatting_label_fragment(raw_source)
+        or is_unbalanced_latex_fragment(raw_source)
+        or is_tool_call_result_fragment(raw_source)
+        or is_structural_input_command_fragment(raw_source)
+    ):
+        return False
+    source_value = strip_inline_code_commands(raw_source)
     if is_inline_prompt_source_data_block(source_value):
+        return False
+    if (
+        is_graphics_path_fragment(source_value)
+        or is_formatting_label_fragment(source_value)
+        or is_unbalanced_latex_fragment(source_value)
+    ):
         return False
     if (
         is_tikz_drawing_fragment(source_value)
         or is_tikz_style_definition_fragment(source_value)
+        or is_http_endpoint_catalog(source_value)
+        or is_detached_citation_key_list(source_value)
+        or is_pure_latex_math_fragment(source_value)
     ):
         return False
-    if is_bracketed_key_value_option_list(source_value):
+    if is_latex_key_value_option_list(source_value):
         return False
     if is_citation_heavy_proper_name_catalog(source_value):
         return False
     if is_translated_heading_proper_name_catalog(
+        source_value,
+        response or "",
+    ):
+        return False
+    if is_translated_prefix_proper_name_catalog(
         source_value,
         response or "",
     ):
@@ -1708,26 +2147,30 @@ def split_translation_structural_units(text: str) -> List[str]:
 
 def recommended_translation_chunk_limit(
     text: str,
-    default: int = 1200,
+    default: int = DEFAULT_TRANSLATION_CHUNK_LIMIT,
 ) -> int:
-    """Use a smaller cap for citation/reference-dense prose."""
-    value = text or ""
-    citations = len(CITATION_COMMAND_RE.findall(value))
-    references = len(REFERENCE_PAYLOAD_COMMAND_RE.findall(value))
-    if references >= 1:
-        return min(int(default), 350)
-    # Models occasionally combine adjacent citation commands even when the
-    # translated prose is otherwise sound. Keep two-or-more-citation requests
-    # small enough that independent citations normally land in separate
-    # chunks, so the exact citation multiset remains recoverable.
-    if citations >= 2:
-        return min(int(default), 120)
-    return int(default)
+    """Return the shared context/structure-aware request cap."""
+    return translation_chunk_limit(text, default)
+
+
+def adaptive_translation_retry_fragments(
+    text: str,
+    max_translate_chars: int = 480,
+) -> List[str]:
+    """Subdivide one proven-bad response without changing healthy requests."""
+    value = str(text or "")
+    if len(value) <= max_translate_chars:
+        return [value] if value else []
+    return split_translation_line_bounded(
+        value,
+        max_translate_chars=max_translate_chars,
+        min_sentence_chars=min(160, max_translate_chars),
+    )
 
 
 def coalesce_translation_fragments(
     fragments: Iterable[Tuple[str, bool]],
-    max_translate_chars: int = 1200,
+    max_translate_chars: int = DEFAULT_TRANSLATION_CHUNK_LIMIT,
 ) -> List[Tuple[str, bool]]:
     """Merge prose fragments without recreating tiny or unbounded requests.
 
@@ -1737,6 +2180,7 @@ def coalesce_translation_fragments(
     """
     items = []
     inline_source_state = {}
+    structural_input_state = {}
     for text, preserve in fragments:
         if not text:
             continue
@@ -1746,11 +2190,18 @@ def coalesce_translation_fragments(
                 inline_source_state,
             )
         )
+        structural_input, structural_input_state = (
+            structural_input_command_fragment_protected(
+                text,
+                structural_input_state,
+            )
+        )
         items.append((
             text,
             bool(
                 preserve
                 or inline_source
+                or structural_input
                 or is_bracketed_key_value_option_list(text)
             ),
         ))
@@ -1821,7 +2272,7 @@ def coalesce_translation_fragments(
 
 def split_translation_line_bounded(
     line: str,
-    max_translate_chars: int = 1200,
+    max_translate_chars: int = DEFAULT_TRANSLATION_CHUNK_LIMIT,
     min_sentence_chars: int = 180,
 ) -> List[str]:
     r"""Split prose without cutting open TeX groups or inline math delimiters.
@@ -1974,7 +2425,7 @@ def split_translation_line_bounded(
 
 def enforce_translation_fragment_limits(
     fragments: Iterable[Tuple[str, bool]],
-    max_translate_chars: int = 1200,
+    max_translate_chars: int = DEFAULT_TRANSLATION_CHUNK_LIMIT,
 ) -> List[Tuple[str, bool]]:
     """Apply the dynamic request-size invariant after all merge/bridge passes."""
     bounded: List[Tuple[str, bool]] = []
@@ -2176,6 +2627,27 @@ def normalize_tex_include_target(target: str) -> str:
     return (target or "").strip()
 
 
+def is_dynamic_tex_include_target(target: str) -> bool:
+    r"""Return true when an include target is resolved through TeX macros."""
+    value = normalize_tex_include_target(target)
+    return bool(re.search(r"\\[A-Za-z@]+|#[1-9]", value))
+
+
+def requires_runtime_tex_scope(text: str) -> bool:
+    r"""Return true when flattening a TeX file can change its execution scope.
+
+    Files that change catcodes or use ``@``-named internals must be read by
+    TeX at their original call site.  Inlining them into a macro argument
+    tokenizes the body under the caller's catcodes and can make otherwise
+    valid generated figures fail before their local setup runs.
+    """
+    source = text or ""
+    return bool(
+        re.search(r"\\make(?:atletter|atother)\b", source)
+        or re.search(r"\\catcode\s*`", source)
+    )
+
+
 def fontawesome_command_names(text: str) -> Tuple[str, ...]:
     """Return FontAwesome-style zero-argument commands used by a document."""
     names = set(re.findall(r"\\(fa[A-Z][A-Za-z]+)\b", text or ""))
@@ -2187,7 +2659,7 @@ def add_fontawesome_legacy_aliases(
     text: str,
     sibling_text: str = "",
 ) -> Tuple[str, int]:
-    """Add deterministic FontAwesome fallbacks at top-level preamble scope.
+    r"""Add deterministic FontAwesome fallbacks at top-level preamble scope.
 
     Older versions inserted the tagged block immediately before the first icon
     token.  When that token lived inside a ``\newcommand`` body, every
@@ -2398,6 +2870,16 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         source
     )
 
+    # CJKutf8's tilde activation belongs to its legacy 8-bit input path.  The
+    # translated document is compiled by a Unicode engine, where the command
+    # may not exist and has no useful work left to do.  Normalize the setup
+    # directive here instead of teaching the compiler to ignore its error.
+    source, legacy_cjk_setup_repairs = re.subn(
+        r"(?m)^(?P<indent>[ \t]*)\\CJKtilde[ \t]*(?:%[^\r\n]*)?$",
+        r"\g<indent>% paper-trans: omitted legacy CJK tilde activation",
+        source,
+    )
+
     # v4.36 located ``\begin{document}`` with a raw string search.  A template
     # comment containing that example token could therefore be split by the
     # natbib fallback and turn the remaining comment tail into executable TeX.
@@ -2497,7 +2979,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         and not _latex_command_defined(source, "CJK")
     )
 
-    total = historical_repairs
+    total = historical_repairs + legacy_cjk_setup_repairs
     if needs_inputencoding:
         insertion = "\n".join([
             r"% paper-trans fallback for XeLaTeX compatibility commands",
@@ -3071,6 +3553,7 @@ PDFTEX_PRIMITIVE_NAMES = (
     "pdfpageheight",
     "pdfhorigin",
     "pdfvorigin",
+    "pdfmapfile",
     "pdfmapline",
     "pdfinfo",
     "pdfcatalog",

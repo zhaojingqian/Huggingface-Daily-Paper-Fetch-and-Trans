@@ -18,6 +18,11 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             filters.rank_main_tex_candidate("extract/paper_body.tex", body, candidates),
         )
 
+    def test_plain_rescue_leaves_split_formatting_fragments_opaque(self):
+        self.assertFalse(filters.is_plain_prose_line_for_rescue(
+            r"\textcolor{deftgenorange}{\textbf{DEFT $+$ RLVR"
+        ))
+
     def test_latex_prose_probe_keeps_custom_macro_human_argument(self):
         value = (
             r"\compactbullet{If \(m\) is irrational, then the line can "
@@ -60,6 +65,14 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertEqual(
             filters.llm_translation_response_invalid(source, translated),
             "latex_brace_balance_mismatch",
+        )
+
+    def test_reference_commands_may_follow_chinese_word_order(self):
+        source = r"Accordingly, see Eq.~\eqref{eq:bayes} in Appendix~\ref{app:proof}."
+        translated = r"因此，见附录~\ref{app:proof} 中的式~\eqref{eq:bayes}。"
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, translated),
+            "",
         )
 
     def test_normalize_response_removes_only_safe_trailing_brace(self):
@@ -388,6 +401,22 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertTrue(filters.llm_translation_response_untranslated(
             source,
             partial,
+        ))
+
+    def test_mixed_clause_gate_ignores_split_citation_key_tail(self):
+        source = (
+            "when_cl_requires_learning_2026}. Memory- and state-based methods "
+            "carry trajectories forward without changing model parameters."
+        )
+        response = (
+            "when_cl_requires_learning_2026}。基于记忆和状态的方法会保留轨迹，"
+            "而不立即修改模型参数。"
+        )
+
+        self.assertFalse(filters.mixed_untranslated_english_clauses(response))
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            source,
+            response,
         ))
 
     def test_mixed_clause_gate_keeps_names_quotes_and_code(self):
@@ -843,6 +872,196 @@ Language: Chinese
             filters.llm_translation_response_untranslated(options, "")
         )
 
+    def test_multiline_verbatim_input_stays_one_structural_unit(self):
+        lines = (
+            r"\VerbatimInput[",
+            r"  fontsize=\scriptsize,",
+            r"  breaklines=true, breakanywhere=true, breaksymbolleft={}",
+            r"]{sections/prompts/openmleevo_draft_prompt.txt}",
+            "This ordinary English sentence must remain translatable.",
+        )
+        state = {}
+        protected = []
+        for line in lines:
+            is_protected, state = filters.structural_input_command_line_protected(
+                line,
+                state,
+            )
+            protected.append(is_protected)
+        self.assertEqual(protected, [True, True, True, True, False])
+        self.assertFalse(state)
+        self.assertTrue(filters.is_structural_input_command_fragment(lines[0]))
+
+    def test_affiliation_metadata_is_structural_but_sentence_is_not(self):
+        affiliation = r"\textsuperscript{1} Horizon Research, Frontis.AI \quad"
+        sentence = r"\textsuperscript{1} The proposed method improves robustness."
+        self.assertTrue(filters.is_affiliation_metadata_fragment(affiliation))
+        self.assertFalse(filters.is_affiliation_metadata_fragment(sentence))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(affiliation, affiliation)
+        )
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(sentence, sentence)
+        )
+
+    def test_opaque_graphics_and_prompt_units_are_not_translation_chunks(self):
+        graphics = r"{figures/skywork_primary4_random_alignment_ppl.png}"
+        prompt_lines = (
+            r"\prompttext{You answer questions based on chat history.",
+            r"Reply with a short phrase only.}",
+        )
+        self.assertTrue(filters.is_graphics_path_fragment(graphics))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(graphics, graphics)
+        )
+        state = {}
+        protected = []
+        for line in prompt_lines:
+            is_protected, state = filters.structural_input_command_line_protected(
+                line,
+                state,
+            )
+            protected.append(is_protected)
+        self.assertEqual(protected, [True, True])
+        self.assertFalse(state)
+
+    def test_formatting_label_is_structural_but_sentence_is_not(self):
+        label = r"\textcolor{deftgenorange}{\textbf{DEFT $+$ RLVR}}"
+        sentence = r"\textbf{The proposed method improves robustness.}"
+        self.assertTrue(filters.is_formatting_label_fragment(label))
+        self.assertFalse(filters.is_formatting_label_fragment(sentence))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(label, label)
+        )
+
+    def test_prompt_template_markers_are_protected_without_hiding_normal_prose(self):
+        state = {}
+        first, state = filters.inline_prompt_source_data_line_protected(
+            'COMPRESS_PROMPT_TEMPLATE = """You are presented with a section.',
+            state,
+        )
+        middle, state = filters.inline_prompt_source_data_line_protected(
+            'Also write a one-line Memory Summary describing progress.',
+            state,
+        )
+        closing, state = filters.inline_prompt_source_data_line_protected(
+            r"\end{tcolorbox}",
+            state,
+        )
+        self.assertTrue(first)
+        self.assertTrue(middle)
+        self.assertTrue(closing)
+        self.assertFalse(state.get("active"))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(
+                r"\underline{\texttt{M}}ulti-structure \underline{\texttt{E}}vidence",
+                r"\underline{\texttt{M}}ulti-structure \underline{\texttt{E}}vidence",
+            )
+        )
+
+    def test_unbalanced_short_tex_fragment_is_structural(self):
+        fragment = r"\emph{what the retrieved previews contain}}"
+        self.assertTrue(filters.is_unbalanced_latex_fragment(fragment))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(fragment, fragment)
+        )
+
+    def test_splitter_detached_tcolorbox_options_are_structural(self):
+        fragments = (
+            (
+                r"colback=gray!5, colframe=gray!55!black, boxrule=0.4pt, "
+                r"arc=2pt, left=4pt, right=4pt, top=3pt, bottom=3pt,"
+            ),
+            (
+                r"colback=gray!5, colframe=gray!55!black, boxrule=0.4pt, "
+                r"arc=2pt, left=4pt, right=4pt, top=3pt, bottom=3pt, "
+                r"breakable, fonttitle=\bfseries, title={#1}}"
+            ),
+        )
+
+        for options in fragments:
+            with self.subTest(options=options):
+                self.assertTrue(filters.is_latex_key_value_option_list(options))
+                self.assertFalse(
+                    filters.llm_translation_response_untranslated(options, options)
+                )
+
+    def test_unbracketed_option_like_prose_still_requires_translation(self):
+        prose = (
+            "method=This ordinary English sentence explains the evaluation, "
+            "mode=true, enabled"
+        )
+
+        self.assertFalse(filters.is_latex_key_value_option_list(prose))
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(prose, prose)
+        )
+
+    def test_pure_latex_math_fragments_are_structural(self):
+        fragments = (
+            r"\text{Softmax}^*\left(\frac{\mathbf{Q}_t^{(l)}\left(\mathbf{P}^{(l)}_t\mathbf{W}_K^{(l)}\right)^\top}{\sqrt{d_k}}\right)&\text{Softmax}^*(\mathbf{Q}_t^{(l)})",
+            r"\mathbf{\Lambda}_{\text{orig}}=\text{diag}\left(\mathbf{z}_{\text{orig}}\oslash(\mathbf{z}_{\text{orig}}+\mathbf{z}_{\text{mem}})\right),\quad\mathbf{\Lambda}_{mem}.",
+            r"\check{\mathbf{A}}^{(l)}_t=\text{diag}\left(\text{Sim}(\mathbf{Q}_t^{(l)},\mathbf{P}^{(l)}_t\mathbf{W}_K^{(l)})\cdot\mathbf{1}\right)^{-1}\text{Sim}(\mathbf{Q}_t^{(l)})",
+        )
+
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertTrue(filters.is_pure_latex_math_fragment(fragment))
+                self.assertFalse(
+                    filters.llm_translation_response_untranslated(fragment, fragment)
+                )
+
+    def test_math_with_explanatory_prose_still_requires_translation(self):
+        prose = (
+            r"\mathbf{x}=\text{normalize}(\mathbf{z}),\quad "
+            r"\text{where the vector is normalized with the observed norm}"
+        )
+
+        self.assertFalse(filters.is_pure_latex_math_fragment(prose))
+        self.assertTrue(filters.llm_translation_response_untranslated(prose, prose))
+
+    def test_http_endpoint_catalog_is_structural(self):
+        endpoints = (
+            r"GET /api/search?q=CO2+reduction\\ GET "
+            r"/api/claims/\{claim\_id\}\\ GET "
+            r"/api/claims/\{claim\_id\}/neighborhood\\ GET "
+            r"/api/sources/\{doi\}"
+        )
+
+        self.assertTrue(filters.is_http_endpoint_catalog(endpoints))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(endpoints, endpoints)
+        )
+
+    def test_http_endpoint_explanation_still_requires_translation(self):
+        prose = "Use GET /api/search and POST /api/claims to query the service."
+
+        self.assertFalse(filters.is_http_endpoint_catalog(prose))
+        self.assertTrue(filters.llm_translation_response_untranslated(prose, prose))
+
+    def test_detached_citation_key_list_is_structural(self):
+        keys = (
+            "{anthropic_claude_use,openai_operator,google_gemini_cu,"
+            "sager2026comprehensive,zhou2026colorbrowseragent,"
+            "zheng2026code2world}"
+        )
+
+        self.assertTrue(filters.is_detached_citation_key_list(keys))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(keys, keys)
+        )
+
+    def test_braced_comma_prose_is_not_a_citation_key_list(self):
+        prose = "{this ordinary prose, needs translation, today}"
+
+        self.assertFalse(filters.is_detached_citation_key_list(prose))
+        self.assertTrue(filters.llm_translation_response_untranslated(prose, prose))
+
+    def test_dynamic_tex_include_target_detection(self):
+        self.assertTrue(filters.is_dynamic_tex_include_target(r"\relatedworkfile"))
+        self.assertTrue(filters.is_dynamic_tex_include_target("sections/#1"))
+        self.assertFalse(filters.is_dynamic_tex_include_target("sections/related"))
+
     def test_bracketed_english_prose_is_not_misclassified_as_options(self):
         prose_label = (
             "[This English prose label explains the complete evaluation "
@@ -923,6 +1142,28 @@ Language: Chinese
             filters.llm_translation_response_untranslated(prose, prose)
         )
 
+    def test_short_and_version_only_citation_catalogs_are_structural(self):
+        fragments = (
+            r"\citep{anthropic2026claudeopus48}, GPT-5.6 Sol "
+            r"\citep{openai2026gpt56}, Gemini 3.5 Flash",
+            r"{OSWorld-G-Refined}~\citep{osworld_g}, and "
+            r"UI-Vision~\citep{ui_vision}.",
+            r"2.0~\citep{terminalbench}, Claw-Eval~\citep{claweval}, "
+            r"BFCL-v4~\citep{bfcl}, SkillsBench~\citep{skillsbench}, and",
+        )
+
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertTrue(
+                    filters.is_citation_heavy_proper_name_catalog(fragment)
+                )
+                self.assertFalse(
+                    filters.llm_translation_response_untranslated(
+                        fragment,
+                        fragment,
+                    )
+                )
+
     def test_translated_heading_allows_proper_name_catalog_tail(self):
         source = (
             r"\paragraph{Third-party results} GDPval-AA v2, AA-Briefcase, "
@@ -958,6 +1199,40 @@ Language: Chinese
                 source,
                 response,
             )
+        )
+
+    def test_translated_prefix_allows_cited_proper_name_catalog(self):
+        source = (
+            r"efforts including UI-TARS \citep{uitars}, DART-GUI "
+            r"\citep{li2025dart}, OpenCUA \citep{opencua}, UltraCUA"
+        )
+        response = (
+            r"努力包括 UI-TARS \citep{uitars}、DART-GUI "
+            r"\citep{li2025dart}、OpenCUA \citep{opencua}、UltraCUA"
+        )
+
+        self.assertTrue(
+            filters.is_translated_prefix_proper_name_catalog(source, response)
+        )
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, response)
+        )
+
+    def test_translated_prefix_catalog_rejects_remaining_english_clause(self):
+        source = (
+            r"efforts including UI-TARS \citep{uitars}, DART-GUI "
+            r"\citep{li2025dart}, OpenCUA \citep{opencua} because it works"
+        )
+        response = (
+            r"相关工作包括 UI-TARS \citep{uitars}、DART-GUI "
+            r"\citep{li2025dart}、OpenCUA \citep{opencua} because it works"
+        )
+
+        self.assertFalse(
+            filters.is_translated_prefix_proper_name_catalog(source, response)
+        )
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(source, response)
         )
         self.assertTrue(
             filters.llm_translation_response_untranslated(source, response)
@@ -1065,13 +1340,13 @@ Language: Chinese
 
     def test_default_coalescer_does_not_create_oversized_request(self):
         merged = filters.coalesce_translation_fragments([
-            ("A" * 700, False),
-            ("B" * 700, False),
+            ("A" * 1300, False),
+            ("B" * 1300, False),
         ])
 
         self.assertEqual(merged, [
-            ("A" * 700, False),
-            ("B" * 700, False),
+            ("A" * 1300, False),
+            ("B" * 1300, False),
         ])
 
     def test_headings_force_distinct_translation_units(self):
@@ -1091,7 +1366,7 @@ Language: Chinese
         self.assertIn(r"\ref{tab:first}", units[1])
         self.assertIn(r"\ref{tab:second}", units[2])
 
-    def test_structure_dense_prose_uses_smaller_chunk_limit(self):
+    def test_structure_dense_prose_uses_normal_first_pass_limit(self):
         citations = (
             r"Prior work \cite{a}, \citep{b}, and \citet{c} motivates this."
         )
@@ -1101,26 +1376,37 @@ Language: Chinese
 
         self.assertEqual(
             filters.recommended_translation_chunk_limit(citations),
-            120,
+            1500,
         )
         self.assertEqual(
             filters.recommended_translation_chunk_limit(references),
-            350,
+            2400,
         )
         self.assertEqual(
             filters.recommended_translation_chunk_limit(
                 "Ordinary prose without structural references."
             ),
-            1200,
+            2400,
         )
         dense_fragments = [
             ("A" * 120 + r"\cite{a}\cite{b}", False),
             ("B" * 120 + r"\cite{c}", False),
         ]
-        self.assertEqual(
-            len(filters.coalesce_translation_fragments(dense_fragments)),
-            2,
+        self.assertEqual(len(filters.coalesce_translation_fragments(dense_fragments)), 1)
+
+    def test_adaptive_retry_subdivides_only_a_proven_bad_chunk(self):
+        source = (
+            "This is a long evidence-backed discussion of the method "
+            + r"\cite{alpha} "
+            + "and its evaluation protocol. " * 40
+            + r"The final comparison follows prior work \cite{beta}."
         )
+
+        parts = filters.adaptive_translation_retry_fragments(source)
+
+        self.assertEqual("".join(parts), source)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= 480 for part in parts))
 
     def test_final_fragment_limit_rechecks_after_intermediate_merge(self):
         source = (
@@ -1135,7 +1421,7 @@ Language: Chinese
         ])
 
         self.assertEqual("".join(text for text, _ in bounded), source)
-        self.assertGreater(len(bounded), 1)
+        self.assertEqual(len(bounded), 1)
         self.assertTrue(all(not preserve for _, preserve in bounded))
         self.assertTrue(all(
             len(text) <= filters.recommended_translation_chunk_limit(text)
@@ -1236,7 +1522,7 @@ Language: Chinese
             for text, _ in absorbed
         ))
 
-    def test_citation_bridge_respects_structure_dense_limit(self):
+    def test_citation_bridge_respects_normal_request_limit(self):
         fragments = [
             ("A" * 330, False),
             (r" \cite{alpha}, including ", True),
@@ -1245,8 +1531,13 @@ Language: Chinese
 
         absorbed = filters.absorb_short_prose_bridges(fragments)
 
-        self.assertGreater(len(absorbed), 1)
-        self.assertFalse(any(len(text) > 700 for text, _ in absorbed))
+        self.assertEqual(len(absorbed), 2)
+        coalesced = filters.coalesce_translation_fragments(absorbed)
+        self.assertEqual(len(coalesced), 1)
+        self.assertLessEqual(
+            len(coalesced[0][0]),
+            filters.recommended_translation_chunk_limit(coalesced[0][0]),
+        )
 
     def test_short_prose_bridge_keeps_structural_or_overflow_fragments(self):
         structural = r"\end{abstract} including"
@@ -1412,6 +1703,7 @@ Language: Chinese
             r"\pdfoutput=1" "\n"
             r"\pdfgentounicode =1" "\n"
             r"\pdfinfoomitdate=1" "\n"
+            r"\pdfmapfile{=Cochineal.map}" "\n"
             r"  \pdfmapline{+font < font.ttf < enc.enc}" "\n"
             r"\pdfinclusioncopyfonts=1" "\n"
             r"\ifdefined\pdfinfo\pdfinfo{/Title(Test)}\fi" "\n"
@@ -1423,10 +1715,11 @@ Language: Chinese
 
         fixed, count = filters.guard_pdftex_primitive_lines(text)
 
-        self.assertEqual(count, 6)
+        self.assertEqual(count, 7)
         self.assertIn(r"\ifdefined\pdfoutput\pdfoutput=1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfgentounicode\pdfgentounicode =1\fi", fixed)
         self.assertIn(r"\ifdefined\pdfinfoomitdate\pdfinfoomitdate=1\fi", fixed)
+        self.assertIn(r"\ifdefined\pdfmapfile\pdfmapfile{=Cochineal.map}\fi", fixed)
         self.assertIn(r"  \ifdefined\pdfmapline\pdfmapline{+font < font.ttf < enc.enc}\fi", fixed)
         self.assertIn(r"\ifdefined\pdfinclusioncopyfonts\pdfinclusioncopyfonts=1\fi", fixed)
         self.assertEqual(fixed.count(r"\ifdefined\pdfinfo\pdfinfo"), 2)
@@ -1601,6 +1894,11 @@ Language: Chinese
 
     def test_normalize_tex_include_target_strips_harmless_whitespace(self):
         self.assertEqual(filters.normalize_tex_include_target(" 6_conclusion \n"), "6_conclusion")
+
+    def test_requires_runtime_tex_scope_detects_catcode_sensitive_include(self):
+        self.assertTrue(filters.requires_runtime_tex_scope(r"\makeatletter\n\@ifundefined{x}{}{}"))
+        self.assertTrue(filters.requires_runtime_tex_scope(r"\catcode`\@=11"))
+        self.assertFalse(filters.requires_runtime_tex_scope(r"\textbf{普通正文}"))
 
     def test_fontawesome_command_names_excludes_argument_based_fa_icon(self):
         text = r"\faRobot \faCheckCircle \faIcon{github} \faRobot"
@@ -1854,6 +2152,23 @@ Language: Chinese
         self.assertIn(r"\csname endCJK*\endcsname", fixed)
         self.assertLess(fixed.index(r"% paper-trans fallback for legacy CJK"), fixed.index(r"\begin{document}"))
 
+    def test_xelatex_compatibility_omits_legacy_cjk_tilde_activation(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage{CJKutf8}" "\n"
+            r"\CJKtilde" "\n"
+            r"\begin{document}中文\end{document}" "\n"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+        second, second_count = filters.add_xelatex_compatibility_fallbacks(fixed)
+
+        self.assertEqual(count, 1)
+        self.assertNotIn("\\CJKtilde", fixed)
+        self.assertIn("omitted legacy CJK tilde activation", fixed)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(second, fixed)
+
     def test_legacy_cjk_fallback_is_added_even_when_cjkutf8_is_declared(self):
         text = (
             r"\documentclass{article}" "\n"
@@ -2101,6 +2416,47 @@ Language: Chinese
         self.assertEqual(count, 1)
         self.assertIn("paper-trans reset ACM baselinestretch guard", fixed)
         self.assertLess(fixed.index("paper-trans reset ACM"), fixed.index(r"\end{document}"))
+
+
+    def test_person_name_catalog_is_structural_but_prose_is_not(self):
+        names = (
+            "Vin Bo, Asher Cai, Jingwei Cao, Song Cao, Vic Cao, Amelia Chen, "
+            "Andrew Chen, Kaijie Chen, Cleon Cheng, Steven Chiang"
+        )
+        prose = (
+            "Vin Bo and Asher Cai evaluate the model and report strong results "
+            "across several tasks."
+        )
+
+        self.assertTrue(filters.is_person_name_catalog(names))
+        self.assertFalse(filters.is_person_name_catalog(prose))
+        self.assertFalse(filters.llm_translation_response_untranslated(names, names))
+
+    def test_standalone_repository_path_is_structural(self):
+        path = r"icloud-photos-downloader/icloud\_photos\_downloader"
+
+        self.assertTrue(filters.is_structured_identifier_path(path))
+        self.assertFalse(filters.is_structured_identifier_path("input/output"))
+        self.assertFalse(filters.is_structured_identifier_path(
+            "We compare input/output behavior across systems."
+        ))
+        self.assertFalse(filters.llm_translation_response_untranslated(path, path))
+
+    def test_standalone_tool_call_result_is_structural(self):
+        source = (
+            r'\texttt{search\_places(query="hospital emergency"\,/\,'
+            r'"orthopedic clinic", radius=8000)}\;$\to$\;'
+            r'Asiri Surgical, Lanka Hospitals, Nawaloka.\par'
+        )
+        explanation = (
+            "The agent calls "
+            r'\texttt{search\_places(query="hospital")} '
+            "and then compares the retrieved hospitals."
+        )
+
+        self.assertTrue(filters.is_tool_call_result_fragment(source))
+        self.assertFalse(filters.is_tool_call_result_fragment(explanation))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
 
 if __name__ == "__main__":

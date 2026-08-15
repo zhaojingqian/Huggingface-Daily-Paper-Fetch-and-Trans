@@ -52,8 +52,10 @@ data/papers/<arxiv_id>.json
 translate_full.py
     ↓ locks/full-translation.lock
     ↓ serialized docker exec
-full_translate_driver.py
-    ↓ chunk v30 + short-bridge/custom-macro prose + shared quality gate
+full_translate_driver.py (986 lines: lifecycle + gates)
+    ├─ translation_runtime.py (gpt-academic adapters + bounded scheduler)
+    └─ latex_pipeline.py (TeX repair + compile fallback)
+    ↓ chunk v45 policy + structural guards + shared quality gate
     ↓
 data/papers/<arxiv_id>_zh.pdf
     ↓ PDF header + EOF gate / quality taint
@@ -86,9 +88,9 @@ paper_card() / detail page / bookmark page
 
 ### 翻译容器
 
-当前生产容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。该镜像默认使用 `GPT_ACADEMIC_SLIM_TEX_PROFILE=full`，继承原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，只裁剪中文翻译不需要的 ML/runtime/cache/doc/source 负载。
+当前生产容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。该镜像使用平衡裁剪：保留完整 TeX/font 运行时，只删除中文翻译不需要的 ML/runtime/cache/doc/source 负载；实测 6,745,966,319 bytes（约 6.28GiB）。
 
-2026-06-12 已确认新容器可用，并删除旧容器 `gpt-academic-latex` 和旧镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`；本机不再保留旧 Docker 回滚副本。根分区可用空间从切换前的紧张状态恢复到约 14GB。
+2026-08-11 已完成新一轮候选 canary、xz 导出校验、孤立 overlay2 清理、导入和生产复验；镜像相较上一版减少约 875MB。本机仅保留 1 个生产镜像和 1 个容器，运行缓存外置到 XDG data，根分区可用约 6.0GB。
 
 所有全文翻译入口在 `translate_full.py` 最底层通过
 `locks/full-translation.lock` 串行化。容器缓存清理和容器重启也竞争同一
@@ -96,8 +98,8 @@ paper_card() / detail page / bookmark page
 每篇驱动使用独立 session 和 subreaper supervisor；timeout/Web kill 只按
 精确 arXiv 进程树终止并回收子孙进程。Docker 控制操作也有默认 30 秒的有界
 超时。TeX 子进程统一禁用 shell escape，并使用受限的 openin/openout
-策略。生产、cron、测试固定使用
-`/root/.pyenv/versions/3.10.13/bin/python3`，不支持回退到系统旧 Python。
+策略。生产、cron、测试固定使用 `/root/workspace/.env` 中的
+`SERVER_PYTHON`（当前为 Python 3.13.12），不支持回退到系统旧 Python。
 
 ---
 
@@ -128,15 +130,15 @@ paper_card() / detail page / bookmark page
 每次修改 Web 路由、按钮、PDF 查看页或部署行为前后都应运行：
 
 ```bash
-/root/.pyenv/versions/3.10.13/bin/python3 -m py_compile \
+python3 -m py_compile \
   web_server.py translate_arxiv.py translate_full.py \
   full_translate_driver.py latex_translation_filters.py \
   run_papers.py run_repair.py \
   tests/test_web_server_contract.py tests/test_latex_translation_filters.py
 
-/root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v
-/root/.pyenv/versions/3.10.13/bin/python3 scripts/audit_project.py --strict
-/root/.pyenv/versions/3.10.13/bin/python3 scripts/queue_quality_repairs.py --json
+python3 -m unittest discover -s tests -v
+python3 scripts/audit_project.py --strict
+python3 scripts/queue_quality_repairs.py --json
 ```
 
 线上抽查：
@@ -185,7 +187,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 修复 topic PDF 编译失败：为 listing/inputenc 补 `\inputencodingname`，为 CIDR/ACM/fontspec 风格模板补安全 no-op 和 `baselinestretch` guard reset，恢复 `2606.26080`、`2606.29823`。
 - [x] `retry-pdf` 增加 paper store 状态一致性同步，自动把已有中文 PDF 但 JSON 仍 failed 的历史残留回写为 `ok`。
 - [x] `retry-pdf` 增加 ok-but-missing 降级重试：索引标 `pdf_status=ok` 但 paper store PDF 缺失时自动进入缓存重编译/全文重译，补回 `2606.29296`、`2606.29445` 等缺失 PDF。
-- [ ] 继续梳理 `full_translate_driver.py` 其他 fallback patch 的触发条件，沉淀为小型 fixtures。
+- [x] 将 `full_translate_driver.py` 的 TeX patch/编译迁移到 `paperhub/latex_pipeline.py`，将 gpt-academic 适配迁移到 `paperhub/translation_runtime.py`，driver 收敛到 986 行。
 - [x] 建立稳定的翻译/编译失败 taxonomy、JSON sidecar、聚合报告和 retry strategy，后续按 category 直接定位。
 - [x] 为 arXiv 源码下载断流增加预下载/校验缓存，并支持只有 tex 备份时重建 workfolder 后直编译。
 - [x] 为 gpt-academic LaTeX splitter 增加普通正文扩展翻译补丁，避免 preserve 节点吞掉正文。
@@ -202,7 +204,10 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 加固 fallback 编译：安全 aux、直接接入生成 bbl、不安全 citation key 规范化、LuaLaTeX segfault fallback、algorithm2e/FontAwesome 兼容和更多 LLM artifact 过滤。
 - [x] 将模型序列化残留、字体族、engine driver、环境失配、TikZ matrix 图例和重复宏首字母归入稳定 taxonomy，并为每类登记通用 patch。
 - [x] 摘要翻译兼容 OpenAI-compatible 多形态 content、截断/非法反斜杠 JSON，并可从已成功中文 TeX 回填缺失字段。
-- [x] 针对 `quality.untranslated_prose` 增加 chunk 级失败响应验证与局部重试；低并发首轮后只串行补偿 429/空响应 chunk，仍失败则拒绝半成品缓存。
+- [x] 针对 `quality.untranslated_prose` 增加 chunk 级失败响应验证与局部重试；首轮 50 路，失败槽使用最多 16 路有界并发，仍失败则拒绝半成品缓存。
+- [x] chunk v45 取消 citation/ref 密集正文的预切碎；普通正文上限 2400 字符，结构/引用密集片段自动降为 1900/1500，仅对结构门禁真正失败的 slot 自适应细分。
+- [x] 为高覆盖 TeX 增加最多 12 行的末端残留定向重译；逐行结构校验和质量
+  分数提交，`2607.23782` 已从 3 个混合英文 clause 降至 0 并真实发布。
 - [x] 增加全量中文 TeX/chunk 英文分布分析，区分普通正文、混合语言与代码/轨迹保护环境，并按 CJK 覆盖和长英文行生成历史严重项队列。
 - [x] chunk v9 跳过环境结构、纯 option list、citation-heavy 名称目录、inline
   code、URL、注释和上游 prompt，并对 prompt/trace/example/source-data box 做
@@ -253,13 +258,22 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 建立通用 patch catalog 与 `logs/repair_history/weekly-<key>.json`，沉淀每周失败类别、匹配补丁和剩余失败。
 - [x] 将全模式近窗审计、串行修复、patch 沉淀、验证、文档和 push 约定整理为 `$paper-trans-repair` Codex skill。
 - [x] 对旧 `compile.unknown` sidecar 增加日志重分类，并对大日志使用有界证据，缩短后续定位时间。
+- [x] 增加低 token 的 `repair_snapshot.py`，skill 默认按快照和 category 路由，
+  仅在全量/final gate 使用重型审计。
+- [x] 将重复 cron 收敛为 managed block；日常 post、全模式 PDF retry、缓存、
+  空闲重启及周日清理由单一 maintenance coordinator 负责。
+- [x] daily 队列结束后原子迁移到 `apps/paper-trans` 与 `vendor/gpt-academic`，
+  更新 systemd、cron、Docker bind、Codex trusted path 并验证 `/paper/`。
+- [x] 构建平衡裁剪 TeX candidate，导出前运行 4 篇历史 compile canary、归档
+  校验后替换生产镜像并再次 canary；镜像从 7.62GB 降至 6.746GB，
+  `/gpt/gpt_log` 已迁到 XDG data bind mount。没有用删除 TeX 能力换取 4.5GB。
 - [x] 修复 `run_repair.py --post` 对当前周期的跳过边界，确保首次 cron 触发后可补抓临时网络失败的 daily/weekly/monthly。
 - [x] 补齐生产 root crontab 的 topic 调度：每天 01:30 `run_topic.py --all`，06:30 `run_repair.py --retry-pdf --mode topic --days 7`，并补跑 `2026-07-06` 主题结果。
 - [x] 修复 weekly cleanup 的 topic 引用漏扫：孤立 PDF 统计递归覆盖 topic 两层索引，避免 topic-only PDF 被误删。
 - [x] 修复一次性翻译驱动输出 RESULT 后被遗留 worker 线程拖住的问题，结果落盘后立即退出容器子进程。
 - [x] repair/refetch/retry 输出真实 attempted/succeeded/failed 和残留 ID；残留非零时 CLI 非零退出。
 - [x] `run_repair.py --key` 改为严格精确范围，post/refetch 不再意外扫描多日。
-- [x] 缓存清理和容器重启复用全文翻译锁；缓存默认保留 30 天，繁忙时跳过。
+- [x] 缓存清理和容器重启复用全文翻译锁；缓存每天运行，常规保留 3 天、磁盘高水位时保留 1 天，并按文件回收 shared/downloadzone 历史产物。
 - [x] 孤立 PDF 清理增加 3 天发布缓冲，避免 PDF 与 index 分步落盘时发生竞态。
 - [x] weekly cleanup 显式累计每个步骤的失败，索引扫描错误拒绝孤立 PDF
   删除，任一失败最终非零退出。
@@ -267,7 +281,10 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
   周日当前周修复，不再遗漏 Web 手动提交历史。
 - [x] Nginx `/paper/papers/` 改为反代 Web 应用，不再用静态 alias 绕过 taint
   与 PDF 完整性检查；健康 PDF 保留 Range/`206`。
-- [ ] 对磁盘低水位、Docker 容器异常、PDF retry 长期失败增加告警入口。
+- [x] 对磁盘低水位和缓存清理异常增加 Gmail 告警入口，复用服务器现有 SMTP 配置。
+- [x] 全文 retry 遇到实时 API quota 错误后立即熔断本批；动态 TeX include、
+  公式、专名目录、endpoint 与 citation-key 参数已沉淀为通用 patch。
+- [ ] 对 Docker 容器异常、PDF retry 长期失败增加告警入口。
 
 ### Phase E — Docker 镜像瘦身验证
 
@@ -275,6 +292,12 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 增加 `paper-trans-latex-slim` 构建、启动和 canary 脚本。
 - [x] 在 40GB 服务器上用低磁盘 flatten 模式构建 slim 镜像，并记录最终镜像体积约 4.55GB。
 - [x] 将最终生产方案调整为 full-TeX slim：默认保留完整 TeX/font 运行时，只裁剪 ML/runtime/cache/doc/source 负载，镜像体积约 7.62GB。
+- [x] 在导出前对实际裁剪 rootfs 运行 canary，公开源码 tar 使用校验后的 XDG
+  cache；xz 归档通过完整性校验后导入 6.746GB 平衡裁剪镜像。
+- [x] 将 `/gpt/gpt_log` 外置为 XDG data bind mount，增加 runtime-ready marker；
+  依赖齐全时跳过 setup，缺包 apt 具有总超时和连接超时。
+- [x] Docker 对象为空但 overlay2 仍占约 22GB 时，停服务并清除确认无引用的
+  孤儿层；最终仅保留 1 镜像、1 容器、0 build cache。
 - [x] 为低磁盘切换增加 dry-run 和压缩 rootfs 导出路径，避免无法同时容纳旧镜像、新镜像和构建中间层。
 - [x] 使用 `2606.09967`、`2606.10917`、`2606.09828`、`2606.02060` 跑完 compile canary。
 - [x] 使用 `2606.08432` 跑完 full no-cache canary，验证 GPT 翻译阶段和 LaTeX 编译完整链路。

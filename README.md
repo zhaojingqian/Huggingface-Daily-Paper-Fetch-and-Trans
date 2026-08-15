@@ -26,44 +26,60 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 | PDF 查看页 | 完成 | `/view/<id>` 固定 HTML wrapper，保证浏览器标签页标题正确 |
 | 行为合约测试 | 完成 | `tests/test_web_server_contract.py` 锁定核心路由和点击链接 |
 
+### 翻译运行时边界（2026-08-15）
+
+Docker 仍是全文翻译的必要运行时边界：宿主机没有 TeX 编译器或
+gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前 slim 镜像约
+6.75GB；删除它不会消除依赖，只会把约 3.2GB TeX、818MB 字体和 Python 运行时
+搬回宿主机，因此只做镜像/缓存瘦身，不直接删容器。
+
+翻译链路按职责收敛为三层：`full_translate_driver.py`（986 行）只负责单篇
+生命周期、源码缓存、质量门禁和结果诊断；`paperhub/translation_runtime.py`
+负责 gpt-academic splitter、响应校验、失败槽重试和归档安全适配；
+`paperhub/latex_pipeline.py` 负责 TeX 修补、BibTeX/XeLaTeX/LuaLaTeX
+fallback 和编译健康边界；`paperhub/translation_policy.py` 统一 chunk 与并发策略。
+
+首轮请求由 `PAPER_TRANS_LLM_WORKERS` 控制，默认 50；普通正文上限 2400 字符，
+结构/引用密集片段自动降为 1900/1500；失败槽使用最多 16 路的有界并发重试。
+
 ---
 
 ## 快速命令
 
-生产、cron、测试和修复统一使用
-`/root/.pyenv/versions/3.10.13/bin/python3`；系统自带 Python 版本过旧，不是
-受支持的运行时。下文命令中的 `python3` 均指这个固定解释器。
+生产、cron、测试和修复统一从 `/usr/local/bin/workspace-ctl` 进入。宿主运行时
+由 `/root/workspace/.env` 的 `SERVER_PYTHON` 唯一定义，PaperHub 不再在脚本、
+cron 或 systemd 中硬编码 Python 路径。项目密钥位于权限为 `600` 的
+`/root/workspace/.env.d/paper.env` 与 `gpt-academic.env`；生成的第三方 Python
+配置位于 `/root/.local/share/paper-trans/runtime/config_private.py`，禁止手改。
 
 ### 抓取与翻译
 
 ```bash
-cd /root/workspace/paper-trans
-
 # daily
-python3 run_daily.py
-python3 run_daily.py 2026-06-05
-python3 run_daily.py 2026-06-05 --no-full
+workspace-ctl paper daily
+workspace-ctl paper daily 2026-06-05
+workspace-ctl paper daily 2026-06-05 --no-full
 
 # weekly
-python3 run_weekly.py
-python3 run_weekly.py 2026-W22
-python3 run_weekly.py 2026-W22 --no-full
+workspace-ctl paper weekly
+workspace-ctl paper weekly 2026-W22
+workspace-ctl paper weekly 2026-W22 --no-full
 
 # monthly
-python3 run_monthly.py
-python3 run_monthly.py 2026-05
-python3 run_monthly.py 2026-05 --no-full
+workspace-ctl paper monthly
+workspace-ctl paper monthly 2026-05
+workspace-ctl paper monthly 2026-05 --no-full
 
 # topic subscription
-python3 run_topic.py opd
-python3 run_topic.py opd --no-full
-python3 run_topic.py --all
+workspace-ctl paper topic opd
+workspace-ctl paper topic opd --no-full
+workspace-ctl paper topic --all
 
 # 单篇全文 PDF，输出到统一 paper store
-python3 translate_full.py 2605.21573 -o data/papers
+workspace-ctl paper translate 2605.21573 -o /root/workspace/apps/paper-trans/data/papers
 ```
 
-主题订阅使用 `.env` 中的 `TOPIC_LLM_API_KEY`、`TOPIC_LLM_BASE_URL`、`TOPIC_LLM_MODEL` 生成检索词，`TOPIC_ADMIN_TOKEN` 用于保护主题管理和手动提交动作；`.env` 已被 git ignore，不能提交密钥。主题检索默认限定 `cs.AI`、`cs.LG`、`cs.CL`、`cs.CV`、`cs.RO`、`cs.IR`、`stat.ML`，排序权重为相关性 45%、新鲜度 30%、HF vote 25%。检索词生成默认把用户输入解释为 AI/ML/CS 论文主题，要求 must 高精度、should 多元覆盖同义词/方法/任务/相邻概念，非 AI/ML/CS 常见含义进入 negative；代码侧还会去重、限制数量并过滤和 negative 冲突的召回词。主题 profile 支持可选 `display_name` 备注名，列表和详情页优先展示备注名，但检索、slug 和缓存仍使用原始 query。同一 topic 已推送过的 arXiv ID 默认不重复推；paper store 会全站复用中文摘要和全文 PDF 缓存，避免重复翻译或重复生成 PDF。
+主题订阅使用 `.env.d/paper.env` 中的 `TOPIC_LLM_API_KEY`、`TOPIC_LLM_BASE_URL`、`TOPIC_LLM_MODEL` 生成检索词，`TOPIC_ADMIN_TOKEN` 用于保护主题管理和手动提交动作；密钥文件禁止提交。主题检索默认限定 `cs.AI`、`cs.LG`、`cs.CL`、`cs.CV`、`cs.RO`、`cs.IR`、`stat.ML`，排序权重为相关性 45%、新鲜度 30%、HF vote 25%。检索词生成默认把用户输入解释为 AI/ML/CS 论文主题，要求 must 高精度、should 多元覆盖同义词/方法/任务/相邻概念，非 AI/ML/CS 常见含义进入 negative；代码侧还会去重、限制数量并过滤和 negative 冲突的召回词。主题 profile 支持可选 `display_name` 备注名，列表和详情页优先展示备注名，但检索、slug 和缓存仍使用原始 query。同一 topic 已推送过的 arXiv ID 默认不重复推；paper store 会全站复用中文摘要和全文 PDF 缓存，避免重复翻译或重复生成 PDF。
 
 ### 修复与重试
 
@@ -120,14 +136,14 @@ daily、weekly、monthly、manual 和递归 topic 索引，串行修复 PDF，
 skill 自带的近窗审计命令为：
 
 ```bash
-/root/.pyenv/versions/3.10.13/bin/python3 \
+/root/.pyenv/versions/3.13.12/bin/python3 \
   /root/.codex/skills/paper-trans-repair/scripts/recent_audit.py \
-  --repo /root/workspace/paper-trans --days 14 --json
+  --repo /root/workspace/apps/paper-trans --days 14 --json
 ```
 
 `retry-pdf` 会优先复用已有的翻译 tex 缓存；宿主机成功备份和容器内 `merge_translate_zh.tex` 都可作为缓存来源。如果只有 tex 备份、容器 workfolder 已被清理，会先从有效 arXiv 源码缓存重建 workfolder，再只重跑编译。失败诊断会同时写入便于阅读的 `logs/pdf_errors/<id>.log` 和便于程序处理的 `<id>.json`，稳定字段包括 `phase`、`category`、`family`、`retry_strategy`、`repair_action` 和 `evidence`。`reuse_translation` 表示保留中文 tex、定向修补后重编译；只有明确分类为 `retry_translation` 才会清缓存再次调用 GPT，未知驱动异常也不会自动浪费一次全文重译。若没有翻译 tex 且源码下载断流，驱动会先预下载并校验 `e-print/<id>.tar`，再交给 gpt-academic 翻译/编译。五个内容模式的 retry 入口都会同步 paper store 与所有引用索引：已有且通过门禁的 PDF 可回写 `ok`；slim index 标记 `ok` 但 PDF 实体缺失或无效时自动降级进入重试。
 
-失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译侧的源码缺失、鉴权、限流、网络超时、插件异常，以及编译侧的模型序列化残留、字体族缺失、引擎/driver 不匹配、pdfTeX 原语、环境失配、TikZ matrix 图例、宏首字母重复、未定义命令、结构损坏、数学/表格、verbatim、资源耗尽和普通 LaTeX 错误；翻译覆盖不足固定归入独立的 `quality.untranslated_prose`，不会再误报为 `compile.unknown`。`paperhub/patch_catalog.py` 为每个结构化类别登记 patch、来源和策略；`scripts/summarize_failures.py` 按 category / strategy / action 聚合，`scripts/audit_project.py` 检查索引总数、paper store、翻译完整性、PDF 实体、失败状态、日志和失败现场；后续定位优先先跑这两个脚本。
+失败分类由 `failure_taxonomy.py` 统一维护，当前区分翻译、质量、编译和基础设施故障；`Errno 28` 即使被旧 sidecar 记成插件异常，读取时也会按原始证据重新归入 `infrastructure.disk_full`，而“响应仍漏译或结构校验失败”统一归入 `quality.translation_chunk_invalid`。`paperhub/patch_catalog.py` 为每个结构化类别登记 patch、来源和策略。定位先运行 `scripts/repair_snapshot.py` 获取磁盘、Docker、活跃任务、索引状态和失败分类；再按需运行 `scripts/summarize_failures.py`、近窗审计或全项目严格审计，避免每次都加载重型扫描。
 
 topic 修复复用 daily 的 repair 语义：摘要/标题缺失时补写统一 paper store，`pdf_status=failed` 时复用同一套分类式 PDF retry 逻辑。paper store 的完整翻译缓存要求中文标题和中文总结同时有效；只残留标题的历史条目会重新抓取元数据并补译，同时保留原 `pdf_status`。topic 没有缺 index 补抓模式；新增订阅结果仍由 `run_topic.py --all` 负责生成。
 
@@ -149,8 +165,8 @@ splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 ma
 `&` 和行尾 `\\`；`algorithmic` 只翻译命令后的自然语言参数。二次拆分后
 会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或
 空白/分隔符类 chunk 会降级回 preserve。相邻正文及其间纯空白会合并为
-上下文更完整、最长 1800 字符的请求；超长正文继续按句子边界拆分，作者、
-单位、邮箱、宏定义和纯环境配置不送模型。当前 **chunk v11** 还会剥离
+上下文更完整、普通正文最长 2400 字符的请求；结构/引用密集片段按共享策略
+降为 1900/1500，超长正文继续按句子边界拆分，作者、单位、邮箱、宏定义和纯环境配置不送模型。当前 **chunk v45-policy-bounded** 还会剥离
 gpt-academic 拼在 fragment 前的英文翻译指令，只用真实论文片段检查漏译；
 inline code、URL 和 TeX 注释也不参与正文覆盖率。纯 `[key=value, ...]` 配置
 片段与 citation-heavy 的模型/数据集名称目录保持结构、不送模型，避免误判为
@@ -162,8 +178,8 @@ benchmark example、user query 或 source data 的实例保留原文，普通定
 门禁：不得新增/丢失关键 LaTeX 结构或 citation；中文响应中若仍有满足“至少
 4 个英文词、含语法连接词、与中文同段”的自然语言 clause，即判为未翻译并
 走单路重试。对于上游在 citation/ref 两侧切出的短英文接缝（例如
-`\cite{...}, including`），v11 只在相邻节点确为可翻译正文且合并后不超过
-1800 字符时吸收到同一 chunk；`\section`、环境边界和任意其他命令仍保持
+`\cite{...}, including`），只在相邻节点确为可翻译正文且合并后不超过
+策略上限内吸收到同一 chunk；`\section`、环境边界和任意其他命令仍保持
 保护。TeX ``...'' 引用的原始输入示例以及命令密集的 TikZ path 片段属于
 论文数据/绘图代码，不触发混合语言重试。这能拦住“整体中文、局部一句英文”
 的漏译，同时避免把应保留内容误报为正文。splitter 版本变化会
@@ -192,7 +208,7 @@ PDF 扫描复用 `audit_project.py` 的有界文本提取缓存，并把连续�
 PDF 同时通过翻译、编译和实体门禁后才清除 taint，后续编译诊断不能意外把
 旧英文 PDF 恢复成 `ok`。
 
-LaTeX 全文翻译默认使用 2 路低并发（可通过 `PAPER_TRANS_LLM_WORKERS` 调整），取代上游一次 8 路请求；遇到 429、空响应、本地异常 payload，或英文正文响应仍几乎没有中文时，只把对应 chunk 改为单路重试。补偿重试后仍有失败会终止本轮并拒绝写入 `temp.pkl`，不再把失败位置的英文原文静默合并成“可编译但未翻译”的中文 PDF。
+LaTeX 全文翻译默认使用 50 路首轮并发。首轮不再因 citation/ref 密度预先膨胀请求数；只有结构签名、引用多重集或花括号门禁真正失败的 slot 才自适应拆成最多约 480 字符，并使用最多 16 路的有界并发重试。遇到 429、空响应或漏译也只补对应 slot；补偿后仍失败会拒绝写入 `temp.pkl`。若完整 TeX 已有较高中文覆盖、仅质量门禁命中少量行，末端修复器最多定向重译 12 行，并仅提交质量分数严格改善且 LaTeX 结构不变的结果，再重编译 PDF，避免重跑整篇数百个 chunk。
 
 模型可用 `PAPER_TRANS_LLM_MODEL=<model> python3 translate_full.py ...` 单次覆盖，宿主机只会把 `PAPER_TRANS_LLM_MODEL`、worker/retry 等明确白名单变量传入容器，不会透传其他环境或密钥。`insufficient_user_quota`、余额/额度不足会独立归类为 `translate.api_quota / manual_review`，停止盲目重试；需要充值或显式切换到同一凭据已授权、并经过翻译质量验证的模型后再恢复队列。
 
@@ -217,7 +233,7 @@ fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontaweso
 
 `logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。如果编译超大图片/重资源论文时发生 `xdvipdfmx` 进程异常退出或超时（可能由 OOM 强杀导致），需确认独立容器已启用 `--memory-swappiness=60` 以允许向 Swap 换页。
 
-`scripts/cleanup_docker_cache.sh` 与 `scripts/restart_translation_container.sh` 复用全文翻译全局锁；锁繁忙时维护任务直接记录 `SKIP`，不会删除活跃 workfolder 或重启正在工作的容器。Docker 缓存清理默认只删除超过 30 天、且内部没有近期文件的一级缓存条目，不再清空整个缓存根目录。
+`scripts/cleanup_docker_cache.sh` 与 `scripts/restart_translation_container.sh` 复用全文翻译全局锁；锁繁忙时维护任务直接记录 `SKIP`，不会删除活跃 workfolder 或重启正在工作的容器。Docker 缓存每天清理：常规保留 3 天，磁盘达到 90% 或可用空间低于 2GB 时切换为保留 1 天。`arxiv_cache` 按论文目录回收，`default_user/shared`、`downloadzone` 和 `admin` 按文件年龄回收，避免一个近期文件阻止整个目录内的旧 zip 被删除。清理后仍达到 95% 或可用空间仍低于 2GB 时任务返回非零，并通过服务器已有 Gmail SMTP 配置发送告警；高水位自动恢复也会发送通知。可用 `PAPER_TRANS_CACHE_RETENTION_DAYS`、`PAPER_TRANS_EMERGENCY_RETENTION_DAYS`、`PAPER_TRANS_DISK_HIGH_WATERMARK`、`PAPER_TRANS_DISK_CRITICAL_WATERMARK` 和 `PAPER_TRANS_MIN_FREE_MB` 调整阈值。
 
 `scripts/weekly_cleanup.sh` 通过
 `scripts/cleanup_orphan_artifacts.py --apply` 清理孤立 PDF、失败诊断
@@ -239,7 +255,7 @@ weekly 抓取与全模式 repair。
 ```bash
 systemctl status paper-trans-web.service
 systemctl restart paper-trans-web.service
-tail -f /root/workspace/paper-trans/logs/web.log
+tail -f /root/workspace/apps/paper-trans/logs/web.log
 ```
 
 ---
@@ -330,7 +346,7 @@ paper-trans/
 ├── run_repair.py               # repair/refetch/post/retry-pdf 调度
 ├── translate_arxiv.py          # arXiv 元数据 + 摘要翻译 + paper store JSON
 ├── translate_full.py           # 宿主机侧全文 PDF 翻译封装
-├── full_translate_driver.py    # 容器内 gpt-academic 驱动和 LaTeX fallback
+├── full_translate_driver.py    # 容器内单篇生命周期与质量门禁（986 行）
 ├── latex_translation_filters.py # LaTeX 环境保护、质量过滤和 LLM 残留清理策略
 ├── failure_taxonomy.py         # 翻译/编译失败稳定分类与重试策略
 ├── web_server.py               # 单文件 HTTP Web 服务
@@ -345,7 +361,10 @@ paper-trans/
 │   ├── paper_store.py           # 统一 paper store JSON/PDF 读写 helper
 │   ├── topic_store.py           # topic profile、seen 和 index 读写 helper
 │   ├── audit.py                 # 全项目索引/store/PDF 一致性审计
-│   └── failure_reports.py       # 结构化与历史失败日志聚合
+│   ├── failure_reports.py       # 结构化与历史失败日志聚合
+│   ├── translation_policy.py    # chunk 上限与并发/重试策略
+│   ├── translation_runtime.py   # gpt-academic 适配与响应调度
+│   └── latex_pipeline.py        # TeX 修补、编译与健康门禁
 ├── tests/
 │   ├── test_web_server_contract.py
 │   ├── test_latex_translation_filters.py
@@ -398,7 +417,7 @@ python3 -m py_compile \
 
 ```bash
 python3 -m unittest discover -s tests -v
-/root/.pyenv/versions/3.10.13/bin/python3 -m unittest discover -s tests -v
+/root/.pyenv/versions/3.13.12/bin/python3 -m unittest discover -s tests -v
 ```
 
 测试覆盖：
@@ -443,7 +462,7 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 
 | 项 | 值 |
 |---|---|
-| Python | `/root/.pyenv/versions/3.10.13/bin/python3` |
+| Python | `${SERVER_PYTHON}`（当前 `/root/.pyenv/versions/3.13.12/bin/python3`） |
 | Web 端口 | `18080` |
 | 绑定地址 | 默认 `127.0.0.1`，可用 `BIND_HOST` 覆盖 |
 | 路径前缀 | `BASE_PATH=/paper` |
@@ -455,12 +474,12 @@ systemd unit：
 
 ```ini
 [Service]
-WorkingDirectory=/root/workspace/paper-trans
+WorkingDirectory=/root/workspace/apps/paper-trans
 Environment=BASE_PATH=/paper
-ExecStart=/root/.pyenv/versions/3.10.13/bin/python3 /root/workspace/paper-trans/web_server.py
+ExecStart=/usr/local/bin/workspace-ctl paper serve
 Restart=always
-StandardOutput=append:/root/workspace/paper-trans/logs/web.log
-StandardError=append:/root/workspace/paper-trans/logs/web.log
+StandardOutput=append:/root/workspace/apps/paper-trans/logs/web.log
+StandardError=append:/root/workspace/apps/paper-trans/logs/web.log
 ```
 
 当前 Web 手动提交使用 full-TeX slim 容器，systemd drop-in：
@@ -475,38 +494,22 @@ Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 
 ---
 
-## Cron 运维建议
+## Cron 运维
 
-```cron
-PYTHON=/root/.pyenv/versions/3.10.13/bin/python3
-PTDIR=/root/workspace/paper-trans
-RLOG=$PTDIR/logs/repair.log
-# 当前 cron 使用 full-TeX slim 翻译容器
-GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
-
-0 23 * * *   $PYTHON $PTDIR/run_daily.py   >> $PTDIR/logs/cron-daily.log   2>&1
-30 1 * * *   $PYTHON $PTDIR/run_topic.py --all >> $PTDIR/logs/cron-topic.log 2>&1
-0  2 * * 0   $PYTHON $PTDIR/run_weekly.py  >> $PTDIR/logs/cron-weekly.log  2>&1
-0  2 * * 0   $PYTHON $PTDIR/scripts/repair_weekly_current.py >> $RLOG 2>&1
-0  2 28 * *  $PYTHON $PTDIR/run_monthly.py >> $PTDIR/logs/cron-monthly.log 2>&1
-
-0  5 * * *   $PTDIR/scripts/restart_translation_container.sh
-30 6 * * *   $PYTHON $PTDIR/run_repair.py --retry-pdf --mode topic --days 7 >> $PTDIR/logs/repair.log 2>&1
-30 3 * * 0   $PTDIR/scripts/cleanup_docker_cache.sh
-0  8 * * 0   $PTDIR/scripts/weekly_cleanup.sh >> $RLOG 2>&1
-
-0  1 * * *   $PYTHON $PTDIR/run_repair.py --post       --mode daily   --days 2  >> $RLOG 2>&1
-0  6 * * *   $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode daily   --days 7  >> $RLOG 2>&1
-0  4 28 * *  $PYTHON $PTDIR/run_repair.py --post       --mode monthly --days 60 >> $RLOG 2>&1
-0  7 28 * *  $PYTHON $PTDIR/run_repair.py --retry-pdf  --mode monthly --days 60 >> $RLOG 2>&1
-```
+不要手工复制多组 post/retry/cleanup cron。运行
+`workspace-ctl paper cron-install` 安装单一 managed block：4 个抓取入口、恰好
+1 个周日 02:00 当前周修复入口，以及 1 个每天 06:00 maintenance 入口。
+`scripts/run_maintenance.py` 顺序协调缓存水位清理、空闲重启、全模式两日 post、
+全模式七日 PDF retry；每月 28 日追加 60 日 monthly 修复，周日追加宿主清理。
+各步骤独立报错并继续安全步骤，cron 不再承载业务分支。
 
 `run_repair.py --post` 会先修复已有索引中的摘要，再补抓缺失或空 `index.json` 的周期。为避免提前抓取未到榜单生成时间的数据，当前周期只会在首次 cron 触发时间前被跳过：daily 为当天 23:00 前，weekly 为周日 02:00 前，monthly 为 28 日 02:00 前。触发时间之后如果遇到 Hugging Face 临时网络失败，后续 `--post` 会重新补抓该周期；显式给出 `--key` 时只检查该 key。repair/refetch/retry 任一阶段仍有持久化残留都会记录 ID 并返回非零。
 
-03:30 缓存清理、05:00 容器重启和周日 08:00 孤儿清理必须通过上述脚本执行，不能退回裸
-`rm -rf` 或 `docker restart`。两者会非阻塞竞争
-`locks/full-translation.lock`；翻译繁忙时跳过本轮维护。缓存默认保留 30
-天，可用 `PAPER_TRANS_CACHE_RETENTION_DAYS` 调整。
+每天 06:00 的统一 maintenance 会调用缓存清理、空闲重启和修复；周日同一入口再追加孤儿清理，不能退回裸
+`rm -rf` 或 `docker restart`。生命周期脚本会非阻塞竞争
+`locks/full-translation.lock`；翻译繁忙时跳过本轮维护。缓存常规保留 3 天，
+高水位时保留 1 天；清理失败或磁盘仍危险时使用
+`/root/scholar-citation-monitor/config.env` 中的 SMTP 配置发送 Gmail 告警。
 
 周日 02:00 的 `scripts/repair_weekly_current.py` 与 weekly 抓取并行启动，但
 会先等待 `weekly/<当前 ISO 周>/index.json` 出现，再等待抓取锁释放。随后
@@ -519,14 +522,19 @@ GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 patch、五模式统计、同步数量和残留 ID 到
 `logs/repair_history/weekly-<key>.json`。通用 patch 目录由
 `paperhub/patch_catalog.py` 维护，具体实现集中在
-`full_translate_driver.py` 和 `latex_translation_filters.py`。
+`paperhub/translation_runtime.py`、`paperhub/latex_pipeline.py` 和
+`latex_translation_filters.py`。
+批处理若实时收到 `translate.api_quota`，会在当前论文写入诊断后把
+`abort_reason` 传到最外层 coordinator，立即停止剩余索引、topic 和 mode，
+不会继续让论文逐篇重复失败，并通过现有 SMTP 配置发送 Gmail 告警；
+恢复额度后重新运行同一 retry 命令即可继续。
 
-全文翻译当前使用 chunk v30。正文会先按数学邻接、章节结构和自然句边界
-拆分；含两个以上 citation 的最终请求上限为 120 字符，含 ref 的请求上限为
-350 字符，普通正文上限为 1200 字符。所有短正文吸收和相邻合并完成后还会
-再次执行最终上限检查，避免中间 helper 把已拆开的引用密集段重新拼回。
+全文翻译当前使用 chunk v45-policy-bounded。正文按数学邻接、章节结构和自然句边界
+整理，普通首轮请求上限 2400 字符，结构/引用密集片段自动降为 1900/1500。引用密度只作为失败诊断证据，不再把
+所有段落预拆成 120/350 字符；结构门禁失败后只细分对应 slot。
 上游若从 citation key 中间切断片段，会优先闭合引用再送模型。纯 TikZ path、
-代码/提示源码、作者元数据和严格的专名/引用目录不计入漏译正文；已翻译短标题
+纯公式、HTTP endpoint 清单、脱离命令的 citation-key 参数、代码/提示源码、
+作者元数据和严格的专名/引用目录不计入漏译正文；已翻译短标题
 后的产品名清单也不会因专名保持英文而重复重试。响应仍必须通过命令和 citation
 多重集校验，解释性英文正文不会被这些排除规则隐藏。自定义文本宏
 （如 `\compactbullet{...}`）只移除命令 token、保留自然语言参数；与展示公式
@@ -551,19 +559,21 @@ PDF 先复制到同目录临时文件，校验并 fsync 后才在 per-paper 锁�
 修复完成。监控必须继续检查主实例最终写入的
 `logs/repair_history/weekly-<key>.json`，只有最新状态为 `ok` 才能判定完成。
 
-topic 订阅不走 `--refetch` 补索引，必须由 root crontab 中的 `run_topic.py --all` 生成每日结果；如果 `/topic` 没有当天结果，优先检查 `crontab -l` 是否包含 `run_topic.py --all` 和 `--retry-pdf --mode topic` 两行，再看 `logs/cron-topic.log` 与 `logs/repair.log`。
+topic 订阅不走 `--refetch` 补索引，必须由 managed cron 中的 `run_topic.py --all` 生成每日结果；PDF retry 由全模式 maintenance 统一覆盖。如果 `/topic` 没有当天结果，检查 `crontab -l` 的 managed block、`logs/cron-topic.log` 和 `logs/maintenance.log`。
 
 ### full-TeX slim LaTeX 容器
 
 当前生产翻译容器为 `gpt-academic-latex-slim`，镜像为 `paper-trans-latex-slim:latest`。它继续继承原 `gpt_academic_with_latex` 的完整 TeX/font 运行时，避免逐个补 TeX 包；同时删除 torch、nvidia、transformers、nougat、缓存、文档和源码等中文翻译不需要的大体积内容。
 
-当前本机状态（2026-06-12）：
+当前本机状态（2026-08-11）：
 
-- 原镜像 `ghcr.io/binary-husky/gpt_academic_with_latex:master`：约 15.4GB。
-- full-TeX slim 镜像 `paper-trans-latex-slim:latest`：约 7.62GB。
-- 当前仅保留并运行 `gpt-academic-latex-slim`；原生产容器 `gpt-academic-latex` 与原 15.4GB 镜像已删除。
-- 删除旧镜像后 Docker overlay2 曾残留孤儿目录；确认 Docker images/containers/volumes/build cache 均为空后，停 Docker/containerd 清理孤儿 overlay2，再启动服务，根分区可用空间恢复到约 14GB。
+- 生产镜像 `paper-trans-latex-slim:latest`：6,745,966,319 bytes（Docker 显示 6.746GB，约 6.28GiB）；相较上一版 7,620,981,032 bytes 减少约 875MB。
+- 当前仅保留并运行 `gpt-academic-latex-slim`：1 个镜像、1 个容器、0 build cache；原生产容器和上游 15.4GB 镜像均未保留。
+- Docker 对象清空后仍发现约 22GB 孤立 overlay2。停 Docker/containerd 并清除确认无引用的孤儿层后再导入平衡裁剪镜像，当前根分区可用约 6.0GB。
+- `/gpt/config_private.py` 从 `${XDG_DATA_HOME:-/root/.local/share}/paper-trans/runtime/config_private.py` 只读挂载；该文件由 scoped env 原子生成且保持 owner-only，`/gpt/gpt_log` 外置到 `${XDG_DATA_HOME:-/root/.local/share}/paper-trans/gpt-log`，重建镜像不再复制运行缓存或密钥。
+- 镜像内 `/opt/paper-trans-runtime-ready` 表示依赖已就绪，正常启动直接跳过 setup；仅在缺包时运行带总超时和网络超时的 apt。
 - compile canary 已通过：`2606.09967`、`2606.10917`、`2606.09828`、`2606.02060`。
+- 新平衡裁剪 rootfs 在导出前通过上述 4 篇 canary；导入为生产镜像后又以 `2606.10917` 复验通过。
 - full no-cache canary 已通过：`2606.08432`。
 - 2026-06-12 复盘 2026-06-11 daily 失败项：`2606.11926`、`2606.12344` 已在 slim 容器下修复并恢复为 `pdf_status=ok`。
 - full-TeX slim 切换后再次用 `2606.11926`、`2606.12344` 复用中文 tex 备份重编译验证通过，PDF 分别约 2.52MB 和 1.88MB。
@@ -577,9 +587,9 @@ topic 订阅不走 `--refetch` 补索引，必须由 root crontab 中的 `run_to
 # 只估算 rootfs 体积，不导入镜像
 GPT_ACADEMIC_SLIM_DRY_RUN=1 ./scripts/build_latex_slim.sh
 
-# 低磁盘切换时可先导出压缩 rootfs，删除旧镜像腾空间后再手动 docker import
-GPT_ACADEMIC_SLIM_EXPORT_ARCHIVE=/tmp/paper-trans-fulltex-slim.tar.gz \
-  GPT_ACADEMIC_SLIM_EXPORT_COMPRESSOR=pigz \
+# 低磁盘切换时可先导出压缩 rootfs，校验归档后再替换旧镜像
+GPT_ACADEMIC_SLIM_EXPORT_ARCHIVE=/tmp/paper-trans-fulltex-slim.tar.xz \
+  GPT_ACADEMIC_SLIM_EXPORT_COMPRESSOR=xz \
   ./scripts/build_latex_slim.sh
 
 # 显式使用历史 slim TeX 裁剪策略

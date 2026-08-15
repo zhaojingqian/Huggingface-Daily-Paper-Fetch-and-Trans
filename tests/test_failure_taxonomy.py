@@ -89,6 +89,20 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertEqual(quota["retry_strategy"], "manual_review")
         self.assertEqual(quota["repair_action"], "recharge_api_balance")
 
+    def test_disk_full_is_infrastructure_even_without_driver_phase(self):
+        result = classify_failure(
+            "compile",
+            plugin_error=(
+                "Traceback: OSError: [Errno 28] No space left on device: "
+                "'gpt_log/arxiv_cache/2608.03571'"
+            ),
+        )
+
+        self.assertEqual(result["category"], "infrastructure.disk_full")
+        self.assertEqual(result["family"], "infrastructure")
+        self.assertEqual(result["retry_strategy"], "retry_later")
+        self.assertEqual(result["repair_action"], "free_disk_and_cleanup_cache")
+
     def test_timeout_configuration_does_not_mask_quality_failure(self):
         result = classify_failure(
             "compile",
@@ -97,6 +111,24 @@ class FailureTaxonomyTest(unittest.TestCase):
         )
 
         self.assertEqual(result["category"], "quality.untranslated_prose")
+
+    def test_chunk_gate_failure_is_quality_not_plugin_runtime(self):
+        result = classify_failure(
+            "translate",
+            plugin_error=(
+                "RuntimeError: LLM request/untranslated/structural failures "
+                "remain in 1 translation chunks after serial retry"
+            ),
+        )
+
+        self.assertEqual(
+            result["category"],
+            "quality.translation_chunk_invalid",
+        )
+        self.assertEqual(
+            result["repair_action"],
+            "inspect_failed_translation_chunk",
+        )
 
     def test_pdf_text_quality_categories_are_stable_translation_retries(self):
         expected_actions = {
@@ -166,6 +198,77 @@ class FailureTaxonomyTest(unittest.TestCase):
             self.assertEqual(record["category"], "quality.untranslated_prose")
             self.assertEqual(record["retry_strategy"], "retry_translation")
             self.assertEqual(record["reclassified_from"], "compile.unknown")
+
+    def test_unknown_sidecar_is_refined_to_disk_full_from_raw_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_json_atomic(
+                os.path.join(tmp, "2608.03571.json"),
+                {
+                    "arxiv_id": "2608.03571",
+                    "category": "unknown.unstructured",
+                    "retry_strategy": "manual_review",
+                },
+            )
+            with open(
+                os.path.join(tmp, "2608.03571.log"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write("OSError: [Errno 28] No space left on device")
+
+            record = load_failure_records(tmp)[0]
+
+            self.assertEqual(record["category"], "infrastructure.disk_full")
+            self.assertEqual(record["retry_strategy"], "retry_later")
+            self.assertEqual(record["reclassified_from"], "unknown.unstructured")
+
+    def test_stale_plugin_sidecar_is_refined_from_embedded_disk_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_json_atomic(
+                os.path.join(tmp, "2608.03573.json"),
+                {
+                    "arxiv_id": "2608.03573",
+                    "phase": "translate",
+                    "category": "translate.plugin_exception",
+                    "retry_strategy": "retry_translation",
+                    "plugin_error_full": (
+                        "Traceback: OSError: [Errno 28] No space left on device"
+                    ),
+                },
+            )
+
+            record = load_failure_records(tmp)[0]
+
+            self.assertEqual(record["category"], "infrastructure.disk_full")
+            self.assertEqual(record["retry_strategy"], "retry_later")
+            self.assertEqual(
+                record["reclassified_from"], "translate.plugin_exception"
+            )
+
+    def test_stale_plugin_sidecar_is_refined_from_chunk_gate_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_json_atomic(
+                os.path.join(tmp, "2608.09819.json"),
+                {
+                    "arxiv_id": "2608.09819",
+                    "phase": "translate",
+                    "category": "translate.plugin_runtime",
+                    "retry_strategy": "retry_translation",
+                    "plugin_error_full": (
+                        "RuntimeError: LLM request/untranslated/structural "
+                        "failures remain in 1 translation chunks after serial retry"
+                    ),
+                },
+            )
+
+            record = load_failure_records(tmp)[0]
+
+            self.assertEqual(
+                record["category"],
+                "quality.translation_chunk_invalid",
+            )
+            self.assertEqual(
+                record["reclassified_from"],
+                "translate.plugin_runtime",
+            )
 
 
 if __name__ == "__main__":

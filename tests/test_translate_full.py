@@ -19,6 +19,9 @@ class TranslateFullCommandTest(unittest.TestCase):
             for path in translate_full.DRIVER_SUPPORT_FILES
         }
         self.assertIn("translation_quality.py", bundled)
+        self.assertIn("residual_translation.py", bundled)
+        self.assertIn("translation_policy.py", bundled)
+        self.assertIn("latex_pipeline.py", bundled)
         with open(translate_full.DRIVER_SCRIPT, encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("from translation_quality import", source)
@@ -98,6 +101,73 @@ class TranslateFullCommandTest(unittest.TestCase):
             self.assertFalse(translate_full.check_container())
 
         self.assertEqual(run.call_args.kwargs["timeout"], 0.25)
+
+    def test_retry_cache_cleanup_is_scoped_to_reproducible_artifacts(self):
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(
+            translate_full, "_run_docker_control", return_value=completed
+        ) as run:
+            self.assertTrue(
+                translate_full._cleanup_completed_retry_runtime_cache(
+                    "2608.03571"
+                )
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[:5], [
+            "docker", "exec", "-u", "root", translate_full.CONTAINER_NAME,
+        ])
+        self.assertEqual(command[-1], "2608.03571")
+        cleanup_source = command[-2]
+        self.assertIn("shutil.rmtree(paper_cache", cleanup_source)
+        self.assertIn("default_user/shared", cleanup_source)
+        self.assertNotIn("find", cleanup_source)
+        self.assertNotIn("arxiv_cache/*", cleanup_source)
+
+    def test_retry_cleanup_deletes_only_files_created_during_attempt(self):
+        snapshots = [
+            {"/gpt/gpt_log/default_user/shared/old.zip"},
+            {
+                "/gpt/gpt_log/default_user/shared/old.zip",
+                "/gpt/gpt_log/default_user/shared/new.zip",
+            },
+        ]
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(
+            translate_full,
+            "_snapshot_retry_runtime_files",
+            side_effect=snapshots,
+        ), mock.patch.object(
+            translate_full,
+            "_run_docker_control",
+            return_value=completed,
+        ) as run:
+            before = translate_full._snapshot_retry_runtime_files()
+            self.assertTrue(
+                translate_full._cleanup_completed_retry_runtime_cache(
+                    "2608.03571", baseline_files=before
+                )
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn("/gpt/gpt_log/default_user/shared/new.zip", command)
+        self.assertNotIn("/gpt/gpt_log/default_user/shared/old.zip", command)
+
+    def test_disk_preflight_blocks_translation_at_critical_watermark(self):
+        usage = (100, 96, 4)
+        with mock.patch.object(
+            translate_full.shutil, "disk_usage", return_value=usage
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "PAPER_TRANS_MIN_FREE_MB": "0",
+                "PAPER_TRANS_DISK_CRITICAL_WATERMARK": "95",
+            },
+        ):
+            error = translate_full._disk_preflight_error()
+
+        self.assertIn("No space left on device", error)
+        self.assertIn("used=96%", error)
 
     def test_timed_out_tex_backup_does_not_replace_last_good_copy(self):
         arxiv_id = "2607.13399"
@@ -270,6 +340,33 @@ class TranslateFullCommandTest(unittest.TestCase):
             mock.call.client(proc),
         ])
 
+    def test_keyboard_interrupt_still_cleans_scoped_container_tree(self):
+        class FakeProcess:
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryFile() as output:
+            proc = FakeProcess(output)
+            cleanup = mock.Mock(return_value={"verified": True})
+            with mock.patch.object(
+                translate_full.subprocess, "Popen", return_value=proc,
+            ), mock.patch.object(
+                translate_full, "_cleanup_container_driver", cleanup,
+            ), mock.patch.object(
+                translate_full.time, "time", side_effect=[0.0, 0.0, 0.0],
+            ), mock.patch.object(
+                translate_full.time, "sleep", side_effect=KeyboardInterrupt,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    translate_full.run_in_container(
+                        "2607.13399", no_cache=False, timeout=60,
+                    )
+
+        cleanup.assert_called_once_with(proc, "2607.13399")
+
     def test_terminate_rejects_unscoped_or_invalid_target(self):
         with self.assertRaises(ValueError):
             translate_full._container_process_tree_action("terminate")
@@ -277,7 +374,12 @@ class TranslateFullCommandTest(unittest.TestCase):
             translate_full.terminate_container_driver_tree("../other")
 
     def test_driver_disables_shell_escape_and_restricts_tex_io(self):
-        with open(translate_full.DRIVER_SCRIPT, encoding="utf-8") as handle:
+        pipeline = os.path.join(
+            translate_full.BASE_DIR,
+            "paperhub",
+            "latex_pipeline.py",
+        )
+        with open(pipeline, encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn('"openin_any": "p"', source)
@@ -287,10 +389,24 @@ class TranslateFullCommandTest(unittest.TestCase):
 
     def test_driver_compile_wrapper_rejects_nonzero_tex_exit(self):
         """A TeX failure must not advance the upstream compile-success path."""
-        with open(translate_full.DRIVER_SCRIPT, encoding="utf-8") as handle:
+        pipeline = os.path.join(
+            translate_full.BASE_DIR,
+            "paperhub",
+            "latex_pipeline.py",
+        )
+        with open(pipeline, encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("return process.returncode == 0", source)
+
+    def test_translation_driver_is_lifecycle_sized(self):
+        """TeX adapters and schedulers must not grow back into the driver."""
+        with open(translate_full.DRIVER_SCRIPT, encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertLessEqual(len(source.splitlines()), 1100)
+        self.assertIn("_install_gpt_academic_latex_patches()", source)
+        self.assertNotIn("def _patched_compile_with_timeout", source)
 
     def test_driver_bounds_slow_source_prefetch_and_validates_length(self):
         """A trickling arXiv response cannot hold the global lock indefinitely."""

@@ -2,9 +2,108 @@
 
 ---
 
+## v4.38 — 2026-08-15
+
+### 翻译层减法重构、DeepSeek 源注册与 50 并发
+
+- **职责收敛**：`full_translate_driver.py` 从 4067 行降到 986 行，只保留单篇
+  生命周期、源码缓存、质量门禁和结果诊断；TeX 修补/BibTeX/XeLaTeX/LuaLaTeX
+  fallback 迁移到 `paperhub/latex_pipeline.py`，gpt-academic splitter、响应
+  校验、失败槽重试和归档安全适配迁移到 `paperhub/translation_runtime.py`。
+  `paperhub/translation_policy.py` 是 chunk 上限与并发/重试策略的唯一来源，
+  没有新增 Redis、队列服务或第二套状态机。
+- **请求策略**：普通正文 chunk 上限由 1200 收敛到 2400 字符；结构/引用密集片段
+  自动降为 1900/1500。首轮由 `PAPER_TRANS_LLM_WORKERS` 控制，默认 50；失败槽
+  使用最多 16 路的有界并发重试，自适应结构细分统一合并为一个批次。
+- **模型源**：删除 driver 内的 `gpt-4.1-mini` alias/绕过逻辑，改由
+  `scripts/patch_gpt_academic_model.py` 在容器内 gpt-academic 源码中注册真实的
+  `deepseek-v4-flash-0731` OpenAI-compatible model entry 和 key router。真实
+  bridge 请求已返回成功，日志确认运行模型为 DeepSeek。
+- **Docker 评估**：当前不能删除 slim 容器。宿主机没有 TeX 编译器或
+  gpt-academic 源码；镜像约 6.75GB，其中 TeX 约 3.2GB、字体约 818MB。删除
+  只会把依赖转移到宿主机并触发更大范围入口重写，因此保留 Docker 作为编译和
+  gpt-academic 隔离边界，后续仅做可验证的镜像/缓存瘦身。
+- **真实验证**：`2603.14473` 50 并发重译 124 秒，276 个最终 chunk，中文覆盖
+  86.9%，编译健康通过；复用中文 TeX 的重构后 smoke 为 42 秒、覆盖 87.0%，
+  编译健康通过。全项目测试 400 项通过、3 项按现有数据门禁跳过。
+
 ## v4.37 — 2026-07-28
 
 ### chunk v11、统一质量门禁与五模式修复闭环
+
+- **2026-08-12 服务器运行时与密钥收口**：PaperHub 的生产、cron、systemd、
+  维护和测试入口统一为 `workspace-ctl paper ...`，宿主 Python 仅由共享
+  `SERVER_PYTHON` 定义。PaperHub 与 gpt-academic 密钥迁移到权限 `600` 的
+  `/root/workspace/.env.d/paper.env` 和 `gpt-academic.env`；第三方
+  `config_private.py` 改为运行前从 env 原子生成并做等价校验，项目和 vendor
+  目录不再保存 API key。COROS 因上游 Python >=3.11 要求保留独立 venv，作为
+  明确的 integration 边界，不影响第一方应用运行时一致性。
+
+- **2026-08-11 chunk v40-adaptive 与末端残留修复**：`2607.23782` 的完整
+  翻译已经达到 93.5% 中文覆盖，但仅 3 行英文接缝导致旧流程准备重跑 175 个
+  chunk。新增通用末端修复器，只翻译质量门禁报告的行，逐行验证 LaTeX 结构并
+  仅提交质量分数严格改善的结果；真实运行以 3 次单行请求把混合英文 clause
+  从 3 降到 0，41 秒重编译发布。首轮 chunk 同时取消 120/350 字符的 citation/
+  ref 预切分，统一保留 1200 字符上下文；只有实际结构门禁失败的 slot 才按
+  约 480 字符自适应细分串行重试。`2608.09819` 的 v39 现场从 160 个上游块
+  膨胀到 497 个请求，成为此次做减法的直接生产证据。v40 重跑时只细分实际
+  失败的 1 个 1133 字符 slot，最终成功发布；`2608.09802` 的仓库路径和
+  `2608.09819` 的 snake_case citation key 也已抽象为结构化标识符保护。
+  2026-08-11 daily 的 `2608.09888`、`2608.09802`、`2608.09819` 现均为
+  `pdf_status=ok`，编译健康且失败 sidecar 已清除。
+
+- **2026-08-11 运维与 workspace 架构收敛**：新增低成本
+  `scripts/repair_snapshot.py`；skill 默认先跑快照，再按 category 选择近窗、
+  chunk 或严格审计。旧 sidecar 中被插件异常掩盖的 `Errno 28` 会从嵌入证据
+  重分类；遗留 69 篇现稳定归为磁盘 63、翻译 chunk 结构/漏译 5、额度 1，
+  不再使用含混的 plugin runtime 桶。cron 业务逻辑
+  收敛到 `scripts/run_maintenance.py`，由 `scripts/install_paper_cron.py`
+  管理 4 个抓取、1 个周修复和 1 个维护入口，替代重复 post/retry/cleanup 行。
+  daily 队列结束后已原子迁移到 `/root/workspace/apps/paper-trans`，第三方配置
+  对齐 `/root/workspace/vendor/gpt-academic`；systemd、Codex trust、cron、Docker
+  bind 和脚本均已切换，HTTPS `/paper/` 与 4 篇 compile canary 验证通过。容器
+  `gpt_log` 改为 XDG 外置缓存；setup 先检查本地依赖，只有缺包才执行带总超时
+  的 apt，已齐依赖不再因每次重建无条件联网更新而阻塞。
+
+- **2026-08-11 Docker 平衡裁剪上线**：候选 rootfs 在导出前先运行 4 篇历史
+  compile canary，xz 归档完成后通过完整性校验；确认 Docker 对象为空后清除
+  22GB 孤立 overlay2，避免旧层和导入临时层叠加再次写满磁盘。新生产镜像
+  `sha256:34d7674...` 为 6,745,966,319 bytes（6.746GB/6.28GiB），比原
+  7,620,981,032 bytes 镜像减少约 875MB，同时保留完整 TeX/font 能力。
+  导入后的生产镜像再以 `2606.10917` 通过 canary；当前仅有 1 个镜像、1 个
+  容器、0 build cache，根分区可用约 6.0GB。运行时完成标记使依赖齐全时启动
+  直接跳过 setup，`config_private.py` 只读挂载，`gpt_log` 独立读写挂载。
+
+- **2026-08-12 全模式额度熔断上移**：充值后实际重试 `2607.28956`，API 仍在
+  3 个 chunk 上返回 `insufficient_user_quota`；说明当前生产凭据余额尚未生效，
+  不是 Docker 或磁盘问题。运行同时暴露旧熔断只跳出单个 index、外层会继续
+  下一个 mode 的漏洞。现将 `abort_reason` 从单篇执行器传到 mode 和 CLI
+  coordinator，daily/weekly/monthly/manual 任一处命中即停止整个全模式批次；
+  topic 自身也会停止剩余索引。新增跨 mode 与跨 topic 回归测试，防止再次按篇
+  消耗请求。
+
+- **2026-08-11 all 失败 PDF 修复与 chunk v35–v39**：全模式失败从 77 篇降至
+  70 篇；已恢复 `2607.26760`、`2607.28227`、`2607.28618`、`2608.01964`、
+  `2608.02023`、`2608.01735`，以及此前复用 TeX 修复的 `2605.28556`。
+  新增带句末标点纯公式、短引用专名目录、已译短前缀加专名目录、HTTP endpoint
+  清单、splitter 脱离命令的 citation-key 参数保护，均以真实失败 chunk 和反例
+  固化测试。动态 `\input{\relatedworkfile}` 改由 TeX 运行时解析，不再误报源码
+  缺失。实时遇到 `translate.api_quota` 后本批立即熔断并发送 Gmail 告警，
+  避免剩余论文逐篇重复失败。当前 70 篇残留为磁盘历史失败 57、插件异常 12、API 额度 1；磁盘空间
+  已恢复。另将 7 篇成功论文同步到 5 个跨模式索引，修正 9 处陈旧 `failed`
+  引用；需要翻译的残留须在额度恢复后继续串行处理，不能宣称全量完成。
+
+- **2026-08-11 磁盘清理与 Gmail 告警**：定位近期全文翻译统一失败为根分区
+  100%，驱动在创建 `gpt_log/arxiv_cache/<id>` 时触发 `Errno 28`。手动回收
+  容器内可再生缓存 5.6GB，磁盘从 100% 降至 87%。修复 7 月 28 日引入的
+  30 天保留策略：此前 `default_user/shared` 被当成单个一级目录，只要目录内
+  存在近期文件，数 GB 历史 zip 就全部保留，8 月 2 日和 9 日定时任务均删除
+  0 项。新策略改为每天 03:30 运行，常规保留 3 天；使用率达到 90% 或可用
+  空间低于 2GB 时保留 1 天。论文缓存按目录删除，shared/downloadzone/admin
+  按文件年龄删除；清理后仍处危险水位或脚本异常退出时返回非零，并复用
+  `/root/scholar-citation-monitor/config.env` 的 Gmail SMTP 配置发送告警。
+  邮件发送最多重试 3 次，且 SMTP `QUIT` 阶段的偶发超时不会覆盖已经被服务端
+  接收的发送结果。
 
 - **2026-07-31 chunk v30 与 25 篇修复闭环**：25 篇目标论文已全部恢复为
   可发布中文 PDF。最后一篇 `2605.13301` 从 `cjk_pct=64.2%`、49 个高置信

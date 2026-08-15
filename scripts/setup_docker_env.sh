@@ -15,11 +15,12 @@
 #   - 日常 docker restart 不需要重跑（改动已持久化在容器文件系统内）
 #
 # 用法：
-#   bash /root/workspace/paper-trans/scripts/setup_docker_env.sh
+#   bash /root/workspace/apps/paper-trans/scripts/setup_docker_env.sh
 #
 set -e
 
 CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== [setup_docker_env] 检查容器 $CONTAINER 是否运行 ==="
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -27,16 +28,47 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     exit 1
 fi
 
-# ── 1. 安装字体包 ────────────────────────────────────────────────────────────
-echo "=== [1/10] 安装 Noto CJK + Arphic + Noto Extra 字体 ==="
-docker exec -u root "$CONTAINER" apt-get update -qq
-docker exec -u root "$CONTAINER" apt-get install -y --no-install-recommends \
-    fonts-noto-cjk \
-    fonts-noto-extra \
-    fonts-arphic-ukai \
-    fonts-arphic-uming \
-    texlive-lang-european \
+echo "=== [setup_docker_env] 注册 OpenAI-compatible 模型源: deepseek-v4-flash-0731 ==="
+docker cp "${ROOT_DIR}/scripts/patch_gpt_academic_model.py" \
+    "${CONTAINER}:/tmp/patch_gpt_academic_model.py"
+docker exec -u root "$CONTAINER" python3 /tmp/patch_gpt_academic_model.py
+docker exec -u root "$CONTAINER" rm -f /tmp/patch_gpt_academic_model.py
+
+# ── 1. 仅在缺包时执行有界 apt ───────────────────────────────────────────────
+echo "=== [1/10] 检查 Noto CJK + Arphic + TeX 依赖 ==="
+REQUIRED_PACKAGES=(
+    fonts-noto-cjk
+    fonts-noto-extra
+    fonts-arphic-ukai
+    fonts-arphic-uming
+    texlive-lang-european
     texlive-science
+)
+MISSING_PACKAGES=()
+for package in "${REQUIRED_PACKAGES[@]}"; do
+    if ! docker exec "$CONTAINER" dpkg -s "$package" >/dev/null 2>&1; then
+        MISSING_PACKAGES+=("$package")
+    fi
+done
+
+if [ "${#MISSING_PACKAGES[@]}" -eq 0 ]; then
+    echo "  依赖已齐，跳过 apt 网络操作"
+else
+    APT_TIMEOUT_SECONDS="${PAPER_TRANS_APT_TIMEOUT_SECONDS:-300}"
+    APT_OPTIONS=(
+        -o Acquire::Retries=2
+        -o Acquire::http::Timeout=20
+        -o Acquire::https::Timeout=20
+    )
+    echo "  缺少: ${MISSING_PACKAGES[*]}"
+    timeout --signal=TERM "${APT_TIMEOUT_SECONDS}s" \
+        docker exec -u root "$CONTAINER" \
+        apt-get "${APT_OPTIONS[@]}" update -qq
+    timeout --signal=TERM "${APT_TIMEOUT_SECONDS}s" \
+        docker exec -u root "$CONTAINER" \
+        apt-get "${APT_OPTIONS[@]}" install -y --no-install-recommends \
+        "${MISSING_PACKAGES[@]}"
+fi
 
 # ── 2. 写入 fontconfig 映射（Windows CJK 字体名 → Linux 等效字体）────────────
 echo "=== [2/10] 写入 fontconfig 映射规则 ==="
@@ -304,7 +336,7 @@ TOOLBOX=/gpt/crazy_functions/latex_fns/latex_toolbox.py
 if docker exec "$CONTAINER" grep -q "axessibility" "$TOOLBOX"; then
     echo "  已修补，跳过"
 else
-    docker cp /root/workspace/paper-trans/scripts/patch_axessibility.py "$CONTAINER:/tmp/patch_axessibility.py"
+    docker cp "${ROOT_DIR}/scripts/patch_axessibility.py" "$CONTAINER:/tmp/patch_axessibility.py"
     docker exec -u root "$CONTAINER" python3 /tmp/patch_axessibility.py
 fi
 
@@ -313,7 +345,7 @@ echo "=== [8/10] 修补 latex_toolbox.py（find_main_tex_file：00README.json + 
 if docker exec "$CONTAINER" grep -q "00README.json" /gpt/crazy_functions/latex_fns/latex_toolbox.py; then
     echo "  已修补，跳过"
 else
-    docker cp /root/workspace/paper-trans/scripts/patch_find_main_tex.py "$CONTAINER:/tmp/patch_find_main_tex.py"
+    docker cp "${ROOT_DIR}/scripts/patch_find_main_tex.py" "$CONTAINER:/tmp/patch_find_main_tex.py"
     docker exec -u root "$CONTAINER" python3 /tmp/patch_find_main_tex.py
 fi
 

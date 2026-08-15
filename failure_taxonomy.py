@@ -18,6 +18,15 @@ def _result(code, family, retry_strategy, repair_action, suggestion, evidence=""
 
 
 QUALITY_FAILURE_SPECS = {
+    "quality.translation_chunk_invalid": {
+        "family": "translation_quality",
+        "retry_strategy": "retry_translation",
+        "repair_action": "inspect_failed_translation_chunk",
+        "suggestion": (
+            "翻译 chunk 在请求、漏译或 LaTeX 结构门禁后仍无效；按 abnormal reason "
+            "修复共享过滤或结构策略，再仅重试该论文。"
+        ),
+    },
     "quality.untranslated_prose": {
         "family": "translation_quality",
         "retry_strategy": "retry_translation",
@@ -85,6 +94,32 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
     latex = latex_log or ""
     plugin = plugin_error or ""
     combined = f"{plugin}\n{latex}"
+
+    # Infrastructure failures can surface before the plugin establishes a
+    # meaningful translate/compile phase. Match them before phase-specific
+    # fallbacks so ENOSPC never degrades to plugin_exception or unstructured.
+    if re.search(r"No space left on device|\[Errno 28\]|\bENOSPC\b", combined, re.I):
+        return _result(
+            "infrastructure.disk_full",
+            "infrastructure",
+            "retry_later",
+            "free_disk_and_cleanup_cache",
+            "宿主机或容器磁盘空间耗尽；先清理可再生缓存并通过磁盘水位预检，再重试。",
+            _evidence(combined, r"No space left on device|\[Errno 28\]|\bENOSPC\b"),
+        )
+
+    if re.search(
+        r"LLM request/untranslated/structural failures remain",
+        combined,
+        re.I,
+    ):
+        return quality_failure(
+            "quality.translation_chunk_invalid",
+            _evidence(
+                combined,
+                r"LLM request/untranslated/structural failures remain",
+            ),
+        )
 
     if phase == "translate":
         if re.search(

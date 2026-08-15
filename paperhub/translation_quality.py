@@ -111,6 +111,7 @@ def analyze_tex(path) -> Dict[str, object]:
     # prompt/example protection aligned with the production splitter.
     env_stack = []
     inline_source_data_state = {}
+    structural_input_data_state = {}
     english_lines = []
     broad_english_lines = []
     very_long_english = 0
@@ -143,6 +144,12 @@ def analyze_tex(path) -> Dict[str, object]:
                 inline_source_data_state,
             )
         )
+        structural_input_data, structural_input_data_state = (
+            filters.structural_input_command_line_protected(
+                code,
+                structural_input_data_state,
+            )
+        )
         for index in range(len(env_stack) - 1, -1, -1):
             env, semantic_source_data = env_stack[index]
             if semantic_source_data:
@@ -159,10 +166,18 @@ def analyze_tex(path) -> Dict[str, object]:
             for env, semantic_source_data in env_stack
         ) or (
             inline_source_data
+            or structural_input_data
             or filters.is_latex_metadata_line(code)
+            or filters.is_affiliation_metadata_fragment(code)
+            or filters.is_graphics_path_fragment(code)
+            or filters.is_formatting_label_fragment(code)
+            or filters.is_unbalanced_latex_fragment(code)
             or filters.is_tikz_drawing_fragment(code)
             or filters.is_tikz_style_definition_fragment(code)
             or filters.is_citation_heavy_proper_name_catalog(code)
+            or filters.is_structured_identifier_path(code)
+            or filters.is_person_name_catalog(code)
+            or filters.is_tool_call_result_fragment(code)
         )
         structural = any(filters.is_tracked_env(env) for env in begins + ends)
         if in_document and not protected and not structural:

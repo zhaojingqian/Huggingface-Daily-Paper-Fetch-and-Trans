@@ -20,6 +20,7 @@ import re
 import math
 from pathlib import Path
 
+from failure_taxonomy import classify_failure
 from paperhub.json_io import write_json_atomic
 from paperhub.paper_store import pdf_file_valid
 from paperhub.publication_lock import paper_publication_lock
@@ -37,8 +38,12 @@ DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
 DRIVER_SUPPORT_FILES = [
     DRIVER_SCRIPT,
     os.path.join(BASE_DIR, "latex_translation_filters.py"),
+    os.path.join(BASE_DIR, "paperhub", "translation_policy.py"),
+    os.path.join(BASE_DIR, "paperhub", "latex_pipeline.py"),
+    os.path.join(BASE_DIR, "paperhub", "translation_runtime.py"),
     os.path.join(BASE_DIR, "failure_taxonomy.py"),
     os.path.join(BASE_DIR, "paperhub", "translation_quality.py"),
+    os.path.join(BASE_DIR, "paperhub", "residual_translation.py"),
 ]
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
@@ -47,6 +52,8 @@ CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
 _ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
 DEFAULT_DOCKER_CONTROL_TIMEOUT = 30.0
 MAX_DOCKER_CONTROL_TIMEOUT = 600.0
+DEFAULT_MIN_FREE_MB = 2048
+DEFAULT_DISK_CRITICAL_WATERMARK = 95
 
 
 def _docker_control_timeout() -> float:
@@ -80,6 +87,129 @@ def _run_docker_control(command, operation, **kwargs):
     except OSError as exc:
         print(f"❌ Docker 操作失败: {operation} ({exc})", flush=True)
     return None
+
+
+def _bounded_nonnegative_int(env_name, default):
+    raw = os.environ.get(env_name, str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
+def _disk_preflight_error():
+    """Return an ENOSPC-style message when translation must not start."""
+    total, used, free = shutil.disk_usage(BASE_DIR)
+    free_mb = free // (1024 * 1024)
+    used_pct = int(round((used * 100.0) / total)) if total else 100
+    min_free_mb = _bounded_nonnegative_int(
+        "PAPER_TRANS_MIN_FREE_MB", DEFAULT_MIN_FREE_MB
+    )
+    critical = min(
+        100,
+        _bounded_nonnegative_int(
+            "PAPER_TRANS_DISK_CRITICAL_WATERMARK",
+            DEFAULT_DISK_CRITICAL_WATERMARK,
+        ),
+    )
+    if free_mb < min_free_mb or used_pct >= critical:
+        return (
+            "OSError: [Errno 28] No space left on device (preflight): "
+            f"used={used_pct}% free={free_mb}MB "
+            f"required_free={min_free_mb}MB critical={critical}%"
+        )
+    return ""
+
+
+def _snapshot_retry_runtime_files():
+    """Return exact transient output files present before one locked retry."""
+    roots = (
+        "/gpt/gpt_log/default_user/shared",
+        "/gpt/gpt_log/default_user/downloadzone",
+    )
+    command = [
+        "docker", "exec", CONTAINER_NAME, "sh", "-c",
+        "for root in \"$@\"; do "
+        "[ -d \"$root\" ] || continue; "
+        "find \"$root\" -type f -print; "
+        "find \"$root\" -type l -print; done",
+        "sh", *roots,
+    ]
+    completed = _run_docker_control(
+        command,
+        "记录 retry 前的容器临时输出",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed is None or completed.returncode != 0:
+        return None
+    return {
+        line.strip()
+        for line in (completed.stdout or "").splitlines()
+        if line.strip()
+    }
+
+
+def _cleanup_completed_retry_runtime_cache(arxiv_id, baseline_files=None):
+    """Drop one paper cache and only transient files created by this retry."""
+    if not _ARXIV_ID_RE.fullmatch(str(arxiv_id or "")):
+        raise ValueError(f"invalid arXiv ID: {arxiv_id!r}")
+
+    after_files = _snapshot_retry_runtime_files()
+    created_files = []
+    if baseline_files is not None and after_files is not None:
+        created_files = sorted(after_files - set(baseline_files))
+
+    cleanup_script = r'''
+import os
+import shutil
+import sys
+
+aid = sys.argv[1]
+cache_root = os.path.realpath("/gpt/gpt_log/arxiv_cache")
+paper_cache = os.path.realpath(os.path.join(cache_root, aid))
+if os.path.dirname(paper_cache) != cache_root:
+    raise SystemExit("unsafe paper cache path")
+shutil.rmtree(paper_cache, ignore_errors=True)
+
+allowed_roots = tuple(map(os.path.realpath, (
+    "/gpt/gpt_log/default_user/shared",
+    "/gpt/gpt_log/default_user/downloadzone",
+)))
+for raw_path in sys.argv[2:]:
+    path = os.path.realpath(raw_path)
+    if not any(os.path.commonpath((path, root)) == root for root in allowed_roots):
+        raise SystemExit("unsafe transient output path")
+    if os.path.isfile(path) or os.path.islink(path):
+        os.unlink(path)
+'''
+    command = [
+        "docker", "exec", "-u", "root", CONTAINER_NAME,
+        "python3", "-c", cleanup_script, arxiv_id, *created_files,
+    ]
+    completed = _run_docker_control(
+        command,
+        f"清理 {arxiv_id} 已完成 retry 的容器缓存",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed is None or completed.returncode != 0:
+        print(f"⚠️  retry 容器缓存清理失败: {arxiv_id}", flush=True)
+        return False
+    print(
+        f"🧹 已回收 retry 容器缓存: {arxiv_id} "
+        f"(本次临时输出={len(created_files)})",
+        flush=True,
+    )
+    return True
+
+
+def _cleanup_retry_cache_enabled():
+    return os.environ.get("PAPER_TRANS_CLEAN_RETRY_CACHE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 # docker exec 默认不保证容器内命令拥有独立进程组。驱动先建立新 session，
 # 让超时/人工终止可以只向该论文的进程组发信号，而不会波及其他 docker exec。
@@ -681,6 +811,7 @@ def _container_driver_command(arxiv_id: str):
         "PAPER_TRANS_LLM_WORKERS",
         "PAPER_TRANS_LLM_RETRIES",
         "PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS",
+        "PAPER_TRANS_FORCE_RESIDUAL_REPAIR",
         "PAPER_TRANS_EXPAND_TRANSLATION_SPLIT",
         "PAPER_TRANS_EXTRA_HARD_ENVS",
         "PAPER_TRANS_EXTRA_SOFT_ENVS",
@@ -787,6 +918,9 @@ def run_in_container(arxiv_id: str, no_cache: bool, timeout: int,
 
             time.sleep(0.5)
 
+    except KeyboardInterrupt:
+        _cleanup_container_driver(proc, arxiv_id)
+        raise
     except Exception as e:
         _cleanup_container_driver(proc, arxiv_id)
         return -1, "\n".join(collected), str(e)
@@ -836,17 +970,32 @@ def _write_error_log(arxiv_id: str, stdout: str):
 
     from datetime import datetime
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    structured = diag or {
-        "arxiv_id": arxiv_id,
-        "phase": "unknown",
-        "category": "unknown.unstructured",
-        "family": "unknown",
-        "retry_strategy": "manual_review",
-        "repair_action": "inspect_driver_output",
-        "retryable": False,
-        "suggestion": "驱动未输出结构化诊断；检查原始日志。",
-        "evidence": "",
-    }
+    if diag:
+        structured = diag
+    else:
+        refined = classify_failure("translate", plugin_error=stdout)
+        if refined.get("category") == "translate.unknown":
+            structured = {
+                "arxiv_id": arxiv_id,
+                "phase": "unknown",
+                "category": "unknown.unstructured",
+                "family": "unknown",
+                "retry_strategy": "manual_review",
+                "repair_action": "inspect_driver_output",
+                "retryable": False,
+                "suggestion": "驱动未输出结构化诊断；检查原始日志。",
+                "evidence": "",
+            }
+        else:
+            structured = {
+                "arxiv_id": arxiv_id,
+                "phase": (
+                    "infrastructure"
+                    if str(refined.get("category", "")).startswith("infrastructure.")
+                    else "translate"
+                ),
+                **refined,
+            }
     structured["recorded_at"] = ts
     write_json_atomic(diag_path, structured)
 
@@ -1070,6 +1219,13 @@ def _translate_full_locked(arxiv_id: str, output_dir: str,
     os.makedirs(output_dir, exist_ok=True)
     result = {'success': False, 'pdf_path': None, 'error': None}
 
+    disk_error = _disk_preflight_error()
+    if disk_error:
+        result['error'] = disk_error
+        print(f"❌ {disk_error}", flush=True)
+        _write_error_log(arxiv_id, disk_error)
+        return result
+
     # 1. 检查容器
     if not check_container():
         result['error'] = f"容器 {CONTAINER_NAME} 未运行"
@@ -1172,13 +1328,24 @@ def translate_full(arxiv_id: str, output_dir: str,
 
     try:
         with GlobalTranslationLock(arxiv_id, wait_seconds):
-            return _translate_full_locked(
-                arxiv_id,
-                output_dir,
-                no_cache=no_cache,
-                timeout=timeout,
-                keep_translation=keep_translation,
+            cleanup_enabled = _cleanup_retry_cache_enabled()
+            baseline_files = (
+                _snapshot_retry_runtime_files() if cleanup_enabled else None
             )
+            try:
+                return _translate_full_locked(
+                    arxiv_id,
+                    output_dir,
+                    no_cache=no_cache,
+                    timeout=timeout,
+                    keep_translation=keep_translation,
+                )
+            finally:
+                if cleanup_enabled:
+                    _cleanup_completed_retry_runtime_cache(
+                        arxiv_id,
+                        baseline_files=baseline_files,
+                    )
     except TimeoutError as exc:
         error = str(exc)
         print(f"❌ {error}", flush=True)
@@ -1188,7 +1355,7 @@ def translate_full(arxiv_id: str, output_dir: str,
 def main():
     parser = argparse.ArgumentParser(description="全文翻译 arXiv 论文")
     parser.add_argument("arxiv_id", help="arXiv ID, 如 2602.10388")
-    parser.add_argument("-o", "--output", default="/root/workspace/paper-trans/weekly",
+    parser.add_argument("-o", "--output", default=os.path.join(BASE_DIR, "weekly"),
                         help="输出目录")
     parser.add_argument("--no-cache", action="store_true", help="强制重新翻译")
     parser.add_argument("--keep-translation", action="store_true",
