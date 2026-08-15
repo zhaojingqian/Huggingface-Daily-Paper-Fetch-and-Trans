@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-16-v59-structure-normalize"
+    "paper-trans-splitter-2026-08-16-v60-structure-data"
 )
 
 
@@ -99,6 +99,7 @@ def _patch_latex_translation_splitter():
             or _ltf.is_bracketed_heading_fragment(stripped)
             or _ltf.is_algorithmic_pseudocode_fragment(stripped)
             or _ltf.is_structural_input_command_fragment(stripped)
+            or _ltf.is_structural_command_data_fragment(stripped)
             or _ltf.is_graphics_path_fragment(stripped)
             or _ltf.is_formatting_label_fragment(stripped)
             or _ltf.is_unbalanced_latex_fragment(stripped)
@@ -463,6 +464,8 @@ def _patch_latex_translation_splitter():
         if _ltf.is_person_name_catalog(stripped):
             return False
         if _ltf.is_tool_call_result_fragment(stripped):
+            return False
+        if _ltf.is_structural_command_data_fragment(stripped):
             return False
         if _ltf.is_latex_key_value_option_list(stripped):
             return False
@@ -957,25 +960,18 @@ def _patch_latex_llm_rate_limit_handling():
                         )
                         if any(
                             _ltf.llm_translation_response_failed(response)
-                            or _ltf.llm_translation_response_invalid(
-                                part,
-                                response,
-                            )
-                            or _ltf.llm_translation_response_untranslated(
-                                _ltf.extract_translation_fragment(part),
-                                response,
-                            )
-                            for part, response in zip(parts, group)
+                            for response in group
                         ):
                             continue
                         if (
-                            not _ltf.llm_translation_response_invalid(source, combined)
-                            and not _ltf.llm_translation_response_untranslated(
+                            _ltf.llm_translation_response_invalid(source, combined)
+                            or _ltf.llm_translation_response_untranslated(
                                 source,
                                 combined,
                             )
                         ):
-                            result[original_index * 2 + 1] = combined
+                            continue
+                        result[original_index * 2 + 1] = combined
 
                 if adaptive:
                     (

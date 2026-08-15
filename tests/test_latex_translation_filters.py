@@ -1039,6 +1039,31 @@ Language: Chinese
             filters.llm_translation_response_untranslated(source, response)
         )
 
+    def test_normalize_restores_missing_or_extra_citations(self):
+        source = r"We report results~\cite{alpha2026} in this section."
+        restored = filters.normalize_llm_translation_response(
+            source,
+            "本节报告结果。",
+        )
+        self.assertIn(r"\cite{alpha2026}", restored)
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, restored),
+            "",
+        )
+        extra = filters.normalize_llm_translation_response(
+            "本节报告结果。",
+            r"本节报告结果~\cite{invented2026}。",
+        )
+        self.assertNotIn(r"\cite{invented2026}", extra)
+
+    def test_math_and_compiler_commands_are_structural(self):
+        math = r"\Delta_{\text{tool}} = \text{Score}_{\text{with tools}} - \text{Score}_{\text{no tools}}"
+        command = r"g++ -std=c++20 -O2 -o code.exe code.cpp"
+        self.assertTrue(filters.is_pure_latex_math_fragment(math))
+        self.assertTrue(filters.is_structural_command_data_fragment(command))
+        self.assertFalse(filters.llm_translation_response_untranslated(math, math))
+        self.assertFalse(filters.llm_translation_response_untranslated(command, command))
+
     def test_multiline_verbatim_input_stays_one_structural_unit(self):
         lines = (
             r"\VerbatimInput[",

@@ -767,6 +767,33 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
         ):
             response_value = corrected
 
+    source_citation_payloads = Counter(CITATION_COMMAND_RE.findall(source_value))
+    response_citation_payloads = Counter(CITATION_COMMAND_RE.findall(response_value))
+    missing_citations = list(
+        (source_citation_payloads - response_citation_payloads).elements()
+    )
+    extra_citations = list(
+        (response_citation_payloads - source_citation_payloads).elements()
+    )
+    if missing_citations and not extra_citations:
+        candidate = response_value.rstrip() + " " + " ".join(missing_citations)
+        if (
+            _critical_latex_signature(candidate)
+            == (source_commands, source_citations)
+            and _unescaped_brace_balance(candidate)
+            == _unescaped_brace_balance(source_value)
+        ):
+            response_value = candidate
+    elif extra_citations and not missing_citations:
+        candidate = CITATION_COMMAND_RE.sub("", response_value)
+        if (
+            _critical_latex_signature(candidate)
+            == (source_commands, source_citations)
+            and _unescaped_brace_balance(candidate)
+            == _unescaped_brace_balance(source_value)
+        ):
+            response_value = candidate
+
     if source_commands:
         # The safe trailing-brace repair above is valid for fragments that
         # also contain critical commands. All broader wrapper normalization
@@ -1527,7 +1554,14 @@ def is_pure_latex_math_fragment(text: str) -> bool:
     if len(commands) < 4 or len(math_symbols) < 8:
         return False
 
-    probe = re.sub(r"\\[A-Za-z@]+", " ", value)
+    text_bodies = re.findall(
+        r"\\text(?:bf|it|rm|sf|tt|normal)?\*?\{([^{}]*)\}",
+        value,
+    )
+    if any(len(re.findall(r"\b[A-Za-z]{2,}\b", body)) >= 3 for body in text_bodies):
+        return False
+    probe = re.sub(r"\\text(?:bf|it|rm|sf|tt|normal)?\*?\{[^{}]*\}", " ", value)
+    probe = re.sub(r"\\[A-Za-z@]+", " ", probe)
     words = [word.lower() for word in re.findall(r"\b[A-Za-z]{2,}\b", probe)]
     prose_glue = {
         "a", "an", "the", "and", "or", "of", "to", "in", "on", "for",
@@ -2308,6 +2342,19 @@ def is_structural_command_data_fragment(text: str) -> bool:
     if (
         re.search(r"\\(?:emailtext|email)\b", value, flags=re.IGNORECASE)
         and re.search(r"@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value)
+    ):
+        return True
+    if (
+        re.match(
+            r"(?i)^\s*(?:g\+\+|gcc|g\+|clang\+\+|clang|rustc|javac|"
+            r"python(?:3)?|node|go)(?=\s|$)",
+            value,
+        )
+        and re.search(
+            r"(?:\s-[A-Za-z]|\.(?:c|cc|cpp|h|py|java|js|rs)\b)",
+            value,
+        )
+        and not re.search(r"[!?。！？]", value)
     ):
         return True
     if re.fullmatch(

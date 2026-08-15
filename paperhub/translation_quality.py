@@ -184,6 +184,7 @@ def analyze_tex(path) -> Dict[str, object]:
             or filters.is_structured_identifier_path(code)
             or filters.is_person_name_catalog(code)
             or filters.is_tool_call_result_fragment(code)
+            or filters.is_structural_command_data_fragment(code)
             or filters.is_latex_configuration_command_fragment(code)
         )
         structural = any(filters.is_tracked_env(env) for env in begins + ends)

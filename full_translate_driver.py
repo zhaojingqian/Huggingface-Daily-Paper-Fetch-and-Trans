@@ -56,7 +56,7 @@ arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-16-v59-structure-normalize"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-16-v60-structure-data"
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
