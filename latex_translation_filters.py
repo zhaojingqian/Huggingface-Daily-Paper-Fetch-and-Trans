@@ -1413,6 +1413,48 @@ def is_latex_key_value_option_list(text: str) -> bool:
     return _is_key_value_option_list(text, allow_unbracketed=True)
 
 
+# Commands in this set configure a package or document layout.  Their braced
+# payload is a key/value list (or a short numeric/style value), not paper
+# prose.  Keeping the list here gives the splitter, response gate, and TeX
+# quality scan one source of truth instead of teaching each caller about
+# package-specific commands.
+_LATEX_CONFIGURATION_COMMANDS = frozenset({
+    "setlist", "setlistdepth", "setlength", "addtolength",
+    "setcounter", "addtocounter", "hypersetup", "captionsetup",
+    "pgfkeys", "tikzset", "lstset", "geometry",
+})
+_LATEX_CONFIGURATION_COMMAND_RE = re.compile(
+    r"\A\s*\\(?P<name>[A-Za-z@]+)\*?"
+    r"(?:\s*\[[^\]]*\])*\s*\{(?P<body>.*)\}\s*\Z",
+    re.DOTALL,
+)
+
+
+def is_latex_configuration_command_fragment(text: str) -> bool:
+    r"""Recognize a standalone package/layout configuration command.
+
+    For example, ``\setlist{itemsep=2pt, topsep=2pt}`` must be copied
+    unchanged.  It is not natural-language prose even though option names
+    contribute many English-looking words to a line-level heuristic.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    match = _LATEX_CONFIGURATION_COMMAND_RE.fullmatch(value)
+    if not match or match.group("name").lower() not in _LATEX_CONFIGURATION_COMMANDS:
+        return False
+    body = match.group("body").strip()
+    if not body:
+        return True
+    if is_latex_key_value_option_list(body):
+        return True
+    # A single option is common for setlist/captionsetup.  Keep this fallback
+    # conservative: assignment syntax, no sentence punctuation, and a short
+    # payload are required.
+    if "=" not in body or re.search(r"[.!?。！？]", body):
+        return False
+    words = re.findall(r"\b[A-Za-z][A-Za-z0-9_-]*\b", body)
+    return len(body) <= 600 and len(words) <= 24
+
+
 def is_pure_latex_math_fragment(text: str) -> bool:
     r"""Recognize splitter-detached equations with no natural-language prose.
 
@@ -2197,6 +2239,8 @@ def is_structural_command_data_fragment(text: str) -> bool:
     value = extract_translation_fragment(text or "").strip()
     if not value or len(value) > 500:
         return False
+    if is_latex_configuration_command_fragment(value):
+        return True
     if re.fullmatch(
         r"(?is)(?:e[- ]?mail|email address)\s*:\s*"
         r"(?:\\?[{}]|[A-Za-z0-9._%+\-\s,])+@[^\s{}]+",
@@ -2484,6 +2528,7 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
         or is_tool_call_result_fragment(raw_source)
         or is_structural_input_command_fragment(raw_source)
         or is_structural_command_data_fragment(raw_source)
+        or is_latex_configuration_command_fragment(raw_source)
     ):
         return False
     source_value = strip_inline_code_commands(raw_source)
@@ -2506,6 +2551,8 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
     ):
         return False
     if is_latex_key_value_option_list(source_value):
+        return False
+    if is_latex_configuration_command_fragment(source_value):
         return False
     if is_citation_heavy_proper_name_catalog(source_value):
         return False

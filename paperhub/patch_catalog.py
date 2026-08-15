@@ -266,6 +266,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_algorithmic_pseudocode_fragments",
             "protect_tool_call_result_fragments",
             "protect_unbracketed_latex_option_lists",
+            "protect_latex_configuration_commands",
             "protect_pure_latex_math_fragments",
             "preserve_custom_text_macro_arguments",
             "promote_short_structural_bridge_prose",

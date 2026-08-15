@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-15-v54-pseudocode-protection"
+    "paper-trans-splitter-2026-08-16-v55-config-command-boundary"
 )
 
 
@@ -93,6 +93,7 @@ def _patch_latex_translation_splitter():
             return False
         if (
             _ltf.is_latex_key_value_option_list(stripped)
+            or _ltf.is_latex_configuration_command_fragment(stripped)
             or _ltf.is_affiliation_metadata_fragment(stripped)
             or _ltf.is_contact_metadata_fragment(stripped)
             or _ltf.is_bracketed_heading_fragment(stripped)
@@ -464,6 +465,8 @@ def _patch_latex_translation_splitter():
         if _ltf.is_tool_call_result_fragment(stripped):
             return False
         if _ltf.is_latex_key_value_option_list(stripped):
+            return False
+        if _ltf.is_latex_configuration_command_fragment(stripped):
             return False
         if _ltf.is_pure_latex_math_fragment(stripped):
             return False

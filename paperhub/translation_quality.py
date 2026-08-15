@@ -61,7 +61,10 @@ def strip_tex_comment(line: str) -> str:
 def rough_text(line: str) -> str:
     """Return natural-language text after removing protected LaTeX payloads."""
     value = strip_tex_comment(line)
-    if filters.is_bracketed_key_value_option_list(value):
+    if (
+        filters.is_bracketed_key_value_option_list(value)
+        or filters.is_latex_configuration_command_fragment(value)
+    ):
         return ""
     value = re.sub(r"\$[^$]*\$", " ", value)
     # The full balanced-brace scanner is deliberately robust but comparatively
@@ -181,6 +184,7 @@ def analyze_tex(path) -> Dict[str, object]:
             or filters.is_structured_identifier_path(code)
             or filters.is_person_name_catalog(code)
             or filters.is_tool_call_result_fragment(code)
+            or filters.is_latex_configuration_command_fragment(code)
         )
         structural = any(filters.is_tracked_env(env) for env in begins + ends)
         if in_document and not protected and not structural:

@@ -977,6 +977,21 @@ Language: Chinese
             filters.llm_translation_response_untranslated(options, "")
         )
 
+    def test_package_configuration_command_is_structural_not_prose(self):
+        command = r"\setlist{itemsep=2pt, topsep=2pt, parsep=0pt, partopsep=0pt}"
+        self.assertTrue(
+            filters.is_latex_configuration_command_fragment(command)
+        )
+        self.assertTrue(filters.is_structural_command_data_fragment(command))
+        self.assertFalse(
+            filters.is_latex_configuration_command_fragment(
+                r"\textbf{This is ordinary paper prose.}"
+            )
+        )
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(command, command)
+        )
+
     def test_multiline_verbatim_input_stays_one_structural_unit(self):
         lines = (
             r"\VerbatimInput[",

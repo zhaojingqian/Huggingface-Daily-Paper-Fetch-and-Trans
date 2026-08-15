@@ -2,6 +2,19 @@
 
 ---
 
+## v4.41 — 2026-08-16
+
+### 纯 LaTeX 配置命令边界修复
+
+- **根因**：切分器把正文中的 `\\setlist{itemsep=..., topsep=...}` 当作英文
+  prose chunk；模型原样返回后被漏译门禁拒绝，导致 `2604.18394` 在尚未进入
+  编译阶段时直接失败。
+- **做减法**：在 `latex_translation_filters.py` 增加一个共享的配置命令谓词，
+  对 `\\setlist`、`\\hypersetup`、`\\setlength` 等纯布局/包选项统一原样保留；
+  splitter、LLM 响应门禁和 TeX 质量扫描复用同一判断，不再为每个论文写特例。
+- **版本与验证**：chunk 边界升级为 `v55-config-command-boundary`；新增回归测试，
+  focused 194 项通过。修复后将重跑 `2604.18394`，确认 PDF 与索引状态。
+
 ## v4.40 — 2026-08-16
 
 ### 算法环境宏冲突修复
