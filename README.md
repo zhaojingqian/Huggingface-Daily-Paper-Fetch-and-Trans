@@ -90,25 +90,28 @@ workspace-ctl paper translate 2605.21573 -o /root/workspace/apps/paper-trans/dat
 
 ### 修复与重试
 
+生产、cron 和手工操作都走同一个 `workspace-ctl` 入口；下面的旧脚本只保留为
+兼容调用，不再作为独立运行方式维护。
+
 ```bash
 # 修复 title_zh / summary_zh 缺失
-python3 run_repair.py
-python3 run_repair.py --mode daily --days 2
-python3 run_repair.py --mode weekly --key 2026-W22
-python3 run_repair.py --mode topic --topic opd --days 7
+workspace-ctl paper repair
+workspace-ctl paper repair --mode daily --days 2
+workspace-ctl paper repair --mode weekly --key 2026-W22
+workspace-ctl paper repair --mode topic --topic opd --days 7
 
 # 补抓缺失 index.json 的日期/周期
-python3 run_repair.py --refetch --mode daily --days 3
+workspace-ctl paper repair --refetch --mode daily --days 3
 
 # 补翻译 + 补索引
-python3 run_repair.py --post --mode daily --days 2
+workspace-ctl paper repair --post --mode daily --days 2
 
 # 对 pdf_status=failed 的条目重试全文 PDF
-python3 run_repair.py --retry-pdf --mode weekly --key 2026-W22
-python3 run_repair.py --retry-pdf --mode daily --days 7
-python3 run_repair.py --retry-pdf --mode manual --days 7
-python3 run_repair.py --retry-pdf --mode topic --topic opd --days 7
-python3 run_repair.py --retry-pdf --mode topic --key opd/2026-07-05
+workspace-ctl paper repair --retry-pdf --mode weekly --key 2026-W22
+workspace-ctl paper repair --retry-pdf --mode daily --days 7
+workspace-ctl paper repair --retry-pdf --mode manual --days 7
+workspace-ctl paper repair --retry-pdf --mode topic --topic opd --days 7
+workspace-ctl paper repair --retry-pdf --mode topic --key opd/2026-07-05
 
 # 全项目数据一致性与失败分类报告
 python3 scripts/audit_project.py
@@ -217,7 +220,12 @@ PDF 同时通过翻译、编译和实体门禁后才清除 taint，后续编译�
 
 LaTeX 全文翻译默认使用 50 路首轮并发。首轮不再因 citation/ref 密度预先膨胀请求数；只有结构签名、引用多重集或花括号门禁真正失败的 slot 才自适应拆成最多约 480 字符，并使用最多 16 路的有界并发重试。遇到 429、空响应或漏译也只补对应 slot；补偿后仍失败会拒绝写入 `temp.pkl`。若完整 TeX 已有较高中文覆盖、仅质量门禁命中少量行，末端修复器最多定向重译 12 行，并仅提交质量分数严格改善且 LaTeX 结构不变的结果，再重编译 PDF，避免重跑整篇数百个 chunk。
 
-模型可用 `PAPER_TRANS_LLM_MODEL=<model> python3 translate_full.py ...` 单次覆盖，宿主机只会把 `PAPER_TRANS_LLM_MODEL`、worker/retry 等明确白名单变量传入容器，不会透传其他环境或密钥。`insufficient_user_quota`、余额/额度不足会独立归类为 `translate.api_quota / manual_review`，停止盲目重试；需要充值或显式切换到同一凭据已授权、并经过翻译质量验证的模型后再恢复队列。
+全文翻译默认使用 `deepseek-v4-flash-0731`；单次覆盖可用
+`PAPER_TRANS_LLM_MODEL=<model> workspace-ctl paper translate ...`。宿主机只会把
+`PAPER_TRANS_LLM_MODEL`、worker/retry 等明确白名单变量传入容器，不会透传其他
+环境或密钥。`insufficient_user_quota`、余额/额度不足会独立归类为
+`translate.api_quota / manual_review`，停止盲目重试；需要充值或显式切换到同一
+凭据已授权、并经过翻译质量验证的模型后再恢复队列。
 
 `latex_translation_filters.py` 统一维护 LaTeX 过滤策略，供 splitter、翻译覆盖率门禁、merge 前 `fix_content` 清理和 fallback 重编译共同使用。对超长普通正文行，splitter 会按句子边界继续拆分，避免长段 cite 密集内容被模型整体回显成英文。CLI/GUI、trace、trajectory、prompt、code、listing、verbatim 等命名特征的自定义环境会被动态识别为硬保护环境；但 fallback 只会从原文恢复真正的 verbatim/listing/trace 类环境，不会把 table/figure/equation 这类普通保护块恢复成英文。
 
