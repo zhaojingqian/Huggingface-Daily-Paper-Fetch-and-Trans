@@ -168,15 +168,9 @@ _install_gpt_academic_latex_patches()
 
 
 try:
-    from translation_runtime import (
-        SPLITTER_CACHE_VERSION,
-        bootstrap as _bootstrap_translation_runtime,
-    )
+    from translation_runtime import bootstrap as _bootstrap_translation_runtime
 except ImportError:
-    from paperhub.translation_runtime import (
-        SPLITTER_CACHE_VERSION,
-        bootstrap as _bootstrap_translation_runtime,
-    )
+    from paperhub.translation_runtime import bootstrap as _bootstrap_translation_runtime
 
 
 _bootstrap_translation_runtime()
