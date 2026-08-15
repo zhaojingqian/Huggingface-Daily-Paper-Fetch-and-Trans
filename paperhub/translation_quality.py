@@ -171,6 +171,7 @@ def analyze_tex(path) -> Dict[str, object]:
             or filters.is_affiliation_metadata_fragment(code)
             or filters.is_contact_metadata_fragment(code)
             or filters.is_bracketed_heading_fragment(code)
+            or filters.is_algorithmic_pseudocode_fragment(code)
             or filters.is_graphics_path_fragment(code)
             or filters.is_formatting_label_fragment(code)
             or filters.is_unbalanced_latex_fragment(code)

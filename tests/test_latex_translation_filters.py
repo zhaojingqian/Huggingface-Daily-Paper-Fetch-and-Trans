@@ -2672,6 +2672,15 @@ Language: Chinese
                 self.assertTrue(filters.is_inline_prompt_source_data_block(source))
                 self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
+    def test_algorithmic_pseudocode_is_structural(self):
+        source = (
+            r"\textbf{if} $\hat{y}=\emptyset \lor \mathrm{F_1}(\hat{y},y)=0$ "
+            r"\textbf{then return} \textsc{Fail}"
+        )
+
+        self.assertTrue(filters.is_algorithmic_pseudocode_fragment(source))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+
     def test_standalone_repository_path_is_structural(self):
         path = r"icloud-photos-downloader/icloud\_photos\_downloader"
 

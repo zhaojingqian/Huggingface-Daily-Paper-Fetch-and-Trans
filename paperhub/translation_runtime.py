@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-15-v53-safety-benchmark-protection"
+    "paper-trans-splitter-2026-08-15-v54-pseudocode-protection"
 )
 
 
@@ -96,6 +96,7 @@ def _patch_latex_translation_splitter():
             or _ltf.is_affiliation_metadata_fragment(stripped)
             or _ltf.is_contact_metadata_fragment(stripped)
             or _ltf.is_bracketed_heading_fragment(stripped)
+            or _ltf.is_algorithmic_pseudocode_fragment(stripped)
             or _ltf.is_structural_input_command_fragment(stripped)
             or _ltf.is_graphics_path_fragment(stripped)
             or _ltf.is_formatting_label_fragment(stripped)
@@ -441,6 +442,7 @@ def _patch_latex_translation_splitter():
             _ltf.is_affiliation_metadata_fragment(stripped)
             or _ltf.is_contact_metadata_fragment(stripped)
             or _ltf.is_bracketed_heading_fragment(stripped)
+            or _ltf.is_algorithmic_pseudocode_fragment(stripped)
             or _ltf.is_structural_input_command_fragment(stripped)
             or _ltf.is_graphics_path_fragment(stripped)
             or _ltf.is_formatting_label_fragment(stripped)

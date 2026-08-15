@@ -261,6 +261,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_person_name_catalogs",
             "protect_contact_author_metadata",
             "protect_bracketed_heading_fragments",
+            "protect_algorithmic_pseudocode_fragments",
             "protect_tool_call_result_fragments",
             "protect_unbracketed_latex_option_lists",
             "protect_pure_latex_math_fragments",

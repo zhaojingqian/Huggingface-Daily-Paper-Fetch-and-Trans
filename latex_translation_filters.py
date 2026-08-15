@@ -2003,6 +2003,21 @@ def is_bracketed_heading_fragment(text: str) -> bool:
     return capitalized >= 2 and title_like / len(tokens) >= 0.8
 
 
+def is_algorithmic_pseudocode_fragment(text: str) -> bool:
+    """Recognize compact algorithm control-flow markup, not paper prose."""
+    value = extract_translation_fragment(text or "").strip()
+    if not value or len(value) > 700 or "$" not in value:
+        return False
+    if not re.search(
+        r"(?i)\\textbf\{(?:if|then|else|for|while|return)\b",
+        value,
+    ):
+        return False
+    if not re.search(r"\\textsc\{|\\mathrm\{|\\(?:lor|land|neq|in)\b", value):
+        return False
+    return not re.search(r"[.!?。！？]", value)
+
+
 def is_affiliation_metadata_fragment(text: str) -> bool:
     """Recognize superscripted author-affiliation metadata, not paper prose."""
     value = extract_translation_fragment(text or "").strip()
@@ -2240,6 +2255,7 @@ def is_plain_prose_line_for_rescue(text: str) -> bool:
         or is_affiliation_metadata_fragment(value)
         or is_contact_metadata_fragment(value)
         or is_bracketed_heading_fragment(value)
+        or is_algorithmic_pseudocode_fragment(value)
     ):
         return False
     if is_formatting_label_fragment(value) or is_unbalanced_latex_fragment(value):
@@ -2460,6 +2476,7 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
         or is_person_name_catalog(raw_source)
         or is_contact_metadata_fragment(raw_source)
         or is_bracketed_heading_fragment(raw_source)
+        or is_algorithmic_pseudocode_fragment(raw_source)
         or is_affiliation_metadata_fragment(raw_source)
         or is_graphics_path_fragment(raw_source)
         or is_formatting_label_fragment(raw_source)
