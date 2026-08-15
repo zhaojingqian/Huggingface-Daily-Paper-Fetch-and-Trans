@@ -240,15 +240,6 @@ def install_gpt_academic_patches() -> bool:
 
     toolbox = importlib.import_module("crazy_functions.latex_fns.latex_toolbox")
 
-    def _restricted_tex_env():
-        env = _os.environ.copy()
-        env.update({
-            "openin_any": "p",
-            "openout_any": "p",
-            "shell_escape": "0",
-        })
-        return env
-
     def _patched_compile_with_timeout(command, cwd, timeout=300):
         """Bound compilation and disable TeX shell escape / broad file access."""
         if not _os.path.isabs(cwd):
