@@ -2659,6 +2659,19 @@ Language: Chinese
         self.assertFalse(filters.llm_translation_response_untranslated(contact, contact))
         self.assertFalse(filters.llm_translation_response_untranslated(heading, heading))
 
+    def test_safety_benchmark_instructions_are_structural(self):
+        harmful = (
+            "The user explicitly and intentionally instructs the agent to perform "
+            "harmful actions or generate harmful content."
+        )
+        oracle = "Do not mention being given oracle labels, confusers, hints, or internal guidance."
+        trajectory = r"\textbf{For safe trajectories:}"
+
+        for source in (harmful, oracle, trajectory):
+            with self.subTest(source=source):
+                self.assertTrue(filters.is_inline_prompt_source_data_block(source))
+                self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+
     def test_standalone_repository_path_is_structural(self):
         path = r"icloud-photos-downloader/icloud\_photos\_downloader"
 

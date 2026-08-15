@@ -253,6 +253,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "normalize_citation_identity",
             "protect_translation_artifacts",
             "protect_single_line_prompt_source_data",
+            "protect_safety_benchmark_instructions",
             "exclude_code_metadata_tikz_and_catalog_false_positives",
             "protect_http_endpoint_catalogs",
             "protect_detached_citation_key_lists",

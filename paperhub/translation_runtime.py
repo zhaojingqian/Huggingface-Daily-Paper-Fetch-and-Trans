@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-15-v52-contact-heading-protection"
+    "paper-trans-splitter-2026-08-15-v53-safety-benchmark-protection"
 )
 
 

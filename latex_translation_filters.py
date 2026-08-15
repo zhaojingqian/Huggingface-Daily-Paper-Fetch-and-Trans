@@ -1150,6 +1150,9 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|output\s+everything\s+after\s+the\s+marker\s+below\b"
     r"|convert\s+the\s+paragraph\s+into\s+a\s+json\s+dict\b"
     r"|reply\s+with\s+a\s+non-technical\s+refusal\b"
+    r"|the\s+user\s+explicitly\s+and\s+intentionally\s+instructs\s+the\s+agent\b"
+    r"|do\s+not\s+mention\s+being\s+given\s+(?:oracle\s+labels|confusers|hints|internal\s+guidance)\b"
+    r"|\\textbf\{(?:for|if|when)\s+(?:safe|unsafe|harmful|benign)\s+trajectories\s*:"
     r")"
 )
 
