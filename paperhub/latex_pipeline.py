@@ -1251,19 +1251,6 @@ def _insert_before_begin_document(text: str, insertion: str) -> tuple[str, bool]
     return text[:pos] + insertion + '\n' + text[pos:], True
 
 
-def _insert_latex_preamble_snippet(
-    text: str,
-    insertion: str,
-    command_markers: tuple[str, ...] = (),
-) -> tuple[str, bool]:
-    """Insert a preamble snippet at a shared, top-level-safe boundary."""
-    return _ltf.insert_latex_preamble_snippet(
-        text,
-        insertion,
-        command_markers,
-    )
-
-
 def patch_fontawesome_legacy_aliases(trans_tex_path):
     """Provide common fontawesome5 aliases used by older templates."""
     with open(trans_tex_path, encoding='utf-8') as f:
@@ -1323,7 +1310,7 @@ def patch_declare_unicode_character_fallback(trans_tex_path):
     if fallback in text or r'\providecommand{\DeclareUnicodeCharacter}' in text:
         return 0
 
-    new_text, ok = _insert_latex_preamble_snippet(
+    new_text, ok = _ltf.insert_latex_preamble_snippet(
         text,
         fallback,
         command_markers=('DeclareUnicodeCharacter',),
@@ -1863,7 +1850,7 @@ def patch_enumitem_for_optional_lists(trans_tex_path):
         else:
             return 0
 
-    new_text, ok = _insert_latex_preamble_snippet(
+    new_text, ok = _ltf.insert_latex_preamble_snippet(
         text,
         marker + '\n' + package_line,
         command_markers=(r'\input', r'\include', r'\begin{document}'),
