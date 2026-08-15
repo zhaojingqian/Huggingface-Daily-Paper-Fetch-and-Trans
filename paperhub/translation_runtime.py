@@ -1084,10 +1084,8 @@ def _patch_safe_archive_extraction():
 
 
 
-def bootstrap(splitter_cache_version: str = SPLITTER_CACHE_VERSION) -> None:
+def bootstrap() -> None:
     """Install all gpt-academic adapters exactly once for this process."""
-    global SPLITTER_CACHE_VERSION
-    SPLITTER_CACHE_VERSION = str(splitter_cache_version)
     _patch_latex_translation_splitter()
     _patch_latex_fix_content_artifacts()
     _patch_latex_llm_rate_limit_handling()

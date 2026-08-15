@@ -56,7 +56,6 @@ arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
 max_retries = 0   # 只翻译一次，不重试
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-16-v64-name-catalogs"
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
@@ -169,12 +168,18 @@ _install_gpt_academic_latex_patches()
 
 
 try:
-    from translation_runtime import bootstrap as _bootstrap_translation_runtime
+    from translation_runtime import (
+        SPLITTER_CACHE_VERSION,
+        bootstrap as _bootstrap_translation_runtime,
+    )
 except ImportError:
-    from paperhub.translation_runtime import bootstrap as _bootstrap_translation_runtime
+    from paperhub.translation_runtime import (
+        SPLITTER_CACHE_VERSION,
+        bootstrap as _bootstrap_translation_runtime,
+    )
 
 
-_bootstrap_translation_runtime(SPLITTER_CACHE_VERSION)
+_bootstrap_translation_runtime()
 
 from toolbox import get_conf, ChatBotWithCookies, default_user_name
 

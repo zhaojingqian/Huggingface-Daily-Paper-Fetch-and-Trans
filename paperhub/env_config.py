@@ -8,6 +8,10 @@ from paperhub.paths import ROOT_DIR
 
 _LOADED = False
 
+# The generated gpt-academic runtime config is authoritative in production;
+# this fallback keeps standalone metadata translation on the same model.
+DEFAULT_TRANSLATION_MODEL = "deepseek-v4-flash-0731"
+
 
 def _load_env_file(path):
     try:

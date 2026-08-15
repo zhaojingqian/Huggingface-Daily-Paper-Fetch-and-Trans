@@ -131,6 +131,8 @@ def paper_store_write(arxiv_id, meta, translation):
 
 def load_api_config():
     """从 gpt-academic 的 config_private.py 读取 API 配置"""
+    from paperhub.env_config import DEFAULT_TRANSLATION_MODEL
+
     config = {}
     try:
         with open(GPT_ACADEMIC_CONFIG, "r") as f:
@@ -153,7 +155,7 @@ def load_api_config():
     # 默认值
     config.setdefault("api_key", "")
     config.setdefault("api_base", "https://api.openai.com/v1/chat/completions")
-    config.setdefault("model", "gpt-4.1-mini")
+    config.setdefault("model", DEFAULT_TRANSLATION_MODEL)
 
     # 推导 base_url (去掉末尾的 chat/completions)
     base = config["api_base"]

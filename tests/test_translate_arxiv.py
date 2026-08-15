@@ -6,6 +6,16 @@ import translate_arxiv
 
 
 class TranslateArxivTest(unittest.TestCase):
+    def test_missing_runtime_config_uses_production_translation_model(self):
+        with patch.object(
+            translate_arxiv,
+            "GPT_ACADEMIC_CONFIG",
+            "/tmp/paper-trans-config-does-not-exist",
+        ):
+            config = translate_arxiv.load_api_config()
+
+        self.assertEqual(config["model"], "deepseek-v4-flash-0731")
+
     def test_repairs_odd_latex_backslash_runs_for_json(self):
         self.assertEqual(
             translate_arxiv._repair_json_backslashes(r'{"x":"\\\method"}'),
