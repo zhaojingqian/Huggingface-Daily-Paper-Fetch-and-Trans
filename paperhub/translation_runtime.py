@@ -994,7 +994,10 @@ def _patch_latex_llm_rate_limit_handling():
                     )
                 )
             retry_options.update({
-                "inputs_array": [inputs[index] for index in remaining],
+                "inputs_array": [
+                    _ltf.prepare_braced_prose_retry_input(inputs[index])
+                    for index in remaining
+                ],
                 "inputs_show_user_array": [visible_inputs[index] for index in remaining],
                 "history_array": [histories[index] for index in remaining],
                 "sys_prompt_array": retry_prompts,

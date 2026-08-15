@@ -280,6 +280,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_structural_source_data",
             "protect_email_and_tool_catalog_fragments",
             "restore_missing_trailing_reference_commands",
+            "retry_outer_braced_prose_entries",
             "restore_splitter_boundary_braces",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",

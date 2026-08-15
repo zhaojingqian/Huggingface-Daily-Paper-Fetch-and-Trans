@@ -127,6 +127,26 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertFalse(filters.is_structural_command_data_fragment(sentence))
         self.assertTrue(filters.llm_translation_response_untranslated(sentence, sentence))
 
+    def test_braced_prose_retry_unwraps_only_natural_language_entries(self):
+        source = "{Synthetic extractive question-answering examples with explanations.}"
+        citation_keys = r"{christiano_deep_2017, pmlr-v139-lee21i, gao2023scaling}"
+
+        self.assertTrue(filters.is_braced_prose_fragment(source))
+        self.assertFalse(filters.is_braced_prose_fragment(citation_keys))
+        self.assertEqual(
+            filters.prepare_braced_prose_retry_input(source),
+            source[1:-1],
+        )
+
+    def test_braced_prose_response_is_rewrapped_after_retry(self):
+        source = "{Synthetic extractive question-answering examples with explanations.}"
+        response = "带有解释的合成抽取式问答示例。"
+
+        normalized = filters.normalize_llm_translation_response(source, response)
+
+        self.assertEqual(normalized, "{" + response + "}")
+        self.assertFalse(filters.llm_translation_response_untranslated(source, normalized))
+
     def test_structural_author_command_can_pass_through_names(self):
         source = r"\tocauthor{Subrat Prasad Panda, Blaise Genest, Arvind Easwaran}"
 

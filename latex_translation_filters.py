@@ -675,6 +675,7 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
     response_value = response if isinstance(response, str) else str(response or "")
     if not source_value.strip() or not response_value.strip():
         return response_value
+    response_value = _rewrap_braced_prose_response(source_value, response_value)
     source_commands, source_citations = _critical_latex_signature(source_value)
 
     # Splitter boundaries can leave one or two braces belonging to the
@@ -1733,6 +1734,65 @@ def is_detached_citation_key_list(text: str) -> bool:
         for key in keys
     )
     return key_like >= max(2, len(keys) // 2)
+
+
+def is_braced_prose_fragment(text: str) -> bool:
+    """Recognize an outer-braced natural-language entry.
+
+    Dataset descriptions and list entries are sometimes emitted as a single
+    ``{...}`` group.  That is TeX grouping, not by itself an opaque identifier;
+    keep citation-key lists, option lists, and command/data fragments excluded.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value.startswith("{") or not value.endswith("}"):
+        return False
+    if _matching_unescaped_brace(value, 0) != len(value) - 1:
+        return False
+    inner = value[1:-1].strip()
+    if (
+        not inner
+        or is_detached_citation_key_list(value)
+        or is_latex_key_value_option_list(inner)
+        or is_structural_command_data_fragment(inner)
+        or is_pure_latex_math_fragment(inner)
+    ):
+        return False
+    probe = _natural_language_probe(inner)
+    return (
+        len(re.findall(r"[A-Za-z]", probe)) >= 24
+        and len(re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", probe)) >= 4
+    )
+
+
+def prepare_braced_prose_retry_input(prompt_or_fragment: str) -> str:
+    """Unwrap only a braced prose source for a bounded retry request."""
+    value = str(prompt_or_fragment or "")
+    fragment = extract_translation_fragment(value)
+    stripped = fragment.strip()
+    if not is_braced_prose_fragment(stripped):
+        return value
+    start = value.rfind(stripped)
+    if start < 0:
+        return value
+    end = start + len(stripped)
+    return value[:start] + stripped[1:-1] + value[end:]
+
+
+def _rewrap_braced_prose_response(source: str, response: str) -> str:
+    """Restore the outer grouping removed by ``prepare_*`` after translation."""
+    if not is_braced_prose_fragment(source):
+        return response
+    value = str(response or "")
+    if llm_translation_response_failed(value):
+        return value
+    stripped = value.strip()
+    if not stripped or any(pattern.search(stripped) for pattern in LLM_ARTIFACT_PATTERNS):
+        return value
+    if stripped.startswith("{") and _matching_unescaped_brace(stripped, 0) == len(stripped) - 1:
+        return value
+    leading = value[: len(value) - len(value.lstrip())]
+    trailing = value[len(value.rstrip()):]
+    return leading + "{" + stripped + "}" + trailing
 
 
 def is_structured_identifier_path(text: str) -> bool:
