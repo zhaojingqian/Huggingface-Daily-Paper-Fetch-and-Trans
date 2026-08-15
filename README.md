@@ -256,6 +256,8 @@ fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontaweso
 
 `logs/pdf_errors/<arxiv_id>.log` 只保留最近一次失败诊断；同篇 PDF 后续成功生成后，`translate_full.py` 会自动清理旧失败日志。成功生成 PDF 后才会覆盖 `data/tex_backup/<id>_merge_translate_zh.tex`；失败现场会另存到 `data/tex_backup_failed/`，避免坏 tex 覆盖可用缓存。同篇 PDF 成功后，对应的失败现场 tex 也会自动清理。如果日志中出现 `No space left on device`，先用 `df -h /` 和 `docker exec ${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim} df -h /gpt /` 确认宿主机根分区与容器 overlay 空间；清理旧编辑器 server 缓存或 gpt-academic 可再生缓存后，再重跑 `retry-pdf`。如果编译超大图片/重资源论文时发生 `xdvipdfmx` 进程异常退出或超时（可能由 OOM 强杀导致），需确认独立容器已启用 `--memory-swappiness=60` 以允许向 Swap 换页。
 
+`translate_full.py` 每次全文 retry 默认会在共享锁内回收该论文的容器缓存和本次新建的临时输出；仅需保留容器现场诊断时才设置 `PAPER_TRANS_CLEAN_RETRY_CACHE=0`。
+
 `scripts/cleanup_docker_cache.sh` 与 `scripts/restart_translation_container.sh` 复用全文翻译全局锁；锁繁忙时维护任务直接记录 `SKIP`，不会删除活跃 workfolder 或重启正在工作的容器。Docker 缓存每天清理：常规保留 3 天，磁盘达到 90% 或可用空间低于 2GB 时切换为保留 1 天。`arxiv_cache` 按论文目录回收，`default_user/shared`、`downloadzone` 和 `admin` 按文件年龄回收，避免一个近期文件阻止整个目录内的旧 zip 被删除。清理后仍达到 95% 或可用空间仍低于 2GB 时任务返回非零，并通过服务器已有 Gmail SMTP 配置发送告警；高水位自动恢复也会发送通知。可用 `PAPER_TRANS_CACHE_RETENTION_DAYS`、`PAPER_TRANS_EMERGENCY_RETENTION_DAYS`、`PAPER_TRANS_DISK_HIGH_WATERMARK`、`PAPER_TRANS_DISK_CRITICAL_WATERMARK` 和 `PAPER_TRANS_MIN_FREE_MB` 调整阈值。
 
 `scripts/weekly_cleanup.sh` 通过

@@ -207,7 +207,7 @@ for raw_path in sys.argv[2:]:
 
 
 def _cleanup_retry_cache_enabled():
-    return os.environ.get("PAPER_TRANS_CLEAN_RETRY_CACHE", "").strip().lower() in {
+    return os.environ.get("PAPER_TRANS_CLEAN_RETRY_CACHE", "1").strip().lower() in {
         "1", "true", "yes", "on",
     }
 

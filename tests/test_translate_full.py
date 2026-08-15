@@ -13,6 +13,16 @@ import translate_full
 
 
 class TranslateFullCommandTest(unittest.TestCase):
+    def test_retry_cache_cleanup_is_enabled_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(translate_full._cleanup_retry_cache_enabled())
+        with mock.patch.dict(
+            os.environ,
+            {"PAPER_TRANS_CLEAN_RETRY_CACHE": "0"},
+            clear=True,
+        ):
+            self.assertFalse(translate_full._cleanup_retry_cache_enabled())
+
     def test_driver_bundle_includes_shared_quality_gate(self):
         bundled = {
             os.path.basename(path)
