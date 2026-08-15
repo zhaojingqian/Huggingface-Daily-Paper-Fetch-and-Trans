@@ -1064,6 +1064,16 @@ Language: Chinese
         self.assertFalse(filters.llm_translation_response_untranslated(math, math))
         self.assertFalse(filters.llm_translation_response_untranslated(command, command))
 
+    def test_grader_prompt_and_question_preamble_are_source_data(self):
+        grader = (
+            "You are a strict grader. Below you are given the problem, the student's "
+            "answer, and the reference answer. Please determine whether the answer is correct."
+        )
+        preamble = "The question prompt is structured as follows, with a deliberate trailing space after the final period:"
+        self.assertTrue(filters.is_inline_prompt_source_data_block(grader))
+        self.assertTrue(filters.is_inline_prompt_source_data_block(preamble))
+        self.assertFalse(filters.llm_translation_response_untranslated(grader, grader))
+
     def test_multiline_verbatim_input_stays_one_structural_unit(self):
         lines = (
             r"\VerbatimInput[",

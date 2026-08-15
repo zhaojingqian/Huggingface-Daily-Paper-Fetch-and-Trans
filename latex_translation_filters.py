@@ -1219,6 +1219,8 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|reply\s+with\s+a\s+non-technical\s+refusal\b"
     r"|the\s+user\s+explicitly\s+and\s+intentionally\s+instructs\s+the\s+agent\b"
     r"|do\s+not\s+mention\s+being\s+given\s+(?:oracle\s+labels|confusers|hints|internal\s+guidance)\b"
+    r"|you\s+are\s+a\s+strict\s+grader\b(?=.*\b(?:student's\s+answer|reference\s+answer)\b)"
+    r"|the\s+question\s+prompt\s+is\s+structured\s+as\s+follows\b"
     r"|\\textbf\{(?:for|if|when)\s+(?:safe|unsafe|harmful|benign)\s+trajectories\s*:"
     r")"
 )
