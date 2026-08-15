@@ -999,6 +999,10 @@ Language: Chinese
             r"coming from the plant.\\ translation: \{trans\}"
         )
         self.assertTrue(filters.is_inline_prompt_source_data_block(template))
+        self.assertEqual(
+            filters.split_translation_structural_units(template),
+            [template],
+        )
         self.assertFalse(
             filters.llm_translation_response_untranslated(template, template)
         )

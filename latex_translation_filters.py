@@ -2667,6 +2667,11 @@ def _split_leading_heading_argument(text: str) -> List[str]:
 def split_translation_structural_units(text: str) -> List[str]:
     """Split prose before headings so distinct semantic units stay separate."""
     value = str(text or "")
+    # Prompt templates use TeX line-break commands (``\\``), which are also
+    # structural-unit boundaries.  Keep a complete source-data template as
+    # one preserved unit so it cannot be split back into model requests.
+    if is_inline_prompt_source_data_block(value):
+        return [value] if value else []
     starts = [
         match.start()
         for match in TRANSLATION_STRUCTURAL_UNIT_RE.finditer(value)
