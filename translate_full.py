@@ -26,14 +26,13 @@ from paperhub.paper_store import pdf_file_valid
 from paperhub.publication_lock import paper_publication_lock
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
-    DEFAULT_GPT_ACADEMIC_CONTAINER,
     LOCK_DIR,
     TEX_BACKUP_DIR,
     TEX_FAILED_BACKUP_DIR,
+    gpt_academic_container,
 )
 
-DEFAULT_CONTAINER_NAME = DEFAULT_GPT_ACADEMIC_CONTAINER
-CONTAINER_NAME  = os.environ.get("GPT_ACADEMIC_CONTAINER", DEFAULT_CONTAINER_NAME)
+CONTAINER_NAME = gpt_academic_container()
 DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
 DRIVER_SUPPORT_FILES = [
     DRIVER_SCRIPT,
