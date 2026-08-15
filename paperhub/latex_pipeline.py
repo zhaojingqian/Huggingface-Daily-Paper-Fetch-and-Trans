@@ -1046,13 +1046,29 @@ def patch_fontawesome_legacy_aliases(trans_tex_path):
 
     workfolder = os.path.dirname(trans_tex_path)
     sibling_text = ''
-    for ext in ('*.sty', '*.cls'):
-        for path in glob.glob(os.path.join(workfolder, ext)):
-            try:
-                with open(path, encoding='utf-8', errors='replace') as f:
-                    sibling_text += f.read() + '\n'
-            except Exception:
-                pass
+    # FontAwesome commands are often defined in a local ``preamble.tex``
+    # reached through ``\\input`` rather than in the class/style itself. The
+    # merged TeX only contains the input call, so inspect sibling TeX sources
+    # as well when deciding which legacy aliases need a fallback.
+    sibling_paths = set()
+    for ext in ('*.sty', '*.cls', '*.tex'):
+        sibling_paths.update(glob.glob(os.path.join(workfolder, ext)))
+    # Some arXiv sources use extensionless ``\input{preamble}`` files.  Add
+    # only explicit local input/include targets; do not scan arbitrary paths.
+    for match in re.finditer(r"\\(?:input|include)\s*\{([^{}]+)\}", text):
+        target = match.group(1).strip()
+        if not target or target.startswith(("/", "\\")) or "\\" in target:
+            continue
+        for candidate in (target, target + ".tex"):
+            sibling_paths.add(os.path.join(workfolder, candidate))
+    for path in sorted(sibling_paths):
+        if os.path.realpath(path) == os.path.realpath(trans_tex_path):
+            continue
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                sibling_text += f.read() + '\n'
+        except Exception:
+            pass
 
     new_text, total = _ltf.add_fontawesome_legacy_aliases(text, sibling_text)
     if new_text == text:
@@ -1581,14 +1597,51 @@ def patch_enumitem_for_optional_lists(trans_tex_path):
     with open(trans_tex_path, encoding='utf-8') as f:
         text = f.read()
 
-    if r'\usepackage{enumitem}' in text or r'\usepackage[shortlabels]{enumitem}' in text:
-        return 0
     if not _re.search(r'\\begin\{(?:itemize|enumerate|description)\}\[[^\]]+\]', text):
         return 0
 
-    new_text, ok = _insert_before_begin_document(
+    # Local preambles are commonly loaded with ``\input{preamble}`` and may
+    # call ``\setlist`` before the merged document reaches ``\begin{document}``.
+    # Loading enumitem at the latter boundary is therefore too late: TeX has
+    # already parsed the local list setup and later reports a misleading
+    # ``Missing number`` at the first ``\item``.  Put the package before the
+    # earliest local input/include so its declarations are available at the
+    # original call site.
+    marker = r'% paper-trans fallback for optional list arguments'
+    # A previous run may have persisted the old, too-late insertion in the
+    # failed TeX cache.  Remove that tagged block before rebuilding the
+    # canonical placement; otherwise the early-return guard would preserve
+    # the broken ordering forever.
+    text = _re.sub(
+        r'(?m)^' + _re.escape(marker) + r'\r?\n'
+        r'[ \t]*\\usepackage(?:\[[^\n]*\])?\{enumitem\}[ \t]*\r?\n?',
+        '',
         text,
-        r'% paper-trans fallback for optional list arguments' '\n' r'\usepackage{enumitem}',
+    )
+
+    # If an untagged enumitem declaration is already present after a local
+    # input, relocate that exact declaration instead of creating a duplicate.
+    boundary_positions = [
+        pos for token in (r'\input', r'\include', r'\begin{document}')
+        if (pos := _ltf.find_uncommented_latex_token(text, token)) >= 0
+    ]
+    boundary = min(boundary_positions) if boundary_positions else len(text)
+    package_match = _re.search(
+        r'(?m)^[ \t]*\\usepackage(?:\[[^\n]*\])?\{enumitem\}[ \t]*\r?\n?',
+        text,
+    )
+    package_line = r'\usepackage{enumitem}'
+    if package_match:
+        package_line = package_match.group(0).strip()
+        if package_match.start() >= boundary:
+            text = text[:package_match.start()] + text[package_match.end():]
+        else:
+            return 0
+
+    new_text, ok = _insert_latex_preamble_snippet(
+        text,
+        marker + '\n' + package_line,
+        command_markers=(r'\input', r'\include', r'\begin{document}'),
     )
     if not ok:
         return 0
@@ -1632,9 +1685,20 @@ def patch_microtype_for_xelatex(trans_tex_path):
 
 
 def patch_local_microtype_loads(workfolder):
-    """Disable local class/style microtype loads that force pdfTeX-only options."""
+    """Disable local microtype loads that force pdfTeX-only font metrics.
+
+    Templates frequently keep the package load in an input-only ``preamble.tex``
+    rather than a class/style file. Inspect explicit local TeX sources while
+    skipping generated merge documents.
+    """
     total = 0
-    for path in glob.glob(os.path.join(workfolder, '*.cls')) + glob.glob(os.path.join(workfolder, '*.sty')):
+    targets = []
+    for pattern in ('**/*.cls', '**/*.sty', '**/*.tex'):
+        targets.extend(glob.glob(os.path.join(workfolder, pattern), recursive=True))
+    generated = {'merge.tex', 'merge_translate_zh.tex'}
+    for path in sorted(set(targets)):
+        if os.path.basename(path) in generated:
+            continue
         try:
             with open(path, encoding='utf-8', errors='replace') as f:
                 text = f.read()
@@ -1648,7 +1712,7 @@ def patch_local_microtype_loads(workfolder):
                 f.write(new_text)
             total += count
     if total:
-        print(f"[driver] 🔧 patch_local_microtype_loads: 禁用 {total} 处本地 class/style microtype 加载", flush=True)
+        print(f"[driver] 🔧 patch_local_microtype_loads: 禁用 {total} 处本地源 microtype 加载", flush=True)
     return total
 
 

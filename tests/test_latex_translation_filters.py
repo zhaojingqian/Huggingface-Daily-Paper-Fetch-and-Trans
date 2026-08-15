@@ -90,6 +90,31 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             "",
         )
 
+    def test_normalize_response_restores_splitter_boundary_brace(self):
+        source = "the previous code blocks in the subsequent code blocks}."
+        translated = "我们在后续代码块中提供先前代码块。"
+
+        normalized = filters.normalize_llm_translation_response(source, translated)
+
+        self.assertEqual(normalized, translated + "}")
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
+
+    def test_structural_command_data_can_pass_through_unchanged(self):
+        fragment = r"{CommonPile-GitHub} {\hfds{common-pile/github_archive_filtered}}"
+
+        self.assertTrue(filters.is_structural_command_data_fragment(fragment))
+        self.assertFalse(filters.llm_translation_response_untranslated(fragment, fragment))
+        self.assertEqual(filters.llm_translation_response_invalid(fragment, fragment), "")
+
+    def test_structural_command_data_does_not_hide_sentence(self):
+        sentence = r"The \hfds{dataset} command loads the training data."
+
+        self.assertFalse(filters.is_structural_command_data_fragment(sentence))
+        self.assertTrue(filters.llm_translation_response_untranslated(sentence, sentence))
+
     def test_compact_colored_label_with_localized_connector_is_accepted(self):
         source = r"\textbf{\textcolor{iclrdeepblue}{SU-01} w/ TTS}"
         response = r"\textbf{\textcolor{iclrdeepblue}{SU-01} 带 TTS}"
@@ -665,13 +690,11 @@ Language: Chinese
 
         self.assertIn("preserve every LaTeX command", strengthened)
         self.assertIn("citation keys", strengthened)
-        self.assertEqual(
-            filters.translation_retry_system_prompt(
-                base,
-                "request_or_untranslated",
-            ),
+        untranslated_prompt = filters.translation_retry_system_prompt(
             base,
+            "request_or_untranslated",
         )
+        self.assertIn("translate every natural-language English word", untranslated_prompt)
         self.assertEqual(
             filters.translation_retry_system_prompt(
                 strengthened,
@@ -1865,11 +1888,15 @@ Language: Chinese
         self.assertIn(r"\ref{tab:c}", fixed)
 
     def test_disable_microtype_loads_keeps_class_hooks_balanced(self):
-        text = "\\AtEndOfClass{\\RequirePackage{microtype}}\n\\RequirePackage[tracking]{microtype}\n正文"
+        text = (
+            "\\AtEndOfClass{\\RequirePackage{microtype}}\n"
+            "\\RequirePackage[tracking]{microtype}\n"
+            "\\usepackage{microtype}\n正文"
+        )
 
         fixed, count = filters.disable_microtype_package_loads(text)
 
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 3)
         self.assertNotIn(r"\AtEndOfClass{", fixed)
         self.assertIn("\n正文", fixed)
 
@@ -1939,6 +1966,50 @@ Language: Chinese
         self.assertGreater(fixed.index(marker), fixed.index(r"\usepackage{fontawesome5}"))
         self.assertIn(r"\providecommand{\faVideo}{\textbullet}", fixed)
         self.assertIn(r"\providecommand{\faGamepad}{\textbullet}", fixed)
+
+    def test_fontawesome_fallback_considers_input_tex_siblings(self):
+        text = r"\documentclass{article}\begin{document}\maketitle\end{document}"
+        sibling = r"\newcommand{\homepage}{\faGlobe\ Website}"
+
+        fixed, count = filters.add_fontawesome_legacy_aliases(text, sibling)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\faGlobe}", fixed)
+
+    def test_fontawesome_fallback_precedes_local_input(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\input{preamble}" "\n"
+            r"\begin{document}\maketitle\end{document}" "\n"
+        )
+        sibling = r"\newcommand{\homepage}{\faGlobe\ Website}"
+
+        fixed, count = filters.add_fontawesome_legacy_aliases(text, sibling)
+
+        self.assertEqual(count, 1)
+        self.assertLess(
+            fixed.index(r"\providecommand{\faGlobe}"),
+            fixed.index(r"\input{preamble}"),
+        )
+
+    def test_preamble_snippet_precedes_local_input(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\input{preamble}" "\n"
+            r"\begin{document}\end{document}" "\n"
+        )
+
+        fixed, changed = filters.insert_latex_preamble_snippet(
+            text,
+            r"\usepackage{enumitem}",
+            (r"\input", r"\begin{document}"),
+        )
+
+        self.assertTrue(changed)
+        self.assertLess(
+            fixed.index(r"\usepackage{enumitem}"),
+            fixed.index(r"\input{preamble}"),
+        )
 
     def test_fontawesome_fallback_migrates_historical_nested_block(self):
         marker = "% paper-trans fallback for fontawesome5 legacy aliases"

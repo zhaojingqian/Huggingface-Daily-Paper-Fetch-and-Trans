@@ -669,26 +669,47 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
         return response_value
     source_commands, source_citations = _critical_latex_signature(source_value)
 
-    # Some models deterministically wrap a long fragment with one unmatched
-    # closing brace. Removing that final token is provably safe only when it is
-    # the last non-whitespace character and the corrected brace balance plus
-    # critical command/citation signatures exactly match the source.
+    # Splitter boundaries can leave one or two braces belonging to the
+    # surrounding TeX node outside the fragment.  Preserve that boundary when
+    # the model drops it, but only when critical command/citation signatures
+    # remain identical.  This repairs ``...blocks}.`` -> ``...块。`` without
+    # accepting a response that actually changed a command argument.
+    source_balance = _unescaped_brace_balance(source_value)
+    response_balance = _unescaped_brace_balance(response_value)
+
+    # A model sometimes appends one spurious closing brace.  Remove it before
+    # considering boundary repair; otherwise balancing by prepending ``{``
+    # would wrap the entire translated fragment unnecessarily.
     stripped_response = response_value.rstrip()
     if (
         stripped_response.endswith("}")
-        and _unescaped_brace_balance(response_value)
-        == _unescaped_brace_balance(source_value) - 1
+        and response_balance == source_balance - 1
     ):
-        corrected = (
+        candidate = (
             stripped_response[:-1]
             + response_value[len(stripped_response):]
         )
+        candidate_commands, candidate_citations = _critical_latex_signature(candidate)
+        if (
+            _unescaped_brace_balance(candidate) == source_balance
+            and candidate_commands == source_commands
+            and candidate_citations == source_citations
+        ):
+            response_value = candidate
+            response_balance = source_balance
+
+    delta = source_balance - response_balance
+    if delta and abs(delta) <= 2:
+        corrected = response_value
+        if delta > 0:
+            corrected = "{" * delta + corrected
+        else:
+            corrected = corrected + "}" * (-delta)
         corrected_commands, corrected_citations = _critical_latex_signature(
             corrected
         )
         if (
-            _unescaped_brace_balance(corrected)
-            == _unescaped_brace_balance(source_value)
+            _unescaped_brace_balance(corrected) == source_balance
             and corrected_commands == source_commands
             and corrected_citations == source_citations
         ):
@@ -770,6 +791,18 @@ def llm_translation_response_invalid(source: str, response: str) -> str:
         if value == source_value:
             return ""
         return "protected_source_data_modified"
+    if is_structural_command_data_fragment(source_value):
+        if value == source_value:
+            return ""
+        source_commands = tuple(re.findall(r"\\[A-Za-z@]+", source_value))
+        response_commands = tuple(re.findall(r"\\[A-Za-z@]+", value))
+        if (
+            source_commands == response_commands
+            and _unescaped_brace_balance(source_value)
+            == _unescaped_brace_balance(value)
+        ):
+            return ""
+        return "protected_source_data_modified"
     if LLM_TRANSLATION_TASK_ECHO_RE.search(value):
         return "translation_task_echo"
 
@@ -797,17 +830,29 @@ STRUCTURAL_RETRY_INSTRUCTION = (
 
 
 def translation_retry_system_prompt(prompt: str, reason: str) -> str:
-    """Add a precise structure reminder only after a structural rejection."""
+    """Add a bounded retry instruction for structural or language failures."""
     value = str(prompt or "")
     if reason not in {
         "critical_latex_structure_mismatch",
         "citation_structure_mismatch",
         "latex_brace_balance_mismatch",
+        "request_or_untranslated",
     }:
         return value
     if STRUCTURAL_RETRY_INSTRUCTION.strip() in value:
+        if reason != "request_or_untranslated":
+            return value
+    if reason == "request_or_untranslated":
+        instruction = (
+            "\n\nOn this retry, translate every natural-language English word in the "
+            "fragment; do not copy an English sentence or heading. Keep only "
+            "proper names, math, URLs, and LaTeX commands unchanged."
+        )
+    else:
+        instruction = STRUCTURAL_RETRY_INSTRUCTION
+    if instruction.strip() in value:
         return value
-    return value + STRUCTURAL_RETRY_INSTRUCTION
+    return value + instruction
 
 
 TRANSLATION_PROMPT_MARKERS = (
@@ -1813,6 +1858,49 @@ def is_tool_call_result_fragment(text: str) -> bool:
     )
 
 
+def is_structural_command_data_fragment(text: str) -> bool:
+    r"""Recognize command-heavy labels/data detached from surrounding prose.
+
+    The splitter can isolate dataset handles such as ``{Name} {\hfds{...}}``
+    or contact metadata from the sentence that introduces them.  Asking the
+    model to translate these opaque values is counterproductive: an exact
+    pass-through is the only safe result.  Keep this predicate narrow by
+    requiring a short fragment, at least one command (or a complete e-mail
+    field), and no ordinary grammatical glue.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value or len(value) > 500:
+        return False
+    if re.fullmatch(
+        r"(?is)(?:e[- ]?mail|email address)\s*:\s*[^\s@{}]+(?:\s*,\s*[^\s@{}]+)*@[^\s{}]+",
+        value,
+    ):
+        return True
+    commands = re.findall(r"\\([A-Za-z@]+)", value)
+    opaque_commands = {
+        "hfds", "dataset", "datasetpath", "repo", "repository", "path",
+        "url", "nolinkurl", "href", "includegraphics", "lstinline",
+        "verb", "email", "emails", "handle",
+    }
+    if not commands or not any(name.lower() in opaque_commands for name in commands):
+        return False
+    payload = re.sub(
+        r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?\{[^{}]*\}",
+        " ",
+        value,
+    )
+    payload = re.sub(r"\\[A-Za-z@]+\*?", " ", payload)
+    words = [word.lower() for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", payload)]
+    prose_glue = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "given", "has", "have", "in", "is", "it", "of", "on", "or", "that",
+        "the", "this", "to", "use", "was", "we", "were", "which", "with",
+    }
+    if any(word in prose_glue for word in words):
+        return False
+    return not re.search(r"[.!?]", payload) and len(words) <= 12
+
+
 def is_plain_prose_line_for_rescue(text: str) -> bool:
     """Identify short top-level prose lines stranded beside display math."""
     value = (text or "").strip()
@@ -2042,10 +2130,13 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
         or is_unbalanced_latex_fragment(raw_source)
         or is_tool_call_result_fragment(raw_source)
         or is_structural_input_command_fragment(raw_source)
+        or is_structural_command_data_fragment(raw_source)
     ):
         return False
     source_value = strip_inline_code_commands(raw_source)
     if is_inline_prompt_source_data_block(source_value):
+        return False
+    if is_structural_command_data_fragment(source_value):
         return False
     if (
         is_graphics_path_fragment(source_value)
@@ -2707,7 +2798,16 @@ def add_fontawesome_legacy_aliases(
         )
 
     insertion = "\n".join(lines)
-    fixed, inserted = insert_latex_preamble_snippet(source, insertion, names)
+    # An icon can live only in a local file reached through ``\input``.  In
+    # that case the merged main TeX has no icon token before the input, so the
+    # old marker set placed fallbacks after the local preamble and TeX still
+    # saw the command as undefined.  Keep the fallback before local inputs
+    # while retaining the first-use ordering for flattened documents.
+    fixed, inserted = insert_latex_preamble_snippet(
+        source,
+        insertion,
+        tuple(names) + (r'\input', r'\include'),
+    )
     if not inserted:
         return source, removed_blocks
     if fixed == text:
@@ -3475,7 +3575,7 @@ def disable_microtype_package_loads(text: str) -> Tuple[str, int]:
     total += repaired
     for pattern in (
         re.compile(r"\\AtEndOfClass\{\s*\\RequirePackage(?:\[[^\]]*\])?\{microtype\}\s*\}"),
-        re.compile(r"\\RequirePackage(?:\[[^\]]*\])?\{microtype\}"),
+        re.compile(r"\\(?:RequirePackage|usepackage)(?:\[[^\]]*\])?\{microtype\}"),
     ):
         source, count = pattern.subn(marker, source)
         total += count
