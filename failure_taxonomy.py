@@ -17,6 +17,20 @@ def _result(code, family, retry_strategy, repair_action, suggestion, evidence=""
     }
 
 
+def is_failure_retryable(record: Dict[str, object] | None) -> bool:
+    """Return the taxonomy-owned retry decision for a persisted failure.
+
+    Older sidecars may not contain the explicit ``retryable`` field, so retain
+    the stable strategy fallback while keeping deterministic manual-review
+    failures out of automatic PDF retries.
+    """
+    if not isinstance(record, dict) or not record:
+        return True
+    if "retryable" in record:
+        return bool(record["retryable"])
+    return record.get("retry_strategy") != "manual_review"
+
+
 QUALITY_FAILURE_SPECS = {
     "quality.translation_chunk_invalid": {
         "family": "translation_quality",

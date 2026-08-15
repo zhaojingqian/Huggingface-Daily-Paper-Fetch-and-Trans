@@ -7,6 +7,7 @@ import os, sys, json, time, subprocess
 from datetime import datetime
 from pathlib import Path
 
+from failure_taxonomy import is_failure_retryable
 from paperhub import paper_store
 from paperhub.json_io import read_json, write_json_atomic
 from paperhub.publication_lock import (
@@ -649,9 +650,6 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
                 _paper_store_update_pdf_status(aid, "ok")
                 _clear_stale_failure_artifacts(aid)
             continue
-        processed.add(aid)
-        attempted += 1
-
         diagnosis = read_json(os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"), {})
         retry_strategy = diagnosis.get("retry_strategy", "")
         if diagnosis:
@@ -660,6 +658,15 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
                 f"{retry_strategy or 'default'}",
                 flush=True,
             )
+        if diagnosis and not is_failure_retryable(diagnosis):
+            print(
+                f"{label} ⏸️  {aid} — {diagnosis.get('category', 'unknown')} "
+                "需要人工处理，跳过自动全文重试",
+                flush=True,
+            )
+            continue
+        processed.add(aid)
+        attempted += 1
 
         # paper store 已有有效 PDF（可能由其他途径生成）→ 直接更新状态。
         # 质量门禁或翻译阶段诊断明确要求重译时，旧 PDF 本身就是待替换

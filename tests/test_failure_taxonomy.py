@@ -2,12 +2,26 @@ import os
 import tempfile
 import unittest
 
-from failure_taxonomy import classify_failure, quality_failure
+from failure_taxonomy import (
+    classify_failure,
+    is_failure_retryable,
+    quality_failure,
+)
 from paperhub.failure_reports import load_failure_records, summarize_failures
 from paperhub.json_io import write_json_atomic
 
 
 class FailureTaxonomyTest(unittest.TestCase):
+    def test_retry_decision_is_owned_by_taxonomy(self):
+        self.assertFalse(
+            is_failure_retryable({"retry_strategy": "manual_review"})
+        )
+        self.assertFalse(is_failure_retryable({"retryable": False}))
+        self.assertTrue(
+            is_failure_retryable({"retry_strategy": "retry_translation"})
+        )
+        self.assertTrue(is_failure_retryable({}))
+
     def test_compile_categories_are_stable_and_actionable(self):
         missing = classify_failure(
             "compile", "xdvipdfmx:fatal: Image inclusion failed. Could not find file: assets/logo.png"
