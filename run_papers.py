@@ -583,6 +583,9 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
     changed = False
     attempted = 0
     processed = processed_ids if processed_ids is not None else set()
+    allow_manual_review = (
+        os.environ.get("PAPER_TRANS_RETRY_MANUAL_REVIEW", "") == "1"
+    )
 
     # Reconcile every verified store PDF before selecting retry candidates.
     # This also clears diagnostics left by an older failed attempt when the
@@ -658,7 +661,10 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
                 f"{retry_strategy or 'default'}",
                 flush=True,
             )
-        if diagnosis and not is_failure_retryable(diagnosis):
+        if diagnosis and not is_failure_retryable(
+            diagnosis,
+            allow_manual=allow_manual_review,
+        ):
             print(
                 f"{label} ⏸️  {aid} — {diagnosis.get('category', 'unknown')} "
                 "需要人工处理，跳过自动全文重试",

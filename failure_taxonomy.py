@@ -17,14 +17,18 @@ def _result(code, family, retry_strategy, repair_action, suggestion, evidence=""
     }
 
 
-def is_failure_retryable(record: Dict[str, object] | None) -> bool:
+def is_failure_retryable(
+    record: Dict[str, object] | None,
+    *,
+    allow_manual: bool = False,
+) -> bool:
     """Return the taxonomy-owned retry decision for a persisted failure.
 
     Older sidecars may not contain the explicit ``retryable`` field, so retain
     the stable strategy fallback while keeping deterministic manual-review
     failures out of automatic PDF retries.
     """
-    if not isinstance(record, dict) or not record:
+    if not isinstance(record, dict) or not record or allow_manual:
         return True
     if "retryable" in record:
         return bool(record["retryable"])

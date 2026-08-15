@@ -227,6 +227,14 @@ LaTeX 全文翻译默认使用 50 路首轮并发。首轮不再因 citation/ref
 `translate.api_quota / manual_review`，停止盲目重试；需要充值或显式切换到同一
 凭据已授权、并经过翻译质量验证的模型后再恢复队列。
 
+额度或鉴权恢复后，使用一次精确的人工复核重试；默认不会让 cron 反复撞同一
+个确定性失败：
+
+```bash
+PAPER_TRANS_RETRY_MANUAL_REVIEW=1 \
+  workspace-ctl paper repair --retry-pdf --mode daily --key 2026-08-05
+```
+
 `latex_translation_filters.py` 统一维护 LaTeX 过滤策略，供 splitter、翻译覆盖率门禁、merge 前 `fix_content` 清理和 fallback 重编译共同使用。对超长普通正文行，splitter 会按句子边界继续拆分，避免长段 cite 密集内容被模型整体回显成英文。CLI/GUI、trace、trajectory、prompt、code、listing、verbatim 等命名特征的自定义环境会被动态识别为硬保护环境；但 fallback 只会从原文恢复真正的 verbatim/listing/trace 类环境，不会把 table/figure/equation 这类普通保护块恢复成英文。
 
 过滤策略可通过环境变量扩展：`PAPER_TRANS_EXTRA_HARD_ENVS` 增加需要硬保护的环境名，`PAPER_TRANS_EXTRA_SOFT_ENVS` 增加可拆出自然语言继续翻译的环境名，`PAPER_TRANS_EXTRA_RESTORE_ENVS` 增加 fallback 中可从原文恢复的环境名，`PAPER_TRANS_EXTRA_LLM_ARTIFACT_PATTERNS` 按行增加需要清理的模型残留正则。

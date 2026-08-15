@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import types
@@ -40,6 +41,51 @@ class QuotaRetryTest(unittest.TestCase):
         self.assertEqual(result["pdf_failed"], 0)
         self.assertEqual(result["residual_ids"], [aid])
         translate_full.assert_not_called()
+
+    def test_manual_review_override_reaches_translation_boundary(self):
+        aid = "2608.90004"
+        translate_full = Mock(
+            return_value={"pdf_path": None, "error": "quota still active"}
+        )
+        fake_translate_mod = types.SimpleNamespace(
+            CONTAINER_NAME="latex",
+            TEX_BACKUP_DIR="/tmp",
+            TEX_FAILED_BACKUP_DIR="/tmp",
+            _restore_tex_to_container=Mock(return_value=False),
+            translate_full=translate_full,
+        )
+        diagnosis = {
+            "category": "translate.api_quota",
+            "retry_strategy": "manual_review",
+            "retryable": False,
+        }
+        docker = Mock()
+        docker.return_value.returncode = 1
+
+        with patch.dict(
+            os.environ,
+            {"PAPER_TRANS_RETRY_MANUAL_REVIEW": "1"},
+        ), patch.dict(
+            sys.modules,
+            {"translate_full": fake_translate_mod},
+        ), patch(
+            "run_papers._pdf_store_hit", return_value=None
+        ), patch(
+            "run_papers._pdf_quality_tainted", return_value=False
+        ), patch(
+            "run_papers.read_json", return_value=diagnosis
+        ), patch(
+            "run_papers._paper_store_update_pdf_status"
+        ), patch(
+            "run_papers.subprocess.run", docker
+        ):
+            result = run_papers.retry_failed_pdf_entries(
+                [{"arxiv_id": aid, "pdf_status": "failed"}],
+                label="[test]",
+            )
+
+        self.assertEqual(result["pdf_attempted"], 1)
+        translate_full.assert_called_once()
 
 
 if __name__ == "__main__":

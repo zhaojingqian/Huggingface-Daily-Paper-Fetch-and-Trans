@@ -18,6 +18,9 @@ class FailureTaxonomyTest(unittest.TestCase):
         )
         self.assertFalse(is_failure_retryable({"retryable": False}))
         self.assertTrue(
+            is_failure_retryable({"retryable": False}, allow_manual=True)
+        )
+        self.assertTrue(
             is_failure_retryable({"retry_strategy": "retry_translation"})
         )
         self.assertTrue(is_failure_retryable({}))
