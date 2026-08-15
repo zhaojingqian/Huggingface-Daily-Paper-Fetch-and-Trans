@@ -463,6 +463,16 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertTrue(filters.llm_translation_response_quota_failed(
             "insufficient_user_quota: balance $0.005 is insufficient"
         ))
+        self.assertTrue(filters.llm_translation_response_quota_failed(
+            "Error: API balance is insufficient"
+        ))
+        self.assertFalse(filters.llm_translation_response_quota_failed(
+            "Each order contributes an experience score except after an "
+            "insufficient balance failure."
+        ))
+        self.assertFalse(filters.llm_translation_response_quota_failed(
+            "当余额不足时，订单会进入失败状态。"
+        ))
 
     def test_detects_untranslated_llm_chunk_responses(self):
         source = (

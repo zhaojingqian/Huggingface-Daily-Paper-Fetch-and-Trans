@@ -455,6 +455,20 @@ LLM_REQUEST_FAILURE_MARKERS = (
     "insufficient_user_quota",
 )
 
+_QUOTA_ERROR_PREFIX_RE = re.compile(
+    r"^\s*(?:error\b|错误\b|失败\b|runtimeerror\b|traceback\b|"
+    r"\[local message\]|\{\s*[\"']error[\"']\s*:)",
+    re.IGNORECASE,
+)
+_QUOTA_ERROR_TERMS = (
+    "balance is insufficient",
+    "insufficient balance",
+    "quota exceeded",
+    "quota exhausted",
+    "余额不足",
+    "额度不足",
+)
+
 
 def llm_translation_response_failed(text: str) -> bool:
     """Return whether a chunk response is an upstream request failure payload."""
@@ -463,13 +477,12 @@ def llm_translation_response_failed(text: str) -> bool:
 
 
 def llm_translation_response_quota_failed(text: str) -> bool:
-    value = (text or "").lower()
-    return (
-        "insufficient_user_quota" in value
-        or ("balance" in value and "insufficient" in value)
-        or "余额不足" in value
-        or "额度不足" in value
-    )
+    value = str(text or "").strip().lower()
+    if "insufficient_user_quota" in value:
+        return True
+    return bool(_QUOTA_ERROR_PREFIX_RE.search(value) and any(
+        term in value for term in _QUOTA_ERROR_TERMS
+    ))
 
 
 # These labels are model-task metadata, not paper text.  In particular, a
