@@ -3364,7 +3364,12 @@ def repair_duplicated_macro_initials(text: str) -> Tuple[str, int]:
 
 
 def strip_redundant_macro_empty_groups(text: str, macro_names: Set[str]) -> Tuple[str, int]:
-    """Drop ``\\name{}`` before CJK text when ``\\name`` is zero-argument."""
+    """Remove an empty group while retaining a TeX command terminator.
+
+    The empty group may be the only delimiter between a zero-argument macro
+    and CJK text.  Removing it without adding a replacement delimiter turns
+    ``\\name{}中文`` back into the invalid control word ``\\name中文``.
+    """
     if not macro_names:
         return text, 0
     names_pat = "|".join(re.escape(n) for n in sorted(macro_names, key=len, reverse=True))
@@ -3373,7 +3378,15 @@ def strip_redundant_macro_empty_groups(text: str, macro_names: Set[str]) -> Tupl
         + CJK_CHAR_CLASS
         + r"|[，。！？；：、])"
     )
-    return pattern.subn(lambda m: "\\" + m.group(1), text or "")
+
+    def replace(match: re.Match[str]) -> str:
+        # Keep an existing whitespace delimiter; otherwise insert one.  The
+        # latter is required because CJK letters have TeX's command-letter
+        # catcode and would otherwise be absorbed into the control sequence.
+        delimiter = "" if match.end() < len(match.string) and match.string[match.end()].isspace() else " "
+        return "\\" + match.group(1) + delimiter
+
+    return pattern.subn(replace, text or "")
 
 
 def collapse_spaced_cjk_characters(text: str) -> Tuple[str, int]:

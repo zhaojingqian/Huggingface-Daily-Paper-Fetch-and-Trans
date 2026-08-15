@@ -1678,6 +1678,18 @@ Language: Chinese
         self.assertEqual(count, 2)
         self.assertIn(r"\Ours 通过", fixed)
 
+    def test_custom_macro_empty_group_rewrite_keeps_cjk_terminator(self):
+        text = (
+            r"\newcommand{\name}{{HPSE}\xspace}" "\n"
+            r"因此\name处于不利地位。"
+        )
+
+        fixed, count = filters.separate_custom_macro_cjk_glue(text)
+
+        self.assertEqual(count, 3)
+        self.assertIn(r"\name 处于", fixed)
+        self.assertNotIn(r"\name处", fixed)
+
     def test_separate_custom_macro_robust_command_cjk_glue(self):
         text = (
             r"\DeclareRobustCommand{\ourmethod}{LaMem-VLA\xspace}" "\n"
