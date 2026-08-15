@@ -675,7 +675,13 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
 
 
 def patch_missing_custom_macro_definitions(trans_tex_path, orig_tex_path):
-    """Restore source-defined macros dropped from translated local preambles."""
+    """Restore user-source macros dropped from translated local preambles.
+
+    Package/class implementation files are intentionally excluded.  Their
+    commands can be defined lazily inside an environment (``algorithmic`` is
+    one example); copying those definitions into the document preamble makes
+    the package's later ``\\newcommand`` declarations collide.
+    """
     with open(trans_tex_path, encoding="utf-8") as handle:
         text = handle.read()
 
@@ -688,7 +694,7 @@ def patch_missing_custom_macro_definitions(trans_tex_path, orig_tex_path):
             pass
 
     workfolder = os.path.dirname(trans_tex_path)
-    for pattern in ("**/*.tex", "**/*.sty", "**/*.cls"):
+    for pattern in ("**/*.tex",):
         for path in glob.glob(os.path.join(workfolder, pattern), recursive=True):
             if os.path.abspath(path) == os.path.abspath(trans_tex_path):
                 continue

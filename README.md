@@ -39,7 +39,8 @@ gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前
 `paperhub/latex_pipeline.py` 同时拥有容器内 PDF、翻译质量、编译健康门禁，以及
 TeX 修补、BibTeX/XeLaTeX/LuaLaTeX fallback；`paperhub/translation_policy.py`
 统一 chunk 与并发策略。编译 patch 会同时绑定 `latex_toolbox` 和
-`latex_actions` 的实际引用，并可从原始 sibling/preamble 恢复被翻译丢失的自定义宏。
+`latex_actions` 的实际引用，并只从用户 `.tex` 源恢复被翻译丢失的自定义宏；
+`.sty/.cls` 包实现不被复制到导言区，避免算法等环境的延迟宏重复定义。
 
 首轮请求由 `PAPER_TRANS_LLM_WORKERS` 控制，默认 50；普通正文上限 2400 字符，
 结构/引用密集片段自动降为 1900/1500；失败槽使用最多 16 路的有界并发重试。
