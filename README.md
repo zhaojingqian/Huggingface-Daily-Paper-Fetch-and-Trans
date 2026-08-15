@@ -258,6 +258,8 @@ fallback 编译还会处理部分模板兼容问题：为旧模板补 `fontaweso
 
 `translate_full.py` 每次全文 retry 默认会在共享锁内回收该论文的容器缓存和本次新建的临时输出；仅需保留容器现场诊断时才设置 `PAPER_TRANS_CLEAN_RETRY_CACHE=0`。
 
+额度失败时只在 `/gpt/gpt_log/paper_trans_recovery/` 保留按模型和 splitter 版本绑定的有效 chunk 恢复账本；下次重试只请求缺失 chunk，生成并验证 PDF 后自动删除账本。
+
 `scripts/cleanup_docker_cache.sh` 与 `scripts/restart_translation_container.sh` 复用全文翻译全局锁；锁繁忙时维护任务直接记录 `SKIP`，不会删除活跃 workfolder 或重启正在工作的容器。Docker 缓存每天清理：常规保留 3 天，磁盘达到 90% 或可用空间低于 2GB 时切换为保留 1 天。`arxiv_cache` 按论文目录回收，`default_user/shared`、`downloadzone` 和 `admin` 按文件年龄回收，避免一个近期文件阻止整个目录内的旧 zip 被删除。清理后仍达到 95% 或可用空间仍低于 2GB 时任务返回非零，并通过服务器已有 Gmail SMTP 配置发送告警；高水位自动恢复也会发送通知。可用 `PAPER_TRANS_CACHE_RETENTION_DAYS`、`PAPER_TRANS_EMERGENCY_RETENTION_DAYS`、`PAPER_TRANS_DISK_HIGH_WATERMARK`、`PAPER_TRANS_DISK_CRITICAL_WATERMARK` 和 `PAPER_TRANS_MIN_FREE_MB` 调整阈值。
 
 `scripts/weekly_cleanup.sh` 通过

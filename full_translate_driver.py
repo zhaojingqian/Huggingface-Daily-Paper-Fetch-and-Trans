@@ -61,6 +61,14 @@ if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
     sys.exit(1)
 
+_recovery_id = "".join(
+    char for char in str(arxiv_id)
+    if char.isalnum() or char in ".-_"
+)
+os.environ["PAPER_TRANS_RECOVERY_FILE"] = (
+    f"/gpt/gpt_log/paper_trans_recovery/{_recovery_id}.json"
+)
+
 print(f"[driver] 开始处理: {arxiv_id}  no_cache={no_cache}  keep_translation={keep_translation}  max_retries={max_retries}", flush=True)
 
 # ── 代理注入（必须在所有 gpt-academic 模块导入之前）──────────────────────────────
@@ -179,6 +187,7 @@ from toolbox import get_conf, ChatBotWithCookies, default_user_name
 
 api_key   = get_conf('API_KEY')
 llm_model = os.environ.get("PAPER_TRANS_LLM_MODEL") or get_conf('LLM_MODEL')
+os.environ["PAPER_TRANS_EFFECTIVE_MODEL"] = str(llm_model)
 ARXIV_CACHE_DIR = get_conf('ARXIV_CACHE_DIR')
 print(f"[driver] 模型: {llm_model}", flush=True)
 print(f"[driver] 缓存目录: {ARXIV_CACHE_DIR}", flush=True)
@@ -201,6 +210,20 @@ def translation_quality_ok(workfolder: str, arxiv_id_: str) -> bool:
     report = translation_quality_report(workfolder)
     _last_quality_report = report
     return _translation_quality_ok(workfolder, arxiv_id_, report=report)
+
+
+def clear_translation_recovery_checkpoint() -> bool:
+    """Remove a chunk recovery ledger only after a verified PDF succeeds."""
+    path = os.environ.get("PAPER_TRANS_RECOVERY_FILE", "")
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+        print(f"[driver] 🧹 已清理 chunk 恢复账本: {path}", flush=True)
+        return True
+    except OSError as exc:
+        print(f"[driver] ⚠️  chunk 恢复账本清理失败: {exc}", flush=True)
+        return False
 
 
 def repair_terminal_translation_residuals(workfolder: str, arxiv_id_: str) -> bool:
@@ -391,6 +414,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
         if not latex_compile_health_ok(workfolder, arxiv_id):
             return None
         print(f"[driver|{elapsed()}] ✅ translate_zh.pdf ({kb}KB)", flush=True)
+        clear_translation_recovery_checkpoint()
         return candidate
 
     # 备选：workfolder 根目录里的翻译 PDF（名字含 translate_zh）
@@ -403,6 +427,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
             if not latex_compile_health_ok(workfolder, arxiv_id):
                 return None
             print(f"[driver|{elapsed()}] ✅ workfolder/{fname} ({kb}KB)", flush=True)
+            clear_translation_recovery_checkpoint()
             return fp
 
     # 最后：workfolder 根目录（非子目录）内最大 PDF（排除原始 merge.pdf）
@@ -420,6 +445,7 @@ def run_translation(attempt_no_cache: bool, attempt_idx: int) -> str | None:
             if not latex_compile_health_ok(workfolder, arxiv_id):
                 return None
             print(f"[driver|{elapsed()}] ✅ 找到 workfolder 根目录 PDF: {os.path.basename(best)} ({kb}KB)", flush=True)
+            clear_translation_recovery_checkpoint()
             return best
 
     print(f"[driver|{elapsed()}] ❌ 本次未生成有效翻译 PDF（>50KB）", flush=True)

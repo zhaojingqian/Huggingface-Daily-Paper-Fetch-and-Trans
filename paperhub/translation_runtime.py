@@ -6,8 +6,10 @@ adapter layer for splitter, response validation, and archive safety.
 
 from __future__ import annotations
 
+import json
 import os
 import tarfile
+import tempfile
 
 import latex_translation_filters as _ltf
 try:
@@ -26,6 +28,98 @@ except ImportError:
 SPLITTER_CACHE_VERSION = (
     "paper-trans-splitter-2026-08-16-v64-name-catalogs"
 )
+
+
+def _recovery_file() -> str:
+    """Return the bounded per-paper recovery ledger path, if configured."""
+    return os.environ.get("PAPER_TRANS_RECOVERY_FILE", "").strip()
+
+
+def _load_translation_recovery(sources):
+    """Load valid chunk responses from the disposable-runtime recovery ledger."""
+    path = _recovery_file()
+    if not path or not isinstance(sources, list):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if payload.get("splitter") != SPLITTER_CACHE_VERSION:
+        return {}
+    model = os.environ.get("PAPER_TRANS_EFFECTIVE_MODEL", "")
+    if payload.get("model", "") != model:
+        return {}
+    recovered = {}
+    for item in payload.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        response = str(item.get("response") or "")
+        if not isinstance(index, int) or not 0 <= index < len(sources):
+            continue
+        if item.get("source") != sources[index] or not response:
+            continue
+        if _ltf.llm_translation_response_invalid(sources[index], response):
+            continue
+        if _ltf.llm_translation_response_untranslated(sources[index], response):
+            continue
+        recovered[index] = response
+    return recovered
+
+
+def _save_translation_recovery(sources, payload):
+    """Persist only valid responses so a quota retry can skip completed chunks."""
+    path = _recovery_file()
+    if not path or not isinstance(sources, list):
+        return False
+    items = []
+    for index, response in enumerate(list(payload)[1::2]):
+        if index >= len(sources):
+            break
+        response = str(response or "")
+        if not response:
+            continue
+        if _ltf.llm_translation_response_invalid(sources[index], response):
+            continue
+        if _ltf.llm_translation_response_untranslated(sources[index], response):
+            continue
+        items.append({
+            "index": index,
+            "source": sources[index],
+            "response": response,
+        })
+    if not items:
+        return False
+    directory = os.path.dirname(path)
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=directory or None,
+            prefix=".paper-trans-recovery-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump({
+                "splitter": SPLITTER_CACHE_VERSION,
+                "model": os.environ.get("PAPER_TRANS_EFFECTIVE_MODEL", ""),
+                "items": items,
+            }, handle, ensure_ascii=False, separators=(",", ":"))
+            temporary = handle.name
+        os.replace(temporary, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            if "temporary" in locals():
+                os.remove(temporary)
+        except OSError:
+            pass
+        return False
 
 
 def _patch_latex_translation_splitter():
@@ -703,8 +797,6 @@ def _patch_latex_llm_rate_limit_handling():
         options = dict(kwargs)
         options["max_workers"] = max_workers
         options["retry_times_at_unknown_error"] = per_call_retries
-        result = yield from original(*args, **options)
-
         inputs = options.get("inputs_array", [])
         visible_inputs = options.get("inputs_show_user_array", [])
         histories = options.get("history_array", [])
@@ -718,6 +810,57 @@ def _patch_latex_llm_rate_limit_handling():
             _ltf.extract_translation_fragment(item)
             for item in inputs
         ]
+        recovered = _load_translation_recovery(validation_sources)
+        if recovered and not args and inputs:
+            missing = [
+                index for index in range(len(inputs))
+                if index not in recovered
+            ]
+            if missing:
+                request_options = dict(options)
+                request_options.update({
+                    "inputs_array": [inputs[index] for index in missing],
+                    "inputs_show_user_array": [
+                        visible_inputs[index] for index in missing
+                    ],
+                    "history_array": [histories[index] for index in missing],
+                    "sys_prompt_array": [prompts[index] for index in missing],
+                    "max_workers": _retry_worker_count(
+                        len(missing), max_workers,
+                    ),
+                })
+                print(
+                    f"[driver] ♻️  恢复 {len(recovered)} 个已完成 chunk，"
+                    f"仅请求 {len(missing)} 个缺失 chunk",
+                    flush=True,
+                )
+                fetched = yield from original(**request_options)
+                result = ["" for _ in range(len(inputs) * 2)]
+                for index in range(len(inputs)):
+                    result[index * 2] = inputs[index]
+                for index, response in recovered.items():
+                    result[index * 2 + 1] = response
+                for local_index, index in enumerate(missing):
+                    response_index = local_index * 2 + 1
+                    result[index * 2 + 1] = (
+                        fetched[response_index]
+                        if response_index < len(fetched)
+                        else ""
+                    )
+            else:
+                result = ["" for _ in range(len(inputs) * 2)]
+                for index, item in enumerate(inputs):
+                    result[index * 2] = item
+                    result[index * 2 + 1] = recovered[index]
+        else:
+            result = yield from original(*args, **options)
+
+        def persist_recovery(payload):
+            if _save_translation_recovery(validation_sources, payload):
+                print(
+                    "[driver] 💾 已保存已完成 chunk 恢复账本（仅保留有效响应）",
+                    flush=True,
+                )
 
         def log_abnormal_chunks(payload, failed_indices, invalid_reasons, stage):
             """Print enough structure evidence to diagnose a rejected slot.
@@ -840,6 +983,7 @@ def _patch_latex_llm_rate_limit_handling():
             quota_failed,
         ) = response_status(result)
         if quota_failed:
+            persist_recovery(result)
             raise RuntimeError(
                 "insufficient_user_quota: API balance is insufficient for "
                 f"{len(quota_failed)} translation chunks"
@@ -971,6 +1115,7 @@ def _patch_latex_llm_rate_limit_handling():
                         quota_failed,
                     ) = response_status(result)
                     if quota_failed:
+                        persist_recovery(result)
                         raise RuntimeError(
                             "insufficient_user_quota: API balance is insufficient "
                             "during adaptive structural retry"
@@ -1007,7 +1152,12 @@ def _patch_latex_llm_rate_limit_handling():
             })
             retried = yield from original(**retry_options)
             for local_index, original_index in enumerate(remaining):
-                result[original_index * 2 + 1] = retried[local_index * 2 + 1]
+                response_index = local_index * 2 + 1
+                result[original_index * 2 + 1] = (
+                    retried[response_index]
+                    if response_index < len(retried)
+                    else ""
+                )
             (
                 remaining,
                 request_failed,
@@ -1017,6 +1167,7 @@ def _patch_latex_llm_rate_limit_handling():
                 quota_failed,
             ) = response_status(result)
             if quota_failed:
+                persist_recovery(result)
                 raise RuntimeError(
                     "insufficient_user_quota: API balance is insufficient for "
                     f"{len(quota_failed)} translation chunks"
@@ -1032,6 +1183,7 @@ def _patch_latex_llm_rate_limit_handling():
         if remaining:
             # Never cache a temp.pkl where request failures are silently
             # merged back into the output as English source text.
+            persist_recovery(result)
             raise RuntimeError(
                 "LLM request/untranslated/structural failures remain in "
                 f"{len(remaining)} translation chunks after bounded retry"
