@@ -1221,6 +1221,7 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|do\s+not\s+mention\s+being\s+given\s+(?:oracle\s+labels|confusers|hints|internal\s+guidance)\b"
     r"|you\s+are\s+a\s+strict\s+grader\b(?=.*\b(?:student's\s+answer|reference\s+answer)\b)"
     r"|the\s+question\s+prompt\s+is\s+structured\s+as\s+follows\b"
+    r"|your\s+final\s+output\s+must\s+be\s+\\emph\{strictly\}\s+one\s+of\s+the\s+following\s*:"
     r"|\\textbf\{(?:for|if|when)\s+(?:safe|unsafe|harmful|benign)\s+trajectories\s*:"
     r")"
 )
@@ -1603,9 +1604,10 @@ def strip_inline_code_commands(text: str) -> str:
             index += 1
     for start, end in reversed(replacements):
         value = value[:start] + " " + value[end:]
-    # A URL may contain TeX escapes, base64-like query payloads and spaces.
-    # Everything from the scheme to the line end is address data, not prose.
-    value = re.sub(r"https?://[^\n]*", " ", value, flags=re.IGNORECASE)
+    # Keep text after a URL on the same line.  A footnote URL may be followed
+    # by a citation; consuming the whole line would erase that citation from
+    # the source structural signature and create a false mismatch.
+    value = re.sub(r"https?://[^\s{}]+", " ", value, flags=re.IGNORECASE)
     return value
 
 
@@ -2348,7 +2350,7 @@ def is_structural_command_data_fragment(text: str) -> bool:
         return True
     if (
         re.match(
-            r"(?i)^\s*(?:g\+\+|gcc|g\+|clang\+\+|clang|rustc|javac|"
+            r"(?i)^\s*(?:g\+\+|gcc|g\+|clang\+\+|clang|rustc|javac|java|"
             r"python(?:3)?|node|go)(?=\s|$)",
             value,
         )

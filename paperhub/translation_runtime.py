@@ -24,7 +24,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-16-v61-prompt-directives"
+    "paper-trans-splitter-2026-08-16-v62-source-boundaries"
 )
 
 

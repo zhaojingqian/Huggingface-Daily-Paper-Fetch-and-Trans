@@ -1056,11 +1056,34 @@ Language: Chinese
         )
         self.assertNotIn(r"\cite{invented2026}", extra)
 
+    def test_url_cleanup_preserves_citation_after_footnote_url(self):
+        source = (
+            r"We use the official prompts~\footnote{https://example.com/path} "
+            r"of BBH~\cite{suzgun2022challengingbbh}."
+        )
+        translated = (
+            r"我们使用官方提示~\footnote{https://example.com/path}，"
+            r"并参考 BBH~\cite{suzgun2022challengingbbh}。"
+        )
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, translated),
+            "",
+        )
+
+    def test_final_output_directive_is_source_data(self):
+        directive = r"Your final output must be \emph{strictly} one of the following:"
+        self.assertTrue(filters.is_inline_prompt_source_data_block(directive))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(directive, directive)
+        )
+
     def test_math_and_compiler_commands_are_structural(self):
         math = r"\Delta_{\text{tool}} = \text{Score}_{\text{with tools}} - \text{Score}_{\text{no tools}}"
         command = r"g++ -std=c++20 -O2 -o code.exe code.cpp"
+        java_command = r"java -XX:+UseSerialGC -Xmx544m Main"
         self.assertTrue(filters.is_pure_latex_math_fragment(math))
         self.assertTrue(filters.is_structural_command_data_fragment(command))
+        self.assertTrue(filters.is_structural_command_data_fragment(java_command))
         self.assertFalse(filters.llm_translation_response_untranslated(math, math))
         self.assertFalse(filters.llm_translation_response_untranslated(command, command))
 
