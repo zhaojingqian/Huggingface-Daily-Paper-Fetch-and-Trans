@@ -9,9 +9,8 @@ import json
 import time
 import requests
 from collections import OrderedDict
-from datetime import datetime, timedelta
-
 from paperhub.env_config import http_proxies
+from paperhub.modes import mode_spec
 
 HEADERS = {
     "User-Agent": (
@@ -140,44 +139,14 @@ def fetch_hf_papers(mode, key, limit=10, use_proxy=True):  # noqa: use_proxy kep
         return []
 
 
-# ── 便捷日期函数 ─────────────────────────────────────────────────────────────
-def today_key():
-    """当前日期 YYYY-MM-DD。daily cron 在 23:00 触发，取当天日期。"""
-    from paperhub.modes import mode_spec
-    return mode_spec("daily").current_key()
-
-def current_month_key():
-    """当前年月 YYYY-MM。monthly cron 在 28 日 02:00 触发，取当月。"""
-    from paperhub.modes import mode_spec
-    return mode_spec("monthly").current_key()
-
-def current_week_key():
-    """
-    当前 ISO 周 YYYY-WNN。
-    ISO 8601：周一为第 1 天，周日为第 7 天（仍属于本周）。
-    weekly cron 在周日 02:00 触发，此时 isocalendar() 返回本周编号，正确。
-    """
-    from paperhub.modes import mode_spec
-    return mode_spec("weekly").current_key()
-
-def last_week_key():
-    """
-    上一个完整 ISO 周 YYYY-WNN（仅在需要补抓历史数据时使用）。
-    注意：若在周日调用，会得到上上周，请勿在 cron 中使用。
-    """
-    now = datetime.now()
-    last_mon = now - timedelta(days=now.weekday() + 7)
-    y, w, _ = last_mon.isocalendar()
-    return f"{y}-W{w:02d}"
-
-
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
-    key  = sys.argv[2] if len(sys.argv) > 2 else {
-        "daily": today_key(),
-        "weekly": current_week_key(),
-        "monthly": current_month_key(),
-    }.get(mode, today_key())
+    default_mode = mode if mode in ("daily", "weekly", "monthly") else "daily"
+    key = (
+        sys.argv[2]
+        if len(sys.argv) > 2
+        else mode_spec(default_mode).current_key()
+    )
     limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10
     papers = fetch_hf_papers(mode, key, limit)
     print(json.dumps(papers, indent=2, ensure_ascii=False))
