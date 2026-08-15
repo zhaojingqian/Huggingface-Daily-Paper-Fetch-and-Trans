@@ -50,7 +50,10 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / translate_full.py",
         "strategy": "retry_later",
-        "note": "全文翻译默认两路低并发；仅串行重试失败或中文不足的 chunk，仍失败时拒绝缓存英文回填的半成品。",
+        "note": (
+            "全文翻译首轮并发由 PAPER_TRANS_LLM_WORKERS 控制（当前默认 50）；"
+            "重试按失败槽限流，仍失败时拒绝缓存英文回填的半成品。"
+        ),
     },
     "translate.network_timeout": {
         "patches": ("retry_with_backoff",),
