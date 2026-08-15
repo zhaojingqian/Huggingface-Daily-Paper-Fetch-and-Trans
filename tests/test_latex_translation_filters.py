@@ -1506,6 +1506,18 @@ Language: Chinese
         self.assertEqual(again, fixed)
         self.assertIn(r"\providecommand{\aaai@affiliations}{}", fixed)
 
+    def test_xelatex_fallback_normalizes_unavailable_ctex_fontset(self):
+        source = r"\documentclass[fontset=windows,UTF8]{article}"
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(source)
+        again, second_count = filters.add_xelatex_compatibility_fallbacks(fixed)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(again, fixed)
+        self.assertIn(r"fontset=fandol", fixed)
+        self.assertNotIn(r"fontset=windows", fixed)
+
     def test_structure_dense_prose_uses_normal_first_pass_limit(self):
         citations = (
             r"Prior work \cite{a}, \citep{b}, and \citet{c} motivates this."

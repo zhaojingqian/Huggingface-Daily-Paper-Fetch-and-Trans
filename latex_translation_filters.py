@@ -3361,6 +3361,18 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         source
     )
 
+    # The slim XeLaTeX image does not ship Windows/macOS CTeX fonts.  Keeping
+    # those fontset options makes XeCJK fall back through unavailable font
+    # metrics and can surface as a misleading ``Missing number`` at an
+    # otherwise valid Chinese footnote.  Fandol is bundled in the image and
+    # is the only portable CTeX fontset for this runtime.
+    source, ctex_fontset_repairs = re.subn(
+        r"(?m)(\\documentclass\[[^\]\n]*?)\bfontset=(?:windows|mac|ubuntu)\b",
+        r"\g<1>fontset=fandol",
+        source,
+        flags=re.IGNORECASE,
+    )
+
     # CJKutf8's tilde activation belongs to its legacy 8-bit input path.  The
     # translated document is compiled by a Unicode engine, where the command
     # may not exist and has no useful work left to do.  Normalize the setup
@@ -3485,7 +3497,12 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         and not _latex_command_defined(source, "aaai@affiliations")
     )
 
-    total = malformed_text_repairs + historical_repairs + legacy_cjk_setup_repairs
+    total = (
+        malformed_text_repairs
+        + historical_repairs
+        + legacy_cjk_setup_repairs
+        + ctex_fontset_repairs
+    )
     if needs_inputencoding:
         insertion = "\n".join([
             r"% paper-trans fallback for XeLaTeX compatibility commands",

@@ -176,6 +176,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "patch_numeric_argument",
             "patch_enumitem_for_optional_lists",
             "patch_local_tex_microtype_loads",
+            "normalize_ctex_fontset_for_slim_xelatex",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
