@@ -58,6 +58,15 @@ def translation_complete(data):
     )
 
 
+def metadata_complete(data):
+    """Return whether a paper has the source title and abstract/summary."""
+    return bool(
+        isinstance(data, dict)
+        and str(data.get("title", "")).strip()
+        and str(data.get("abstract") or data.get("summary") or "").strip()
+    )
+
+
 def pdf_quality_tainted(data_or_arxiv_id):
     """Return whether a structurally valid PDF is blocked by a quality failure."""
     data = (

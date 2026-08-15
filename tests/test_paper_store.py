@@ -55,6 +55,18 @@ class PaperStoreTest(unittest.TestCase):
         self.assertTrue(paper_store.translation_complete(payload))
         self.assertFalse(paper_store.translation_complete([payload]))
 
+    def test_metadata_complete_accepts_abstract_or_summary(self):
+        self.assertTrue(paper_store.metadata_complete({
+            "title": "Source title",
+            "abstract": "Source abstract",
+        }))
+        self.assertTrue(paper_store.metadata_complete({
+            "title": "Source title",
+            "summary": "Source summary",
+        }))
+        self.assertFalse(paper_store.metadata_complete({"title": "Only title"}))
+        self.assertFalse(paper_store.metadata_complete([]))
+
     def test_pdf_status_update_is_best_effort(self):
         payload = {"arxiv_id": "2606.00002", "title_zh": "已有中文标题"}
         paper_store.write_raw(payload)

@@ -135,14 +135,6 @@ def _stats_line(stats):
     )
 
 
-def _metadata_complete(data):
-    return bool(
-        isinstance(data, dict)
-        and str(data.get("title", "")).strip()
-        and str(data.get("abstract") or data.get("summary") or "").strip()
-    )
-
-
 def _audit_translation_state(arxiv_ids, structural_residuals=(), missing_attempts=0):
     """Recompute final summary/metadata status from the persisted paper store."""
     ids = {str(item) for item in arxiv_ids if item}
@@ -154,7 +146,7 @@ def _audit_translation_state(arxiv_ids, structural_residuals=(), missing_attempt
     residual_ids = {str(item) for item in structural_residuals if item}
     for aid in sorted(ids):
         stored = paper_store.read_raw(aid)
-        if _metadata_complete(stored):
+        if paper_store.metadata_complete(stored):
             stats["metadata_succeeded"] += 1
         else:
             stats["metadata_failed"] += 1

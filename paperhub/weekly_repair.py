@@ -60,14 +60,6 @@ def _finish_stats(stats, residual_ids=()):
     return result
 
 
-def _metadata_complete(data):
-    return bool(
-        isinstance(data, dict)
-        and str(data.get("title", "")).strip()
-        and str(data.get("abstract") or data.get("summary") or "").strip()
-    )
-
-
 def current_week_key(now: Optional[datetime] = None) -> str:
     return mode_spec("weekly").current_key(now)
 
@@ -268,7 +260,7 @@ def _repair_unique_summaries(arxiv_ids, references):
             if paper_store.translation_complete(stored):
                 repaired_ids.add(arxiv_id)
 
-        if _metadata_complete(stored):
+        if paper_store.metadata_complete(stored):
             stats["metadata_succeeded"] += 1
         else:
             stats["metadata_failed"] += 1
