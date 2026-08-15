@@ -14,6 +14,7 @@ import requests
 
 from paperhub import paper_store, topic_store
 from paperhub.env_config import get_env, http_proxies
+from paperhub.http_client import fetch_text
 from paperhub.json_io import read_json, write_json_atomic
 from paperhub.paths import (
     LOGS_DIR,
@@ -62,30 +63,6 @@ KNOWN_TOPIC_HINTS = {
         ],
     }
 }
-
-
-def _http_get(url, timeout=30, max_retries=3):
-    use_proxy = True
-    last_exc = None
-    for attempt in range(max_retries):
-        try:
-            resp = requests.get(url, timeout=timeout, proxies=http_proxies(use_proxy))
-            resp.raise_for_status()
-            return resp.text
-        except requests.exceptions.ProxyError as e:
-            last_exc = e
-            use_proxy = False
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.SSLError) as e:
-            last_exc = e
-            if use_proxy:
-                use_proxy = False
-            elif attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-        except Exception as e:
-            last_exc = e
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-    raise last_exc or RuntimeError("HTTP request failed")
 
 
 def topic_llm_config():
@@ -331,7 +308,12 @@ def fetch_arxiv_candidates(profile, days=30, max_results=80):
         + quote_plus(search_query)
         + f"&start=0&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
     )
-    xml_text = _http_get(url, timeout=40)
+    xml_text = fetch_text(
+        url,
+        timeout=40,
+        max_retries=3,
+        log_prefix="topic",
+    )
     candidates = _parse_arxiv_feed(xml_text)
     cutoff = datetime.now().date() - timedelta(days=days)
     allowed = set(profile.get("categories", topic_store.DEFAULT_CATEGORIES))
