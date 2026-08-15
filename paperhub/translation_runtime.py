@@ -203,18 +203,6 @@ def _patch_latex_translation_splitter():
         _append(nodes, suffix + comment + newline, True)
         return nodes
 
-    def _find_matching_brace(text: str, open_idx: int) -> int:
-        depth = 0
-        for idx in range(open_idx, len(text)):
-            ch = text[idx]
-            if ch == "{" and (idx == 0 or text[idx - 1] != "\\"):
-                depth += 1
-            elif ch == "}" and (idx == 0 or text[idx - 1] != "\\"):
-                depth -= 1
-                if depth == 0:
-                    return idx
-        return -1
-
     def _split_algorithmic_line(line: str):
         nodes = []
         code, comment = _split_comment(line)
@@ -224,7 +212,7 @@ def _patch_latex_translation_splitter():
         m = _re.match(r"^(\s*\\Comment\s*)\{", code)
         if m:
             open_idx = m.end() - 1
-            close_idx = _find_matching_brace(code, open_idx)
+            close_idx = _ltf._find_matching_brace(code, open_idx)
             if close_idx > open_idx:
                 _append(nodes, code[:open_idx + 1], True)
                 _append_translatable_fragment(nodes, code[open_idx + 1:close_idx], min_letters=5, min_words=1)
@@ -239,7 +227,7 @@ def _patch_latex_translation_splitter():
         m = _re.match(r"^(\s*\\(?:If|ElsIf|For|ForAll|While)\s*)\{", code)
         if m:
             open_idx = m.end() - 1
-            close_idx = _find_matching_brace(code, open_idx)
+            close_idx = _ltf._find_matching_brace(code, open_idx)
             if close_idx > open_idx:
                 _append(nodes, code[:open_idx + 1], True)
                 _append_translatable_fragment(nodes, code[open_idx + 1:close_idx], min_letters=5, min_words=1)
