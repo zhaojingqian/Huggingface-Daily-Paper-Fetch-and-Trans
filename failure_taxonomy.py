@@ -2,7 +2,7 @@
 """Stable failure taxonomy shared by the container driver and host logs."""
 
 import re
-from typing import Dict
+from typing import Dict, Optional
 
 
 def _result(code, family, retry_strategy, repair_action, suggestion, evidence="") -> Dict[str, object]:
@@ -18,7 +18,7 @@ def _result(code, family, retry_strategy, repair_action, suggestion, evidence=""
 
 
 def is_failure_retryable(
-    record: Dict[str, object] | None,
+    record: Optional[Dict[str, object]],
     *,
     allow_manual: bool = False,
 ) -> bool:
