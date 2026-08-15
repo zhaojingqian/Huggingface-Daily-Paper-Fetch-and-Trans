@@ -24,6 +24,7 @@ from failure_taxonomy import classify_failure
 from paperhub.json_io import write_json_atomic
 from paperhub.paper_store import pdf_file_valid
 from paperhub.publication_lock import paper_publication_lock
+from paperhub.translation_policy import bounded_int
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
     LOCK_DIR,
@@ -88,28 +89,22 @@ def _run_docker_control(command, operation, **kwargs):
     return None
 
 
-def _bounded_nonnegative_int(env_name, default):
-    raw = os.environ.get(env_name, str(default))
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return max(0, value)
-
-
 def _disk_preflight_error():
     """Return an ENOSPC-style message when translation must not start."""
     total, used, free = shutil.disk_usage(BASE_DIR)
     free_mb = free // (1024 * 1024)
     used_pct = int(round((used * 100.0) / total)) if total else 100
-    min_free_mb = _bounded_nonnegative_int(
-        "PAPER_TRANS_MIN_FREE_MB", DEFAULT_MIN_FREE_MB
+    min_free_mb = bounded_int(
+        os.environ.get("PAPER_TRANS_MIN_FREE_MB"),
+        DEFAULT_MIN_FREE_MB,
+        minimum=0,
     )
     critical = min(
         100,
-        _bounded_nonnegative_int(
-            "PAPER_TRANS_DISK_CRITICAL_WATERMARK",
+        bounded_int(
+            os.environ.get("PAPER_TRANS_DISK_CRITICAL_WATERMARK"),
             DEFAULT_DISK_CRITICAL_WATERMARK,
+            minimum=0,
         ),
     )
     if free_mb < min_free_mb or used_pct >= critical:
