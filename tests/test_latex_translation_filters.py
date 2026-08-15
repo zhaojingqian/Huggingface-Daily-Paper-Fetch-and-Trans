@@ -2647,6 +2647,18 @@ Language: Chinese
         self.assertTrue(filters.is_inline_prompt_source_data_block(source))
         self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
+    def test_contact_label_and_bracketed_heading_are_structural(self):
+        contact = (
+            r"$\emoji{2709}$ \textbf{Contact}: "
+            r"\href{mailto:a@example.com}{a@example.com}"
+        )
+        heading = "[Irreducible Bayes Risk Gap under Serialization]"
+
+        self.assertTrue(filters.is_contact_metadata_fragment(contact))
+        self.assertTrue(filters.is_bracketed_heading_fragment(heading))
+        self.assertFalse(filters.llm_translation_response_untranslated(contact, contact))
+        self.assertFalse(filters.llm_translation_response_untranslated(heading, heading))
+
     def test_standalone_repository_path_is_structural(self):
         path = r"icloud-photos-downloader/icloud\_photos\_downloader"
 

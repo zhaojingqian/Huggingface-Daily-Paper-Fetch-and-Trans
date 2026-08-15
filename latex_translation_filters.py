@@ -1945,7 +1945,8 @@ def is_person_name_catalog(text: str) -> bool:
 
 
 _CONTACT_METADATA_RE = re.compile(
-    r"(?i)\b(?:corresponding|contact)\s+authors?\b|\bauthors?\s*:"
+    r"(?i)\b(?:corresponding|contact)\s+authors?\b|"
+    r"\bcontact\b|\bauthors?\s*[:}]"
 )
 _EMAIL_ADDRESS_RE = re.compile(
     r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"
@@ -1966,6 +1967,37 @@ def is_contact_metadata_fragment(text: str) -> bool:
     probe = _EMAIL_ADDRESS_RE.sub(" ", probe)
     words = re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", probe)
     return len(words) <= 24
+
+
+_BRACKETED_HEADING_CONNECTORS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
+    "on", "or", "the", "to", "under", "via", "with",
+})
+
+
+def is_bracketed_heading_fragment(text: str) -> bool:
+    """Recognize a standalone title in square brackets, not a sentence."""
+    value = extract_translation_fragment(text or "").strip()
+    if (
+        len(value) < 12
+        or len(value) > 240
+        or not re.fullmatch(r"\[[^\[\]\n]+\]", value)
+    ):
+        return False
+    inner = value[1:-1].strip()
+    if re.search(r"[.!?。！？:]", inner):
+        return False
+    tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", inner)
+    if len(tokens) < 3:
+        return False
+    title_like = sum(
+        token[0].isupper()
+        or token.isupper()
+        or token.lower() in _BRACKETED_HEADING_CONNECTORS
+        for token in tokens
+    )
+    capitalized = sum(token[0].isupper() or token.isupper() for token in tokens)
+    return capitalized >= 2 and title_like / len(tokens) >= 0.8
 
 
 def is_affiliation_metadata_fragment(text: str) -> bool:
@@ -2204,6 +2236,7 @@ def is_plain_prose_line_for_rescue(text: str) -> bool:
         is_latex_metadata_line(value)
         or is_affiliation_metadata_fragment(value)
         or is_contact_metadata_fragment(value)
+        or is_bracketed_heading_fragment(value)
     ):
         return False
     if is_formatting_label_fragment(value) or is_unbalanced_latex_fragment(value):
@@ -2423,6 +2456,7 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
         is_structured_identifier_path(raw_source)
         or is_person_name_catalog(raw_source)
         or is_contact_metadata_fragment(raw_source)
+        or is_bracketed_heading_fragment(raw_source)
         or is_affiliation_metadata_fragment(raw_source)
         or is_graphics_path_fragment(raw_source)
         or is_formatting_label_fragment(raw_source)
