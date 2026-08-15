@@ -21,21 +21,6 @@ COMMAND_RE = re.compile(r"^\s*\\([A-Za-z@]+)")
 WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z-]{2,}\b")
 
 
-def mixed_untranslated_english_clauses(line: str):
-    """Return high-confidence English prose clauses embedded in Chinese text.
-
-    This catches the damaging partial-translation shape that a document-level
-    CJK ratio misses (for example, ``中文 ... the agentic baseline on ...``).
-    The predicate intentionally requires a four-word clause, grammar glue,
-    lower-case content, and Chinese on the same line.  It therefore
-    excludes titles/proper names, citations, code, URLs, math, and stand-alone
-    English headings while retaining ordinary sentence fragments.
-    """
-    # Keep the repository audit exactly aligned with the response gate.  The
-    # surrounding document scan additionally supplies environment protection.
-    return filters.mixed_untranslated_english_clauses(line)
-
-
 def strip_tex_comment(line: str) -> str:
     r"""Remove an unescaped TeX comment while preserving literal ``\%``.
 
@@ -236,7 +221,7 @@ def analyze_tex(path) -> Dict[str, object]:
             # paragraph prose.  Their English labels and pseudo-code should
             # not create a mixed-language repair candidate.
             if not filters.is_soft_text_env(active):
-                clauses = mixed_untranslated_english_clauses(code)
+                clauses = filters.mixed_untranslated_english_clauses(code)
                 if clauses:
                     mixed_clause_lines += 1
                     for clause in clauses:
