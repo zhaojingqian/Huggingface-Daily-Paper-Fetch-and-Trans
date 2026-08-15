@@ -321,11 +321,19 @@ def _pdf_candidates(entries):
 def _retry_unique_pdfs(entries):
     from run_papers import retry_failed_pdf_entries
 
-    result = retry_failed_pdf_entries(
-        [entries[arxiv_id] for arxiv_id in sorted(entries)],
-        label="[weekly-repair:all-modes]",
-    )
-    return result
+    previous = os.environ.get("PAPER_TRANS_RETRY_MANUAL_REVIEW")
+    if previous != "0":
+        os.environ["PAPER_TRANS_RETRY_MANUAL_REVIEW"] = "1"
+    try:
+        return retry_failed_pdf_entries(
+            [entries[arxiv_id] for arxiv_id in sorted(entries)],
+            label="[weekly-repair:all-modes]",
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("PAPER_TRANS_RETRY_MANUAL_REVIEW", None)
+        elif previous != "0":
+            os.environ["PAPER_TRANS_RETRY_MANUAL_REVIEW"] = previous
 
 
 def _sync_pdf_statuses(

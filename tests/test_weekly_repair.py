@@ -299,6 +299,22 @@ class WeeklyRepairTest(unittest.TestCase):
 
         self.assertEqual(candidates, {"2607.00001"})
 
+    def test_weekly_pdf_retry_enables_manual_review_only_in_its_scope(self):
+        from paperhub import weekly_repair
+
+        entries = {"2607.00001": {"arxiv_id": "2607.00001"}}
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "run_papers.retry_failed_pdf_entries",
+            return_value={"pdf_succeeded": 0},
+        ) as retry:
+            weekly_repair._retry_unique_pdfs(entries)
+
+        self.assertNotIn("PAPER_TRANS_RETRY_MANUAL_REVIEW", os.environ)
+        retry.assert_called_once_with(
+            [{"arxiv_id": "2607.00001"}],
+            label="[weekly-repair:all-modes]",
+        )
+
     def test_empty_topic_is_valid_but_empty_weekly_is_residual(self):
         from paperhub import weekly_repair
 
