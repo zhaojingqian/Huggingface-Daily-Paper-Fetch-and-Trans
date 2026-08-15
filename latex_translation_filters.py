@@ -3094,6 +3094,91 @@ def _latex_command_defined(text: str, name: str) -> bool:
     return bool(pattern.search(text or ""))
 
 
+_CUSTOM_MACRO_DEF_START_RE = re.compile(
+    r"(?m)^[ \t]*\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand)\*?\s*"
+    r"(?:\{\\(?P<braced>[A-Za-z@]+)\}|\\(?P<bare>[A-Za-z@]+))"
+)
+
+
+def _custom_macro_definition_blocks(text: str):
+    """Yield named, balanced custom-command definitions from one TeX source."""
+    source = text or ""
+    for match in _CUSTOM_MACRO_DEF_START_RE.finditer(source):
+        name = match.group("braced") or match.group("bare")
+        cursor = match.end()
+        while cursor < len(source) and source[cursor].isspace():
+            cursor += 1
+        # Skip an optional argument count/default without interpreting its body.
+        while cursor < len(source) and source[cursor] == "[":
+            close = source.find("]", cursor + 1)
+            if close < 0:
+                break
+            cursor = close + 1
+            while cursor < len(source) and source[cursor].isspace():
+                cursor += 1
+        if cursor >= len(source) or source[cursor] != "{":
+            continue
+        close = _find_matching_brace(source, cursor)
+        if close < 0:
+            continue
+        end = close + 1
+        while end < len(source) and source[end] in " \t":
+            end += 1
+        if source.startswith("\r\n", end):
+            end += 2
+        elif end < len(source) and source[end] == "\n":
+            end += 1
+        yield name, source[match.start():end].rstrip()
+
+
+def restore_missing_custom_macro_definitions(
+    translated: str,
+    original_sources: str,
+) -> Tuple[str, int]:
+    r"""Restore source-defined macros dropped while translating local preambles.
+
+    The translated main TeX can keep ``\input`` files at runtime, while the
+    plugin translates those files independently and occasionally drops a
+    harmless ``\newcommand`` definition.  Reusing only definitions that are
+    present in the original source and actually used by the translated body
+    keeps this repair narrow; ``\providecommand`` also avoids colliding with a
+    package that already supplies the same symbol.
+    """
+    source = translated or ""
+    if not original_sources or "paper-trans restored source macros" in source:
+        return source, 0
+
+    definitions = {}
+    for name, block in _custom_macro_definition_blocks(original_sources):
+        definitions.setdefault(name, block)
+    if not definitions:
+        return source, 0
+
+    missing = []
+    for name, block in definitions.items():
+        if _latex_command_defined(source, name):
+            continue
+        if not re.search(r"\\" + re.escape(name) + r"(?![A-Za-z@])", source):
+            continue
+        fallback = re.sub(
+            r"\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand)\*?",
+            r"\\providecommand",
+            block,
+            count=1,
+        )
+        missing.append(fallback)
+    if not missing:
+        return source, 0
+
+    insertion = "% paper-trans restored source macros\n" + "\n".join(missing)
+    fixed, inserted = insert_latex_preamble_snippet(
+        source,
+        insertion,
+        tuple(definitions),
+    )
+    return (fixed, len(missing)) if inserted else (source, 0)
+
+
 def _latex_package_loaded(text: str, name: str) -> bool:
     pattern = re.compile(
         r"\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\s*\{[^}]*\b"

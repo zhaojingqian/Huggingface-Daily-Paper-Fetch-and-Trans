@@ -2719,6 +2719,29 @@ Language: Chinese
         self.assertFalse(filters.is_tool_call_result_fragment(explanation))
         self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
+    def test_restore_missing_custom_macro_definition_from_source(self):
+        translated = (
+            r"\documentclass{article}" "\n"
+            r"\begin{document}" "\n"
+            r"\ours{} works." "\n"
+            r"\end{document}" "\n"
+        )
+        original = r"\newcommand{\ours}{\textsc{CrEST}\xspace}" "\n"
+
+        fixed, count = filters.restore_missing_custom_macro_definitions(
+            translated,
+            original,
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\ours}{\textsc{CrEST}\xspace}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\ours}"), fixed.index(r"\begin{document}"))
+        again, second_count = filters.restore_missing_custom_macro_definitions(
+            fixed,
+            original,
+        )
+        self.assertEqual((again, second_count), (fixed, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

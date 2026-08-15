@@ -674,6 +674,44 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
     return total
 
 
+def patch_missing_custom_macro_definitions(trans_tex_path, orig_tex_path):
+    """Restore source-defined macros dropped from translated local preambles."""
+    with open(trans_tex_path, encoding="utf-8") as handle:
+        text = handle.read()
+
+    sources = []
+    for path in (orig_tex_path,):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                sources.append(handle.read())
+        except OSError:
+            pass
+
+    workfolder = os.path.dirname(trans_tex_path)
+    for pattern in ("**/*.tex", "**/*.sty", "**/*.cls"):
+        for path in glob.glob(os.path.join(workfolder, pattern), recursive=True):
+            if os.path.abspath(path) == os.path.abspath(trans_tex_path):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    sources.append(handle.read())
+            except OSError:
+                pass
+
+    fixed, total = _ltf.restore_missing_custom_macro_definitions(
+        text,
+        "\n".join(sources),
+    )
+    if total:
+        with open(trans_tex_path, "w", encoding="utf-8") as handle:
+            handle.write(fixed)
+        print(
+            f"[driver] 🔧 patch_missing_custom_macro_definitions: 恢复 {total} 个源文件宏",
+            flush=True,
+        )
+    return total
+
+
 def patch_stray_text_word_commands(trans_tex_path):
     """
     Repair translation artifacts like ``\\textTest:``. These usually come from
@@ -2229,6 +2267,7 @@ def patch_and_recompile(workfolder, arxiv_id_):
     print(f"[driver] 🔧 修补了 {n} 个 verbatim 类环境块", flush=True)
     patch_inline_verb_delimiter_collisions(trans_tex)
     patch_unbalanced_groups_in_tcolorboxes(trans_tex)
+    patch_missing_custom_macro_definitions(trans_tex, orig_tex)
     patch_custom_macro_cjk_glue(trans_tex)
     patch_stray_text_word_commands(trans_tex)
     patch_algorithmic_command_glue(trans_tex)

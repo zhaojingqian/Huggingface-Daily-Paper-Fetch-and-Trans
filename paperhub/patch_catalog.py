@@ -165,6 +165,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "patch_missing_math_aliases",
             "separate_builtin_layout_commands_from_cjk",
             "patch_bbding_symbol_fallbacks",
+            "patch_missing_custom_macro_definitions",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
