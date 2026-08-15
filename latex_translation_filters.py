@@ -2060,6 +2060,7 @@ def is_person_name_catalog(text: str) -> bool:
     # shape check; a four-name block is still metadata, not prose.
     value = MATH_SPAN_RE.sub(" ", value)
     value = re.sub(r"\\(?:and|ampersand)\b", ",", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+\band\b\s+", ", ", value, flags=re.IGNORECASE)
     if re.search(r"[.!?。！？]", value):
         return False
     parts = [

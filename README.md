@@ -11,6 +11,8 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 
 ## 当前能力
 
+<!-- translation chunk policy: v64-name-catalogs -->
+
 | 功能 | 状态 | 说明 |
 |---|---:|---|
 | 每日 Top 3 | 完成 | `run_daily.py` 抓取、摘要翻译、可选全文 PDF |
@@ -27,6 +29,8 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 | 行为合约测试 | 完成 | `tests/test_web_server_contract.py` 锁定核心路由和点击链接 |
 
 ### 翻译运行时边界（2026-08-15）
+
+当前 chunk 策略版本为 `v64-name-catalogs`；后文旧版本号仅保留为变更历史。
 
 Docker 仍是全文翻译的必要运行时边界：宿主机没有 TeX 编译器或
 gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前 slim 镜像约

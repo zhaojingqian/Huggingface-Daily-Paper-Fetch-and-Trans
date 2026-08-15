@@ -1049,6 +1049,16 @@ Language: Chinese
             filters.llm_translation_response_untranslated(source, source)
         )
 
+    def test_person_name_catalog_accepts_natural_conjunction(self):
+        source = (
+            "Junliang Ye, Guocun Wang, Yansong Qu, Yang Li, "
+            "Chunshi Wang, and Kenkun Liu"
+        )
+        self.assertTrue(filters.is_person_name_catalog(source))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, source)
+        )
+
     def test_normalize_restores_missing_or_extra_citations(self):
         source = r"We report results~\cite{alpha2026} in this section."
         restored = filters.normalize_llm_translation_response(
