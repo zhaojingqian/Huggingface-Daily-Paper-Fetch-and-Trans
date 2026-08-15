@@ -37,7 +37,7 @@ gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前
 6.75GB；删除它不会消除依赖，只会把约 3.2GB TeX、818MB 字体和 Python 运行时
 搬回宿主机，因此只做镜像/缓存瘦身，不直接删容器。
 
-翻译链路按职责收敛为三层：`full_translate_driver.py`（813 行）只负责单篇
+翻译链路按职责收敛为三层：`full_translate_driver.py`（812 行）只负责单篇
 生命周期、源码缓存、请求生命周期和结果诊断；`paperhub/translation_runtime.py`
 负责 gpt-academic splitter、响应校验、失败槽重试和归档安全适配；
 `paperhub/latex_pipeline.py` 同时拥有容器内 PDF、翻译质量、编译健康门禁，以及
@@ -369,7 +369,7 @@ paper-trans/
 ├── run_repair.py               # repair/refetch/post/retry-pdf 调度
 ├── translate_arxiv.py          # arXiv 元数据 + 摘要翻译 + paper store JSON
 ├── translate_full.py           # 宿主机侧全文 PDF 翻译封装
-├── full_translate_driver.py    # 容器内单篇生命周期与结果诊断（813 行）
+├── full_translate_driver.py    # 容器内单篇生命周期与结果诊断（812 行）
 ├── latex_translation_filters.py # LaTeX 环境保护、质量过滤和 LLM 残留清理策略
 ├── failure_taxonomy.py         # 翻译/编译失败稳定分类与重试策略
 ├── web_server.py               # 单文件 HTTP Web 服务
