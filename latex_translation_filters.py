@@ -3256,14 +3256,6 @@ def insert_latex_preamble_snippet(
     return text + ("" if text.endswith("\n") else "\n") + insertion + "\n", True
 
 
-def _insert_latex_preamble_snippet(
-    text: str,
-    insertion: str,
-    command_markers: Iterable[str] = (),
-) -> Tuple[str, bool]:
-    return insert_latex_preamble_snippet(text, insertion, command_markers)
-
-
 def _latex_command_defined(text: str, name: str) -> bool:
     pattern = re.compile(
         r"\\(?:providecommand|newcommand|renewcommand)\*?\s*"
@@ -3773,7 +3765,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\inputencodingname}{utf8}",
         ])
         markers = ["inputencodingname"] if r"\inputencodingname" in source else []
-        source, changed = _insert_latex_preamble_snippet(source, insertion, markers)
+        source, changed = insert_latex_preamble_snippet(source, insertion, markers)
         total += int(changed)
 
     if needs_fontspec_noops:
@@ -3791,7 +3783,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             markers = ["documentclass"] if class_needs_early_fontspec else [
                 "setmainfont", "setsansfont", "setmonofont", "newfontfamily"
             ]
-            source, changed = _insert_latex_preamble_snippet(source, insertion, markers)
+            source, changed = insert_latex_preamble_snippet(source, insertion, markers)
             total += int(changed)
 
     if needs_xspace_noop:
@@ -3799,7 +3791,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"% paper-trans fallback for missing xspace package",
             r"\providecommand{\xspace}{}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["xspace"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["xspace"])
         total += int(changed)
 
     if needs_textls_fallback:
@@ -3807,7 +3799,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"% paper-trans fallback for unavailable microtype tracking",
             r"\providecommand{\textls}[2][]{#2}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["textls"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["textls"])
         total += int(changed)
 
     if needs_abscontent_fallback:
@@ -3816,7 +3808,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\theabstract}{}",
             r"\providecommand{\abscontent}{\par\noindent{\bfseries Abstract}\par\theabstract\par}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["abscontent"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["abscontent"])
         total += int(changed)
 
     if needs_href_fallback:
@@ -3824,7 +3816,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"% paper-trans fallback for missing hyperref package",
             r"\providecommand{\href}[2]{#2}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["href"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["href"])
         total += int(changed)
 
     if needs_natbib_cite_fallback:
@@ -3833,7 +3825,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\citep}[2][]{\cite{#2}}",
             r"\providecommand{\citet}[2][]{\cite{#2}}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["citep", "citet"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["citep", "citet"])
         total += int(changed)
 
     if needs_mathbb_fallback:
@@ -3841,7 +3833,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"% paper-trans fallback for missing AMS blackboard bold",
             r"\providecommand{\mathbb}[1]{\mathbf{#1}}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["mathbb"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["mathbb"])
         total += int(changed)
 
     if needs_appendices_fallback:
@@ -3849,7 +3841,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"% paper-trans fallback for missing appendices environment",
             r"\newenvironment{appendices}{\appendix}{}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["appendices"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["appendices"])
         total += int(changed)
 
     if needs_booktabs_fallback:
@@ -3863,7 +3855,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\midrule}{\hline}",
             r"\providecommand{\bottomrule}{\hline}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["toprule", "midrule", "bottomrule"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["toprule", "midrule", "bottomrule"])
         total += int(changed)
 
     if needs_multirow_fallback:
@@ -3871,7 +3863,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"% paper-trans fallback for missing multirow package",
             r"\providecommand{\multirow}[4][]{#4}",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["multirow"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["multirow"])
         total += int(changed)
 
     if needs_bbding_symbol_fallback:
@@ -3880,7 +3872,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\CheckmarkBold}{\ensuremath{\ifcsname checkmark\endcsname\checkmark\else\surd\fi}}",
             r"\providecommand{\XSolidBrush}{\ensuremath{\times}}",
         ])
-        source, changed = _insert_latex_preamble_snippet(
+        source, changed = insert_latex_preamble_snippet(
             source,
             insertion,
             ["CheckmarkBold", "XSolidBrush"],
@@ -3896,7 +3888,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\ifcsname endCJK*\endcsname\else\expandafter\def\csname endCJK*\endcsname{}\fi",
             r"\ifcsname CJKfamily\endcsname\else\def\CJKfamily#1{}\fi",
         ])
-        source, changed = _insert_latex_preamble_snippet(source, insertion, ["CJK"])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["CJK"])
         total += int(changed)
 
     if needs_aaai_affiliations_fallback:
@@ -3906,7 +3898,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\aaai@affiliations}{}",
             r"\makeatother",
         ])
-        source, changed = _insert_latex_preamble_snippet(
+        source, changed = insert_latex_preamble_snippet(
             source,
             insertion,
             ["aaai@affiliations", "affiliations"],
@@ -4291,7 +4283,7 @@ def disable_microtype_package_loads(text: str) -> Tuple[str, int]:
         source, count = pattern.subn(r"\\relax", source)
         total += count
     if r"\textls" in source and not _latex_command_defined(source, "textls"):
-        source, changed = _insert_latex_preamble_snippet(
+        source, changed = insert_latex_preamble_snippet(
             source,
             r"% paper-trans fallback after disabling microtype"
             "\n"
