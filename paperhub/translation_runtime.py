@@ -23,7 +23,7 @@ except ImportError:
         retry_worker_count as _retry_worker_count,
     )
 
-SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v47-inline-code-prose"
+SPLITTER_CACHE_VERSION = "paper-trans-splitter-2026-08-15-v48-inline-code-prose"
 
 
 def _patch_latex_translation_splitter():
@@ -122,7 +122,7 @@ def _patch_latex_translation_splitter():
                 _re.search(r"\\(?:texttt|verb)\b", line)
                 and _text_has_translatable_prose(
                     line,
-                    min_letters=16,
+                    min_letters=10,
                     min_words=3,
                 )
             )
