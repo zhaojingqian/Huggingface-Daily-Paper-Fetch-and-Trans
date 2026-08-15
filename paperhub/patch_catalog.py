@@ -25,14 +25,18 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "patches": (
             "recharge_or_switch_authorized_model",
             "propagate_quota_abort_to_outer_coordinator",
+            "persist_completed_translation_chunks",
+            "retry_only_missing_translation_chunks",
         ),
         "source": (
             "config_private.py / PAPER_TRANS_LLM_MODEL / run_papers.py / "
-            "run_repair.py / topic_engine.py / scripts/send_maintenance_alert.py"
+            "run_repair.py / topic_engine.py / paperhub/translation_runtime.py / "
+            "full_translate_driver.py / scripts/send_maintenance_alert.py"
         ),
         "strategy": "manual_review",
         "note": (
             "余额不足向最外层传播 abort_reason，停止剩余 index/topic/mode；"
+            "已完成 chunk 按模型和 splitter 版本留账，下次只请求缺口；"
             "充值或显式切换到同一凭据可用且质量验证通过的模型。"
         ),
     },
