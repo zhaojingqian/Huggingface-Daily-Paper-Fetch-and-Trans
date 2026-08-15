@@ -354,6 +354,10 @@ def install_gpt_academic_patches() -> bool:
     )
     if actions_spec:
         actions = importlib.import_module("crazy_functions.latex_fns.latex_actions")
+        # latex_actions imports this symbol eagerly, so patching only the
+        # toolbox module leaves the plugin's main path on the unbounded
+        # compiler and can strand xdvipdfmx indefinitely.
+        actions.compile_latex_with_timeout = _patched_compile_with_timeout
         actions.find_main_tex_file = _patched_find_main_tex_file
     print(
         "[driver] ✅ find_main_tex_file 已 patch（注释行不参与 documentclass 检测）",

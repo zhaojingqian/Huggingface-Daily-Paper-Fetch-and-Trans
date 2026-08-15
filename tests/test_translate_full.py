@@ -386,6 +386,7 @@ class TranslateFullCommandTest(unittest.TestCase):
         self.assertIn('"openout_any": "p"', source)
         self.assertIn('"shell_escape": "0"', source)
         self.assertIn("'-no-shell-escape'", source)
+        self.assertIn("actions.compile_latex_with_timeout = _patched_compile_with_timeout", source)
 
     def test_driver_compile_wrapper_rejects_nonzero_tex_exit(self):
         """A TeX failure must not advance the upstream compile-success path."""
