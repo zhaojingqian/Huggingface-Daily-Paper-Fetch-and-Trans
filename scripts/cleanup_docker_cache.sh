@@ -4,16 +4,57 @@
 
 set -u
 
-ROOT="${PAPER_TRANS_ROOT:-/root/workspace/paper-trans}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/load_workspace_env.sh
+source "${SCRIPT_DIR}/load_workspace_env.sh"
+ROOT="${PAPER_TRANS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 LOG="${PAPER_TRANS_CLEANUP_LOG:-${ROOT}/logs/cleanup.log}"
 LOCK_FILE="${PAPER_TRANS_FULL_TRANSLATION_LOCK:-${ROOT}/locks/full-translation.lock}"
 CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"
-RETENTION_DAYS="${PAPER_TRANS_CACHE_RETENTION_DAYS:-30}"
+RETENTION_DAYS="${PAPER_TRANS_CACHE_RETENTION_DAYS:-3}"
+EMERGENCY_RETENTION_DAYS="${PAPER_TRANS_EMERGENCY_RETENTION_DAYS:-1}"
+DISK_HIGH_WATERMARK="${PAPER_TRANS_DISK_HIGH_WATERMARK:-90}"
+DISK_CRITICAL_WATERMARK="${PAPER_TRANS_DISK_CRITICAL_WATERMARK:-95}"
+MIN_FREE_MB="${PAPER_TRANS_MIN_FREE_MB:-2048}"
+EPHEMERAL_GRACE_MINUTES="${PAPER_TRANS_EPHEMERAL_GRACE_MINUTES:-120}"
 DOCKER_TIMEOUT="${PAPER_TRANS_DOCKER_CONTROL_TIMEOUT:-60}"
+PYTHON="$PAPER_TRANS_PYTHON"
+ALERT_SCRIPT="${ROOT}/scripts/send_maintenance_alert.py"
+ALERT_CONFIG="${PAPER_TRANS_ALERT_CONFIG:-/root/scholar-citation-monitor/config.env}"
+RECLAIM_HELPER="${ROOT}/scripts/reclaim_translation_cache.py"
+ALERT_ATTEMPTED=0
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"
 }
+
+alert() {
+    subject="$1"
+    body="$2"
+    ALERT_ATTEMPTED=1
+    if [ ! -f "$ALERT_SCRIPT" ]; then
+        log "[WARN] 告警脚本不存在: ${ALERT_SCRIPT}"
+        return 1
+    fi
+    if "$PYTHON" "$ALERT_SCRIPT" --config "$ALERT_CONFIG" \
+        --subject "$subject" --body "$body" >/dev/null 2>&1; then
+        log "[ALERT] Gmail 告警已发送: ${subject}"
+        return 0
+    fi
+    log "[WARN] Gmail 告警发送失败: ${subject}"
+    return 1
+}
+
+on_exit() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ] && [ "$ALERT_ATTEMPTED" -eq 0 ]; then
+        alert "缓存清理失败" \
+            "缓存清理进程异常退出（exit=${status}）。请检查 ${LOG}。" || true
+    fi
+    exit "$status"
+}
+trap on_exit EXIT
 
 mkdir -p "$(dirname "$LOG")" "$(dirname "$LOCK_FILE")"
 
@@ -23,6 +64,30 @@ case "$RETENTION_DAYS" in
         exit 2
         ;;
 esac
+
+for setting in \
+    "EMERGENCY_RETENTION_DAYS:$EMERGENCY_RETENTION_DAYS" \
+    "DISK_HIGH_WATERMARK:$DISK_HIGH_WATERMARK" \
+    "DISK_CRITICAL_WATERMARK:$DISK_CRITICAL_WATERMARK" \
+    "MIN_FREE_MB:$MIN_FREE_MB" \
+    "EPHEMERAL_GRACE_MINUTES:$EPHEMERAL_GRACE_MINUTES"
+do
+    name="${setting%%:*}"
+    value="${setting#*:}"
+    case "$value" in
+        ''|*[!0-9]*)
+            log "[ERROR] ${name} 必须是非负整数: ${value}"
+            exit 2
+            ;;
+    esac
+done
+if [ "$EMERGENCY_RETENTION_DAYS" -eq 0 ] || \
+   [ "$DISK_HIGH_WATERMARK" -eq 0 ] || [ "$DISK_HIGH_WATERMARK" -gt 100 ] || \
+   [ "$DISK_CRITICAL_WATERMARK" -eq 0 ] || [ "$DISK_CRITICAL_WATERMARK" -gt 100 ] || \
+   [ "$DISK_HIGH_WATERMARK" -ge "$DISK_CRITICAL_WATERMARK" ]; then
+    log "[ERROR] 磁盘水位参数无效: high=${DISK_HIGH_WATERMARK}, critical=${DISK_CRITICAL_WATERMARK}"
+    exit 2
+fi
 
 case "$DOCKER_TIMEOUT" in
     ''|*[!0-9]*|0)
@@ -50,7 +115,23 @@ if ! flock -n 9; then
     exit 0
 fi
 
-log "=== 开始清理过期容器缓存（保留 ${RETENTION_DAYS} 天）==="
+DISK_SNAPSHOT="$(df -Pk "$ROOT" 2>/dev/null | awk 'NR == 2 {gsub(/%/, "", $5); print $4, $5}')"
+FREE_KB="${DISK_SNAPSHOT%% *}"
+DISK_USED="${DISK_SNAPSHOT##* }"
+if ! [[ "$FREE_KB" =~ ^[0-9]+$ && "$DISK_USED" =~ ^[0-9]+$ ]]; then
+    log "[ERROR] 无法读取磁盘水位"
+    alert "缓存清理失败" "无法读取磁盘水位，清理未执行。" || true
+    exit 1
+fi
+FREE_MB=$((FREE_KB / 1024))
+EFFECTIVE_RETENTION_DAYS="$RETENTION_DAYS"
+EMERGENCY_MODE=0
+if [ "$DISK_USED" -ge "$DISK_HIGH_WATERMARK" ] || [ "$FREE_MB" -lt "$MIN_FREE_MB" ]; then
+    EFFECTIVE_RETENTION_DAYS="$EMERGENCY_RETENTION_DAYS"
+    EMERGENCY_MODE=1
+fi
+
+log "=== 开始清理过期容器缓存（常规保留 ${RETENTION_DAYS} 天，本次保留 ${EFFECTIVE_RETENTION_DAYS} 天）==="
 
 RUNNING="$(docker_bounded container inspect -f '{{.State.Running}}' "$CONTAINER" 2>&1)"
 RUNNING_STATUS=$?
@@ -86,11 +167,69 @@ else
 fi
 [ -n "$DISK_BEFORE" ] || DISK_BEFORE="unknown"
 log "[INFO] 清理前：gpt_log=${BEFORE}，磁盘使用=${DISK_BEFORE}"
-
-# 只考虑各缓存根目录的一级条目。目录必须自身已过期，且内部不存在保留期内
-# 更新过的文件，才会被递归删除；缓存根目录本身永远保留。删除命令在容器
-# 内也设超时，避免宿主 docker 客户端超时后容器内 find 继续脱锁运行。
 CLIENT_TIMEOUT=$((10#$DOCKER_TIMEOUT + 6))
+
+# 已经落盘且通过质量门禁的 paper 不再需要 Docker workfolder。以 paper store
+# 和 failure sidecar 为准回收整篇缓存；这比单纯依赖 mtime 更可靠，也不会
+# 删除待修复 paper 的源码现场。全文翻译锁已持有，因此不会与活跃任务竞态。
+RECLAIMABLE_IDS=()
+if [ -f "$RECLAIM_HELPER" ]; then
+    RECLAIM_OUTPUT="$($PYTHON "$RECLAIM_HELPER" --root "$ROOT" --ids 2>&1)"
+    RECLAIM_STATUS=$?
+    if [ "$RECLAIM_STATUS" -ne 0 ]; then
+        log "[WARN] 无法生成已发布 paper 缓存回收清单（status=${RECLAIM_STATUS}）：${RECLAIM_OUTPUT}"
+    elif [ -n "$RECLAIM_OUTPUT" ]; then
+        while IFS= read -r aid; do
+            [ -n "$aid" ] || continue
+            RECLAIMABLE_IDS+=("$aid")
+        done <<< "$RECLAIM_OUTPUT"
+    fi
+else
+    log "[WARN] 缓存回收策略脚本不存在：${RECLAIM_HELPER}"
+fi
+
+RECLAIMED_COUNT=0
+if [ "${#RECLAIMABLE_IDS[@]}" -gt 0 ]; then
+    RECLAIM_OUTPUT="$(
+        timeout --signal=TERM --kill-after=5s "${CLIENT_TIMEOUT}s" \
+        docker exec "$CONTAINER" \
+        timeout --signal=TERM --kill-after=5s "${DOCKER_TIMEOUT}s" \
+        sh -c '
+            set -eu
+            root=/gpt/gpt_log/arxiv_cache
+            for aid in "$@"; do
+                case "$aid" in
+                    [0-9][0-9][0-9][0-9].[0-9][0-9][0-9][0-9]*) ;;
+                    *) continue ;;
+                esac
+                entry="$root/$aid"
+                [ -d "$entry" ] || continue
+                printf "RECLAIM %s\\n" "$entry"
+                find "$entry" -depth -delete
+            done
+        ' sh "${RECLAIMABLE_IDS[@]}" 2>&1
+    )"
+    RECLAIM_STATUS=$?
+    if [ "$RECLAIM_STATUS" -ne 0 ]; then
+        if [ "$RECLAIM_STATUS" -eq 124 ] || [ "$RECLAIM_STATUS" -eq 137 ]; then
+            log "[ERROR] 已发布 paper 缓存回收超时（${DOCKER_TIMEOUT}s）：${RECLAIM_OUTPUT}"
+        else
+            log "[ERROR] 已发布 paper 缓存回收失败（status=${RECLAIM_STATUS}）：${RECLAIM_OUTPUT}"
+        fi
+        exit 1
+    fi
+    if [ -n "$RECLAIM_OUTPUT" ]; then
+        printf '%s\n' "$RECLAIM_OUTPUT" >> "$LOG"
+    fi
+    RECLAIMED_COUNT="$(
+        printf '%s\n' "$RECLAIM_OUTPUT" |
+            awk '/^RECLAIM / {count += 1} END {print count + 0}'
+    )"
+fi
+
+# arxiv_cache 以论文目录为删除单元；default_user/admin 则按文件年龄清理。
+# 后者不能把 shared/downloadzone 当成一个整体，否则任意近期文件都会让数 GB
+# 旧 zip 永久保留。缓存根目录本身永远保留。
 CLEAN_OUTPUT="$(
     timeout --signal=TERM --kill-after=5s "${CLIENT_TIMEOUT}s" \
     docker exec "$CONTAINER" \
@@ -98,22 +237,15 @@ CLEAN_OUTPUT="$(
     sh -c '
         set -eu
         retention_days="$1"
-        for root in \
-            /gpt/gpt_log/arxiv_cache \
-            /gpt/gpt_log/default_user \
-            /gpt/gpt_log/admin
-        do
-            [ -d "$root" ] || continue
-
+        ephemeral_grace_minutes="$2"
+        emergency_mode="$3"
+        root=/gpt/gpt_log/arxiv_cache
+        if [ -d "$root" ]; then
             find "$root" -mindepth 1 -maxdepth 1 \
-                \( -type f -o -type l \) \
-                -mtime "+$retention_days" \
+                \( -type f -o -type l \) -mtime "+$retention_days" \
                 -printf "DELETE %p\n" -delete
-
-            old_dirs="$(
-                find "$root" -mindepth 1 -maxdepth 1 -type d \
-                    -mtime "+$retention_days" -print
-            )"
+            old_dirs="$(find "$root" -mindepth 1 -maxdepth 1 -type d \
+                -mtime "+$retention_days" -print)"
             printf "%s\n" "$old_dirs" |
             while IFS= read -r entry
             do
@@ -129,8 +261,26 @@ CLEAN_OUTPUT="$(
                 printf "DELETE %s\n" "$entry"
                 find "$entry" -depth -delete
             done
+        fi
+
+        for root in /gpt/gpt_log/default_user /gpt/gpt_log/admin
+        do
+            [ -d "$root" ] || continue
+            if [ "$emergency_mode" -eq 1 ]; then
+                # downloadzone/shared are presentation artifacts, not paper
+                # state. Once the shared lock is held, an emergency run may
+                # reclaim files older than the short grace window.
+                find "$root" -mindepth 1 \( -type f -o -type l \) \
+                    -mmin "+$ephemeral_grace_minutes" \
+                    -printf "DELETE_EPHEMERAL %p\n" -delete
+            else
+                find "$root" -mindepth 1 \( -type f -o -type l \) \
+                    -mtime "+$retention_days" -printf "DELETE %p\n" -delete
+            fi
+            find "$root" -mindepth 1 -depth -type d -empty \
+                -printf "DELETE %p\n" -delete
         done
-    ' sh "$RETENTION_DAYS" 2>&1
+    ' sh "$EFFECTIVE_RETENTION_DAYS" "$EPHEMERAL_GRACE_MINUTES" "$EMERGENCY_MODE" 2>&1
 )"
 CLEAN_STATUS=$?
 if [ "$CLEAN_STATUS" -ne 0 ]; then
@@ -147,7 +297,7 @@ if [ -n "$CLEAN_OUTPUT" ]; then
 fi
 DELETED_COUNT="$(
     printf '%s\n' "$CLEAN_OUTPUT" |
-        awk '/^DELETE / {count += 1} END {print count + 0}'
+        awk '/^(DELETE|DELETE_EPHEMERAL) / {count += 1} END {print count + 0}'
 )"
 KEPT_COUNT="$(
     printf '%s\n' "$CLEAN_OUTPUT" |
@@ -173,4 +323,29 @@ else
 fi
 [ -n "$DISK_AFTER" ] || DISK_AFTER="unknown"
 log "[INFO] 清理后：gpt_log=${AFTER}，磁盘使用=${DISK_AFTER}，删除=${DELETED_COUNT}，保留近期=${KEPT_COUNT}"
+TOTAL_DELETED=$((DELETED_COUNT + RECLAIMED_COUNT))
+if [ "$RECLAIMED_COUNT" -gt 0 ]; then
+    log "[INFO] 已发布 paper 缓存回收=${RECLAIMED_COUNT}，本轮总删除=${TOTAL_DELETED}"
+fi
+
+AFTER_SNAPSHOT="$(df -Pk "$ROOT" 2>/dev/null | awk 'NR == 2 {gsub(/%/, "", $5); print $4, $5}')"
+AFTER_FREE_KB="${AFTER_SNAPSHOT%% *}"
+AFTER_USED="${AFTER_SNAPSHOT##* }"
+if [[ "$AFTER_FREE_KB" =~ ^[0-9]+$ && "$AFTER_USED" =~ ^[0-9]+$ ]]; then
+    AFTER_FREE_MB=$((AFTER_FREE_KB / 1024))
+else
+    AFTER_FREE_MB=0
+    AFTER_USED=100
+fi
+
+if [ "$AFTER_USED" -ge "$DISK_CRITICAL_WATERMARK" ] || [ "$AFTER_FREE_MB" -lt "$MIN_FREE_MB" ]; then
+    alert "磁盘空间仍然不足" \
+        "缓存清理后磁盘使用率 ${AFTER_USED}%，可用 ${AFTER_FREE_MB}MB；删除 ${TOTAL_DELETED} 项。需要人工处理。" || true
+    log "[ERROR] 清理后磁盘仍处于危险水位"
+    exit 1
+fi
+if [ "$EMERGENCY_MODE" -eq 1 ]; then
+    alert "磁盘高水位已自动清理" \
+        "清理前磁盘使用率 ${DISK_USED}%、可用 ${FREE_MB}MB；清理后 ${AFTER_USED}%、可用 ${AFTER_FREE_MB}MB；删除 ${TOTAL_DELETED} 项。" || true
+fi
 log "=== 清理完成 ==="

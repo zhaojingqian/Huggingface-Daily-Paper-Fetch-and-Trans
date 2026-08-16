@@ -279,6 +279,22 @@ class RepairRefetchScheduleTest(unittest.TestCase):
         self.assertEqual(stats["residual_ids"], [])
         self.assertEqual(stats["residual_failures"], 0)
 
+    def test_abort_summary_includes_all_failure_artifacts(self):
+        stats = run_repair._new_stats()
+        stats["residual_ids"] = ["2607.00001"]
+        with patch(
+            "paperhub.failure_reports.load_failure_records",
+            return_value=[
+                {"arxiv_id": "2607.00001"},
+                {"arxiv_id": "2607.00002"},
+            ],
+        ):
+            run_repair._include_failure_artifact_residuals(stats)
+        self.assertEqual(
+            stats["residual_ids"], ["2607.00001", "2607.00002"]
+        )
+        self.assertEqual(stats["residual_failures"], 2)
+
     def test_retry_pdf_cli_exits_nonzero_when_residuals_remain(self):
         result = {
             "pdf_attempted": 1,
@@ -297,6 +313,30 @@ class RepairRefetchScheduleTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 run_repair.main()
         self.assertEqual(raised.exception.code, 1)
+
+    def test_retry_pdf_cli_quota_abort_stops_remaining_modes(self):
+        result = {
+            "pdf_attempted": 1,
+            "pdf_succeeded": 0,
+            "pdf_failed": 1,
+            "residual_failures": 1,
+            "residual_ids": ["2607.00001"],
+            "abort_reason": "translate.api_quota",
+        }
+        with patch.object(
+            sys, "argv", ["run_repair.py", "--retry-pdf", "--all"]
+        ), patch("run_repair._log"), patch(
+            "run_repair.retry_pdf_keys", return_value=result
+        ) as retry, patch(
+            "run_repair.retry_topic_pdf_keys",
+            side_effect=AssertionError("topic must not run after quota abort"),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                run_repair.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(retry.call_count, 1)
+        self.assertEqual(retry.call_args.args[0], "daily")
 
     def test_post_exact_missing_key_refetches_without_stale_index_residual(self):
         key = "2026-07-27"

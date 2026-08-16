@@ -20,6 +20,8 @@ MODE="${GPT_ACADEMIC_SLIM_BUILD_MODE:-flatten}"
 TEX_PROFILE="${GPT_ACADEMIC_SLIM_TEX_PROFILE:-full}"
 EXPORT_ARCHIVE="${GPT_ACADEMIC_SLIM_EXPORT_ARCHIVE:-}"
 EXPORT_COMPRESSOR="${GPT_ACADEMIC_SLIM_EXPORT_COMPRESSOR:-pigz}"
+CANARY_BEFORE_EXPORT="${GPT_ACADEMIC_SLIM_CANARY_BEFORE_EXPORT:-0}"
+CONFIG="${GPT_ACADEMIC_CONFIG:-${XDG_DATA_HOME:-/root/.local/share}/paper-trans/runtime/config_private.py}"
 
 cleanup() {
   docker rm -f "$TMP_CONTAINER" >/dev/null 2>&1 || true
@@ -40,8 +42,8 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${SOURCE_CONTAINER}$"; then
   exit 1
 fi
 
-if [ "$TEX_PROFILE" != "full" ] && [ "$TEX_PROFILE" != "slim" ]; then
-  echo "[slim-build] ERROR: GPT_ACADEMIC_SLIM_TEX_PROFILE must be full or slim" >&2
+if [ "$TEX_PROFILE" != "full" ] && [ "$TEX_PROFILE" != "balanced" ] && [ "$TEX_PROFILE" != "slim" ]; then
+  echo "[slim-build] ERROR: GPT_ACADEMIC_SLIM_TEX_PROFILE must be full, balanced, or slim" >&2
   exit 1
 fi
 
@@ -146,7 +148,7 @@ if [ "$TEX_PROFILE" = "slim" ]; then
     texlive-publishers-doc texlive-science-doc \
     >/dev/null 2>&1 || true
 else
-  echo "[slim-build] keeping full TeX/font runtime from source image"
+  echo "[slim-build] keeping TeX package runtime from source image"
 fi
 apt-get clean
 rm -rf \
@@ -158,9 +160,14 @@ rm -rf \
   /usr/share/texlive/texmf-dist/doc \
   /usr/share/texlive/texmf-dist/source \
   /usr/share/texmf/doc
+if [ "$TEX_PROFILE" = "balanced" ] || [ "$TEX_PROFILE" = "slim" ]; then
+  # The production corpus uses TeX Gyre, Latin Modern, Fandol, and Noto.
+  # This copied Windows/macOS/Korean/Japanese font dump is not referenced by
+  # any retained translated TeX and duplicates the fontconfig fallback layer.
+  rm -rf /usr/share/fonts/custom
+fi
 if [ "$TEX_PROFILE" = "slim" ]; then
   rm -rf \
-    /usr/share/fonts/custom \
     /usr/share/texlive/texmf-dist/tex4ht
 fi
 find / -xdev -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
@@ -169,9 +176,23 @@ find / -xdev -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null ||
 
 echo "[slim-build] applying paper-trans LaTeX patches to temporary container"
 GPT_ACADEMIC_CONTAINER="$TMP_CONTAINER" bash "${ROOT_DIR}/scripts/setup_docker_env.sh"
+docker exec -u root "$TMP_CONTAINER" touch /opt/paper-trans-runtime-ready
 
 echo "[slim-build] estimated flattened rootfs size:"
 docker exec -u root "$TMP_CONTAINER" du -xsh /
+
+if [ "$CANARY_BEFORE_EXPORT" = "1" ]; then
+  echo "[slim-build] validating candidate rootfs before export"
+  test -f "$CONFIG"
+  docker cp "$CONFIG" "${TMP_CONTAINER}:/gpt/config_private.py"
+  docker exec -u root "$TMP_CONTAINER" \
+    chown gptuser:gptuser /gpt/config_private.py
+  GPT_ACADEMIC_SLIM_CONTAINER="$TMP_CONTAINER" \
+    GPT_ACADEMIC_SLIM_CANARY_OUT=/tmp/paper-trans-latex-candidate-canary \
+    "${ROOT_DIR}/scripts/canary_latex_slim.sh"
+  docker exec -u root "$TMP_CONTAINER" bash -lc \
+    'rm -f /gpt/config_private.py && rm -rf /gpt/gpt_log && mkdir -p /gpt/gpt_log/arxiv_cache && chown -R gptuser:gptuser /gpt/gpt_log'
+fi
 
 if [ "${GPT_ACADEMIC_SLIM_DRY_RUN:-0}" = "1" ]; then
   echo "[slim-build] dry run requested; skipping docker import"

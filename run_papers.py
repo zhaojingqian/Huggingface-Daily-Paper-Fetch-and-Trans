@@ -25,14 +25,34 @@ from paperhub.paths import (
     PAPER_STORE_DIR,
     LOGS_DIR,
     LOCK_DIR,
+    TEX_BACKUP_DIR,
     TEX_FAILED_BACKUP_DIR,
     mode_dir,
     mode_index_path,
     mode_key_dir,
     mode_papers_dir,
 )
+from paperhub.residual_translation import terminal_repair_eligible
+from paperhub.translation_quality import analyze_tex
 
 sys.path.insert(0, BASE_DIR)
+
+
+def _send_pdf_retry_alert(subject, body):
+    """Best-effort Gmail alert; repair results remain authoritative."""
+    script = os.path.join(BASE_DIR, "scripts", "send_maintenance_alert.py")
+    if not os.path.isfile(script):
+        return False
+    try:
+        result = subprocess.run(
+            [sys.executable, script, "--subject", subject, "--body", body],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=75,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 # ── Paper Store (统一存 JSON + PDF) ─────────────────────────────────────────
@@ -58,6 +78,25 @@ def _pdf_store_hit(arxiv_id, include_tainted=False):
     if not include_tainted and _pdf_quality_tainted(arxiv_id):
         return None
     return paper_store.pdf_hit(arxiv_id)
+
+
+def _terminal_quality_cache(arxiv_id):
+    """Return a cached TeX path when only a few quality-gate lines remain."""
+    filename = f"{arxiv_id}_merge_translate_zh.tex"
+    candidates = [
+        os.path.join(TEX_FAILED_BACKUP_DIR, filename),
+        os.path.join(TEX_BACKUP_DIR, filename),
+    ]
+    existing = [path for path in candidates if os.path.isfile(path)]
+    if not existing:
+        return None
+    path = max(existing, key=lambda item: os.stat(item).st_mtime_ns)
+    try:
+        report = analyze_tex(path)
+    except (OSError, UnicodeError):
+        return None
+    report["ok"] = False
+    return path if terminal_repair_eligible(report) else None
 
 
 def _paper_store_update_pdf_status(arxiv_id, status):
@@ -619,6 +658,7 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
             _paper_store_update_pdf_status(aid, "failed")
             changed = True
 
+    abort_reason = ""
     failed = [p for p in papers if p.get("pdf_status") == "failed"]
     for slim in failed:
         aid = slim.get("arxiv_id", "")
@@ -679,7 +719,18 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
             host_tex_failed = os.path.join(TEX_FAILED_BACKUP_DIR, f"{aid}_merge_translate_zh.tex")
             has_host = os.path.exists(host_tex_failed) and os.path.getsize(host_tex_failed) > 0
 
-        if retry_strategy == "retry_translation":
+        terminal_quality_cache = (
+            _terminal_quality_cache(aid)
+            if diagnosis.get("category") == "quality.untranslated_prose"
+            else None
+        )
+        if terminal_quality_cache:
+            has_cache = _restore_tex_to_container(aid)
+            print(
+                f"{label} 🩹 {aid} — 仅少量英文残留，复用 TeX 做定向行修复",
+                flush=True,
+            )
+        elif retry_strategy == "retry_translation":
             has_cache = False
             print(f"{label} 🔄 {aid} — 诊断要求重新翻译，跳过失败 TeX 缓存", flush=True)
         elif has_container:
@@ -731,6 +782,23 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
                 error = r.get("error", "") or "返回 PDF 路径但 paper store 校验失败"
                 print(f"{label} ❌ {aid} — 仍失败: {error}", flush=True)
                 total_fail += 1
+                latest = read_json(
+                    os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"),
+                    {},
+                )
+                if latest.get("category") == "translate.api_quota":
+                    abort_reason = "translate.api_quota"
+                    print(
+                        f"{label} 🛑 翻译 API 余额不足，停止本批剩余全文翻译，"
+                        "避免逐篇重复失败",
+                        flush=True,
+                    )
+                    _send_pdf_retry_alert(
+                        "全文翻译 API 余额不足",
+                        f"论文 {aid} 返回 translate.api_quota，当前 retry 批次已熔断。\n"
+                        f"错误: {error[:500]}",
+                    )
+                    break
         except Exception as e:
             slim["pdf_status"] = "failed"
             _paper_store_update_pdf_status(aid, "failed")
@@ -742,7 +810,7 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
         for p in papers
         if p.get("arxiv_id") and p.get("pdf_status") == "failed"
     })
-    return {
+    result = {
         "ok": total_ok,
         "failed": total_fail,
         "changed": changed,
@@ -752,6 +820,9 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
         "residual_failures": len(residual_ids),
         "residual_ids": residual_ids,
     }
+    if abort_reason:
+        result["abort_reason"] = abort_reason
+    return result
 
 
 def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=None):
@@ -768,6 +839,7 @@ def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=
     candidate_ids = set()
     references = {}
     structural_residuals = set()
+    abort_reason = ""
 
     for m in modes:
         mode_path = mode_dir(m)
@@ -883,6 +955,11 @@ def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=
                 aid = slim.get("arxiv_id", "")
                 if aid:
                     references.setdefault(aid, []).append(slim)
+            if result.get("abort_reason"):
+                abort_reason = result["abort_reason"]
+                break
+        if abort_reason:
+            break
 
     stats = _new_stats()
     stats["audited_ids"] = sorted(candidate_ids)
@@ -900,6 +977,8 @@ def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=
             stats["pdf_failed"] += 1
             residual_ids.add(aid)
     result_stats = _finalize_stats(stats, residual_ids)
+    if abort_reason:
+        result_stats["abort_reason"] = abort_reason
     print(f"[retry-pdf] 完成: {_stats_line(result_stats)}", flush=True)
     if result_stats["residual_ids"]:
         print(f"[retry-pdf] 残留: {', '.join(result_stats['residual_ids'])}", flush=True)

@@ -59,6 +59,7 @@ def _new_stats():
     stats["residual_failures"] = 0
     stats["residual_ids"] = []
     stats["audited_ids"] = []
+    stats["abort_reason"] = ""
     return stats
 
 
@@ -76,6 +77,8 @@ def _merge_stats(target, source):
     target["audited_ids"] = sorted(audited_ids)
     target["residual_ids"] = sorted(residual_ids)
     target["residual_failures"] = len(residual_ids)
+    if source.get("abort_reason"):
+        target["abort_reason"] = source["abort_reason"]
     return target
 
 
@@ -87,6 +90,22 @@ def _finish_stats(stats, residual_ids=()):
     result["residual_failures"] = len(ids)
     result["audited_ids"] = sorted(set(result.get("audited_ids", [])))
     return result
+
+
+def _include_failure_artifact_residuals(stats):
+    """Keep quota-aborted summaries honest without attempting more PDFs."""
+    from paperhub.failure_reports import load_failure_records
+
+    records = load_failure_records(os.path.join(LOGS_DIR, "pdf_errors"))
+    residual_ids = set(stats.get("residual_ids", []))
+    residual_ids.update(
+        str(record.get("arxiv_id") or "")
+        for record in records
+        if record.get("arxiv_id")
+    )
+    stats["residual_ids"] = sorted(residual_ids)
+    stats["residual_failures"] = len(residual_ids)
+    return stats
 
 
 def _stats_line(stats):
@@ -770,6 +789,13 @@ def main():
                     processed_ids=processed_pdf_ids,
                 )
             _merge_stats(stats, result)
+            if stats.get("abort_reason"):
+                _include_failure_artifact_residuals(stats)
+                _log(
+                    "retry-pdf 全局熔断 — "
+                    f"{stats['abort_reason']}，停止剩余 mode"
+                )
+                break
         _log(f"retry-pdf 完成 — {_stats_line(stats)}")
         if stats["residual_ids"]:
             _log(f"retry-pdf 残留 — {', '.join(stats['residual_ids'])}")

@@ -8,9 +8,12 @@
 set -u
 set -o pipefail
 
-PTDIR="${PAPER_TRANS_ROOT:-/root/workspace/paper-trans}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/load_workspace_env.sh
+source "${SCRIPT_DIR}/load_workspace_env.sh"
+PTDIR="${PAPER_TRANS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 LOG="${PAPER_TRANS_WEEKLY_CLEANUP_LOG:-${PTDIR}/logs/cleanup.log}"
-PYTHON="${PAPER_TRANS_PYTHON:-/root/.pyenv/versions/3.10.13/bin/python3}"
+PYTHON="$PAPER_TRANS_PYTHON"
 DROP_CACHES_FILE="${PAPER_TRANS_DROP_CACHES_FILE:-/proc/sys/vm/drop_caches}"
 ERRORS=0
 

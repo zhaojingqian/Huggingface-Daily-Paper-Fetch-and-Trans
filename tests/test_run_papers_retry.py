@@ -10,6 +10,50 @@ import run_papers
 
 
 class RunPapersRetryTest(unittest.TestCase):
+    def test_live_quota_failure_stops_remaining_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            translate_full = Mock(
+                return_value={"pdf_path": None, "error": "quota exhausted"}
+            )
+            fake_translate_mod = types.SimpleNamespace(
+                CONTAINER_NAME="latex",
+                TEX_BACKUP_DIR=tmp,
+                TEX_FAILED_BACKUP_DIR=tmp,
+                _restore_tex_to_container=Mock(return_value=False),
+                translate_full=translate_full,
+            )
+            docker_test = Mock()
+            docker_test.return_value.returncode = 1
+            papers = [
+                {"arxiv_id": "2608.90001", "pdf_status": "failed"},
+                {"arxiv_id": "2608.90002", "pdf_status": "failed"},
+            ]
+
+            def read_diagnosis(path, default):
+                if "2608.90001" in path and translate_full.called:
+                    return {"category": "translate.api_quota"}
+                return default
+
+            with patch.dict(sys.modules, {"translate_full": fake_translate_mod}), \
+                 patch("run_papers._pdf_store_hit", return_value=None), \
+                 patch("run_papers._paper_store_update_pdf_status"), \
+                 patch("run_papers._send_pdf_retry_alert") as alert, \
+                 patch("run_papers.subprocess.run", docker_test), \
+                 patch(
+                     "run_papers.read_json",
+                     side_effect=read_diagnosis,
+                 ):
+                result = run_papers.retry_failed_pdf_entries(
+                    papers,
+                    label="[test]",
+                )
+
+        self.assertEqual(result["pdf_attempted"], 1)
+        self.assertEqual(result["pdf_failed"], 1)
+        self.assertEqual(result["abort_reason"], "translate.api_quota")
+        translate_full.assert_called_once()
+        alert.assert_called_once()
+
     def test_run_lock_is_shared_persistent_and_reacquirable(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             run_papers, "LOCK_DIR", tmp

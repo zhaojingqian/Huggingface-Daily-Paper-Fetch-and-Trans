@@ -3,7 +3,8 @@
 
 set -u
 
-ROOT="${PAPER_TRANS_ROOT:-/root/workspace/paper-trans}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${PAPER_TRANS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 LOG="${PAPER_TRANS_RESTART_LOG:-${ROOT}/logs/container-restart.log}"
 LOCK_FILE="${PAPER_TRANS_FULL_TRANSLATION_LOCK:-${ROOT}/locks/full-translation.lock}"
 CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"

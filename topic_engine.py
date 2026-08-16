@@ -735,5 +735,11 @@ def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False, processed_i
                     flush=True,
                 )
                 total_fail += 1
+        if result.get("abort_reason"):
+            print(
+                "[retry-topic-pdf] 🛑 全局重试条件未满足，停止剩余 topic",
+                flush=True,
+            )
+            break
     print(f"[retry-topic-pdf] 完成: 成功={total_ok} 仍失败={total_fail}", flush=True)
     return total_ok

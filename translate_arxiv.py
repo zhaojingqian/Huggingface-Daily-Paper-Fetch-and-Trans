@@ -784,7 +784,7 @@ def translate_and_save(arxiv_id, output_dir, rank=1, week_str="", config=None,
 def main():
     parser = argparse.ArgumentParser(description="翻译 arXiv 论文")
     parser.add_argument("arxiv_id", help="arXiv 论文 ID (如: 2602.05400)")
-    parser.add_argument("-o", "--output", default="/root/workspace/paper-trans/weekly",
+    parser.add_argument("-o", "--output", default=os.path.join(ROOT_DIR, "weekly"),
                         help="输出目录")
     parser.add_argument("--rank", type=int, default=1, help="论文排名")
     parser.add_argument("--week", default="", help="周数 (如: 2026-W08)")

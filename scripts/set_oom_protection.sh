@@ -2,7 +2,9 @@
 # 系统启动后设置关键进程 OOM 保护分值，防止 OOM killer 误杀服务进程
 # 由 systemd (oom-protection.service) 在 multi-user.target 后执行
 
-LOG=/root/workspace/paper-trans/logs/oom-protection.log
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${PAPER_TRANS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+LOG="${ROOT}/logs/oom-protection.log"
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') OOM 保护设置 ===" >> "$LOG"
 
 set_oom() {

@@ -208,6 +208,34 @@ class TopicEngineTest(unittest.TestCase):
             finally:
                 self.restore_topic_dir()
 
+    def test_retry_topic_pdf_quota_abort_stops_remaining_indexes(self):
+        with self.with_temp_topics() as tmp:
+            self.set_temp_topic_dir(tmp)
+            try:
+                topic_store.upsert_topic({"slug": "opd", "query": "opd"})
+                for key in ("2026-07-05", "2026-07-06"):
+                    topic_store.save_index(
+                        "opd",
+                        key,
+                        [{"arxiv_id": key[-2:], "pdf_status": "failed"}],
+                    )
+                result = {
+                    "ok": 0,
+                    "failed": 1,
+                    "changed": False,
+                    "abort_reason": "translate.api_quota",
+                }
+                with patch(
+                    "run_papers.retry_failed_pdf_entries",
+                    return_value=result,
+                ) as retry:
+                    self.assertEqual(
+                        retry_topic_pdf(topic="opd", scan_all=True), 0
+                    )
+                self.assertEqual(retry.call_count, 1)
+            finally:
+                self.restore_topic_dir()
+
     def test_repair_topic_retries_missing_summary_translation(self):
         with self.with_temp_topics() as tmp:
             self.set_temp_topic_dir(tmp)

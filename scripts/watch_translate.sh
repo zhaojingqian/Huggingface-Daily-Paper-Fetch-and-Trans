@@ -5,6 +5,8 @@
 
 CONTAINER="${GPT_ACADEMIC_CONTAINER:-gpt-academic-latex-slim}"
 AID="${1:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${PAPER_TRANS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
 # 自动检测
 if [ -z "$AID" ]; then
@@ -92,7 +94,7 @@ while true; do
   else
     echo "🖥  宿主机进程: 已结束"
     # 检查宿主机是否已复制 PDF
-    HOST_PDF=$(find /root/workspace/paper-trans/data -name "${AID}_zh.pdf" 2>/dev/null | head -1)
+    HOST_PDF=$(find "${ROOT}/data" -name "${AID}_zh.pdf" 2>/dev/null | head -1)
     [ -n "$HOST_PDF" ] && echo "   📄 本地 PDF: $HOST_PDF ($(du -sh $HOST_PDF | cut -f1))"
   fi
 

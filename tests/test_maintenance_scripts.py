@@ -5,6 +5,9 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
+
+from scripts import repair_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,9 +15,31 @@ CLEANUP_SCRIPT = ROOT / "scripts" / "cleanup_docker_cache.sh"
 RESTART_SCRIPT = ROOT / "scripts" / "restart_translation_container.sh"
 WEEKLY_CLEANUP_SCRIPT = ROOT / "scripts" / "weekly_cleanup.sh"
 ORPHAN_CLEANUP_SCRIPT = ROOT / "scripts" / "cleanup_orphan_artifacts.py"
+ALERT_SCRIPT = ROOT / "scripts" / "send_maintenance_alert.py"
+RUN_SLIM_SCRIPT = ROOT / "scripts" / "run_latex_slim.sh"
+BUILD_SLIM_SCRIPT = ROOT / "scripts" / "build_latex_slim.sh"
+SETUP_SCRIPT = ROOT / "scripts" / "setup_docker_env.sh"
 
 
 class MaintenanceScriptsTest(unittest.TestCase):
+    def test_repair_snapshot_compacts_duplicate_translation_processes(self):
+        process_table = """\
+  10 python run_daily.py
+  20 docker exec python /tmp/full_translate_driver.py 2608.09888 lots of source
+  21 python /tmp/full_translate_driver.py 2608.09888
+"""
+        with mock.patch.object(
+            repair_snapshot,
+            "_command",
+            return_value=process_table,
+        ):
+            active = repair_snapshot._active_jobs()
+
+        self.assertEqual(active, [
+            {"pid": 10, "type": "daily", "paper_id": None},
+            {"pid": 20, "type": "translate", "paper_id": "2608.09888"},
+        ])
+
     def _sandbox(self):
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name)
@@ -56,13 +81,23 @@ class MaintenanceScriptsTest(unittest.TestCase):
             encoding="utf-8",
         )
         fake_docker.chmod(0o755)
+        fake_df = fake_bin / "df"
+        fake_df.write_text(
+            "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+            "printf '/dev/test 41943040 33554432 8388608 80%% /\\n'\n",
+            encoding="utf-8",
+        )
+        fake_df.chmod(0o755)
         env = os.environ.copy()
         env.update(
             {
                 "PAPER_TRANS_ROOT": str(root),
+                "PAPER_TRANS_PYTHON": os.sys.executable,
+                "WORKSPACE_ROOT": str(root),
                 "PAPER_TRANS_CACHE_RETENTION_DAYS": "17",
                 "GPT_ACADEMIC_CONTAINER": "test-translation-container",
                 "FAKE_DOCKER_LOG": str(docker_log),
+                "PAPER_TRANS_ALERT_CONFIG": str(root / "missing-alert.env"),
                 "PATH": f"{fake_bin}:/usr/bin:/bin",
             }
         )
@@ -79,7 +114,13 @@ class MaintenanceScriptsTest(unittest.TestCase):
         )
 
     def test_scripts_have_valid_bash_syntax(self):
-        for script in (CLEANUP_SCRIPT, RESTART_SCRIPT, WEEKLY_CLEANUP_SCRIPT):
+        for script in (
+            CLEANUP_SCRIPT,
+            RESTART_SCRIPT,
+            WEEKLY_CLEANUP_SCRIPT,
+            RUN_SLIM_SCRIPT,
+            BUILD_SLIM_SCRIPT,
+        ):
             with self.subTest(script=script.name):
                 result = subprocess.run(
                     ["bash", "-n", str(script)],
@@ -126,6 +167,21 @@ class MaintenanceScriptsTest(unittest.TestCase):
             self.assertIn("删除=1", log_text)
             self.assertIn("保留近期=1", log_text)
             self.assertIn("清理完成", log_text)
+
+    def test_cleanup_has_watermarks_and_file_level_user_cache_cleanup(self):
+        content = CLEANUP_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("PAPER_TRANS_DISK_HIGH_WATERMARK:-90", content)
+        self.assertIn("PAPER_TRANS_DISK_CRITICAL_WATERMARK:-95", content)
+        self.assertIn("PAPER_TRANS_EMERGENCY_RETENTION_DAYS:-1", content)
+        self.assertIn("/gpt/gpt_log/default_user /gpt/gpt_log/admin", content)
+        self.assertIn("-type d -empty", content)
+        self.assertIn("send_maintenance_alert.py", content)
+
+    def test_alert_helper_does_not_embed_smtp_credentials(self):
+        content = ALERT_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("SMTP_PASSWORD", content)
+        self.assertIn("/root/scholar-citation-monitor/config.env", content)
+        self.assertNotIn("@gmail.com", content)
 
     def test_maintenance_docker_calls_time_out_with_failure(self):
         for script, log_name, expected in (
@@ -204,19 +260,47 @@ class MaintenanceScriptsTest(unittest.TestCase):
         self.assertIn("_scan_references(paths[\"data\"])", helper)
         self.assertIn("crontab: 0 8 * * 0", content)
 
-    def test_weekly_cleanup_uses_fixed_python_single_log_and_nonzero_failures(self):
+    def test_weekly_cleanup_uses_workspace_python_single_log_and_nonzero_failures(self):
         content = WEEKLY_CLEANUP_SCRIPT.read_text(encoding="utf-8")
 
-        self.assertIn(
-            "/root/.pyenv/versions/3.10.13/bin/python3",
-            content,
-        )
+        self.assertIn('source "${SCRIPT_DIR}/load_workspace_env.sh"', content)
+        self.assertIn('PYTHON="$PAPER_TRANS_PYTHON"', content)
+        self.assertNotIn("/root/.pyenv", content)
         self.assertIn('"$PYTHON" -m pip cache purge', content)
         self.assertNotIn("tee -a", content)
         self.assertIn('ERRORS=$((ERRORS + 1))', content)
         self.assertIn('if [ "$ERRORS" -gt 0 ]', content)
         self.assertIn("exit 1", content)
         self.assertIn("set -o pipefail", content)
+
+    def test_docker_runtime_cache_is_external_and_image_setup_is_idempotent(self):
+        run_script = RUN_SLIM_SCRIPT.read_text(encoding="utf-8")
+        build_script = BUILD_SLIM_SCRIPT.read_text(encoding="utf-8")
+        setup_script = SETUP_SCRIPT.read_text(encoding="utf-8")
+        canary_script = (ROOT / "scripts" / "canary_latex_slim.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("XDG_DATA_HOME:-/root/.local/share", run_script)
+        self.assertIn(':/gpt/gpt_log"', run_script)
+        self.assertIn("paper-trans-runtime-ready", run_script)
+        self.assertIn("GPT_ACADEMIC_RECREATE", run_script)
+        self.assertIn('TEX_PROFILE" != "balanced"', build_script)
+        self.assertIn("rm -rf /usr/share/fonts/custom", build_script)
+        self.assertIn("paper-trans-runtime-ready", build_script)
+        self.assertIn("GPT_ACADEMIC_SLIM_CANARY_BEFORE_EXPORT", build_script)
+        self.assertLess(
+            build_script.index("validating candidate rootfs before export"),
+            build_script.index("exporting flattened rootfs archive"),
+        )
+        self.assertIn("MISSING_PACKAGES", setup_script)
+        self.assertIn("PAPER_TRANS_APT_TIMEOUT_SECONDS", setup_script)
+        self.assertNotIn(
+            'docker exec -u root "$CONTAINER" apt-get update -qq',
+            setup_script,
+        )
+        self.assertIn("PAPER_TRANS_CANARY_SOURCE_CACHE", canary_script)
+        self.assertIn("reused source cache", canary_script)
 
 
 if __name__ == "__main__":
