@@ -29,6 +29,74 @@ except ImportError:
     )
 
 
+def split_tex_comment(line: str) -> Tuple[str, str]:
+    r"""Split one TeX line at its first unescaped percent sign.
+
+    TeX treats ``%`` as a comment marker only when preceded by an even number
+    of consecutive backslashes.  The splitter and quality scanner must share
+    this rule or they will disagree about which English text is real prose.
+    """
+    value = str(line or "")
+    for index, char in enumerate(value):
+        if char != "%":
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and value[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return value[:index], value[index:]
+    return value, ""
+
+
+def strip_tex_comment(line: str) -> str:
+    """Remove the unescaped TeX comment suffix from one line."""
+    return split_tex_comment(line)[0]
+
+
+def latex_prose_text(line: str) -> str:
+    """Return natural-language text after removing protected LaTeX payloads."""
+    value = strip_tex_comment(line)
+    if (
+        is_bracketed_key_value_option_list(value)
+        or is_latex_configuration_command_fragment(value)
+    ):
+        return ""
+    value = re.sub(r"\$[^$]*\$", " ", value)
+    # Most prose lines do not contain a protected payload, so avoid the more
+    # expensive balanced-brace scanner unless a relevant token is present.
+    if (
+        "http://" in value
+        or "https://" in value
+        or r"\url" in value
+        or r"\nolinkurl" in value
+        or r"\path" in value
+        or ("\\" in value and "tt" in value)
+    ):
+        value = strip_inline_code_commands(value)
+    value = re.sub(
+        r"\\(?:begin|end)\{[^{}]+\}(?:\[[^\]]*\])?",
+        " ",
+        value,
+    )
+    value = re.sub(
+        r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?"
+        r"\{[^{}]*\}\{([^{}]*)\}",
+        r" \1 ",
+        value,
+    )
+    for _ in range(3):
+        value = re.sub(
+            r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
+            r"scriptsize|normalsize|large|Large|captionof)\*?"
+            r"(?:\[[^\]]*\])?(?:\{[^{}]*\})?\{([^{}]*)\}",
+            r" \1 ",
+            value,
+        )
+    return latex_prose_probe(value)
+
+
 def rank_main_tex_candidate(path: str, content: str, candidates: Iterable[str]) -> int:
     """Rank a TeX file as an entrypoint without guessing from prose volume.
 

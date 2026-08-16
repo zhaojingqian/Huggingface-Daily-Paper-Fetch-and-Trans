@@ -48,21 +48,9 @@ def _has_chinese(text):
 
 
 # ── Paper Store 读写 ──────────────────────────────────────────────────────────
-def paper_store_path(arxiv_id):
-    return paper_store.json_path(arxiv_id)
-
-
 def paper_store_read(arxiv_id):
     """读取 paper store；若不存在或 title_zh 为空则返回 None"""
     return paper_store.read_translated(arxiv_id)
-
-
-def paper_store_write_raw(payload):
-    """直接写入已构建好的 payload dict"""
-    try:
-        paper_store.write_raw(payload)
-    except Exception as e:
-        print(f"  ⚠️ paper store 写入失败: {e}", flush=True)
 
 
 def paper_store_write(arxiv_id, meta, translation):

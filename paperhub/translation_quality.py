@@ -19,73 +19,13 @@ WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z-]{2,}\b")
 
 
 def strip_tex_comment(line: str) -> str:
-    r"""Remove an unescaped TeX comment while preserving literal ``\%``.
-
-    Counting source comments as paper prose makes both the repository audit and
-    the production publication gate reject otherwise translated documents.
-    TeX treats ``%`` as escaped only when it is preceded by an odd number of
-    consecutive backslashes.
-    """
-    value = str(line or "")
-    for index, char in enumerate(value):
-        if char != "%":
-            continue
-        backslashes = 0
-        cursor = index - 1
-        while cursor >= 0 and value[cursor] == "\\":
-            backslashes += 1
-            cursor -= 1
-        if backslashes % 2 == 0:
-            return value[:index]
-    return value
+    """Keep the historical quality-module API over the shared filter."""
+    return filters.strip_tex_comment(line)
 
 
 def rough_text(line: str) -> str:
-    """Return natural-language text after removing protected LaTeX payloads."""
-    value = strip_tex_comment(line)
-    if (
-        filters.is_bracketed_key_value_option_list(value)
-        or filters.is_latex_configuration_command_fragment(value)
-    ):
-        return ""
-    value = re.sub(r"\$[^$]*\$", " ", value)
-    # The full balanced-brace scanner is deliberately robust but comparatively
-    # expensive.  Most prose lines cannot contain any token it handles, so use
-    # a cheap exact prefilter before invoking it during a repository-wide scan.
-    if (
-        "http://" in value
-        or "https://" in value
-        or r"\url" in value
-        or r"\nolinkurl" in value
-        or r"\path" in value
-        or ("\\" in value and "tt" in value)
-    ):
-        value = filters.strip_inline_code_commands(value)
-    value = re.sub(
-        r"\\(?:begin|end)\{[^{}]+\}(?:\[[^\]]*\])?",
-        " ",
-        value,
-    )
-    value = re.sub(
-        r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?"
-        r"\{[^{}]*\}\{([^{}]*)\}",
-        r" \1 ",
-        value,
-    )
-    for _ in range(3):
-        value = re.sub(
-            r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
-            r"scriptsize|normalsize|large|Large)\*?"
-            r"(?:\[[^\]]*\])?\{([^{}]*)\}",
-            r" \1 ",
-            value,
-        )
-    value = re.sub(
-        r"\\captionof\*?(?:\[[^\]]*\])?\{[^{}]*\}\{([^{}]*)\}",
-        r" \1 ",
-        value,
-    )
-    return filters.latex_prose_probe(value)
+    """Keep the historical quality-module API over the shared filter."""
+    return filters.latex_prose_text(line)
 
 
 def analyze_tex(path) -> Dict[str, object]:

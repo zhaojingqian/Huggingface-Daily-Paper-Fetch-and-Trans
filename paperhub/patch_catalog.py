@@ -386,5 +386,13 @@ def patches_for_records(records: Iterable[Dict[str, object]]) -> List[Dict[str, 
         if not spec:
             continue
         seen.add(category)
-        result.append({"category": category, **spec})
+        item = {"category": category, **spec}
+        # The persisted diagnosis owns the actual retry strategy.  Keep the
+        # catalog value only as a fallback for legacy records that predate the
+        # structured field; otherwise a stale catalog entry must not contradict
+        # the classification used by the repair runner.
+        retry_strategy = str(record.get("retry_strategy") or "").strip()
+        if retry_strategy:
+            item["strategy"] = retry_strategy
+        result.append(item)
     return result

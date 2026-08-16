@@ -15,7 +15,7 @@ import requests
 from paperhub import paper_store, topic_store
 from paperhub.env_config import get_env, http_proxies
 from paperhub.http_client import fetch_text
-from paperhub.json_io import read_json, write_json_atomic
+from paperhub.json_io import read_json
 from paperhub.paths import (
     LOGS_DIR,
     PAPER_STORE_DIR,
@@ -621,14 +621,6 @@ def topic_repair_targets(topic=None, key=None, days=None, scan_all=False):
                 continue
             targets.append((profile, k))
     return targets
-
-
-def _write_topic_index(slug, key, idx):
-    path = topic_store.index_path(slug, key)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    idx["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with topic_store.publication_lock(slug, key):
-        write_json_atomic(path, idx)
 
 
 def repair_topic(topic=None, key=None, days=None, scan_all=False, processed_ids=None):

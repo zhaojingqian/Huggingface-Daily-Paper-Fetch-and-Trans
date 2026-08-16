@@ -36,11 +36,6 @@ sys.path.insert(0, BASE_DIR)
 
 
 # ── Paper Store (统一存 JSON + PDF) ─────────────────────────────────────────
-def _paper_pdf_path(arxiv_id):
-    """PDF 唯一存储路径"""
-    return paper_store.pdf_path(arxiv_id)
-
-
 def _pdf_quality_tainted(arxiv_id):
     """A quality taint survives later compile diagnostics until new PDF success."""
     if paper_store.pdf_quality_tainted(arxiv_id):
@@ -63,14 +58,6 @@ def _pdf_store_hit(arxiv_id, include_tainted=False):
     if not include_tainted and _pdf_quality_tainted(arxiv_id):
         return None
     return paper_store.pdf_hit(arxiv_id)
-
-
-def _pdf_store_save(arxiv_id, src_path):
-    """成功生成的 PDF → 写入 paper store"""
-    try:
-        paper_store.save_pdf(arxiv_id, src_path)
-    except Exception as e:
-        print(f"  ⚠️ paper store PDF 写入失败: {e}", flush=True)
 
 
 def _paper_store_update_pdf_status(arxiv_id, status):

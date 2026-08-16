@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 在 gpt-academic Docker 容器内运行的全文翻译驱动脚本
-用法: python3 full_translate_driver.py <arxiv_id> [--no-cache] [--retries N]
+用法: python3 full_translate_driver.py <arxiv_id> [--no-cache]
 输出: RESULT:SUCCESS:<pdf_path>  或  RESULT:ERROR:<msg>
 """
 import sys, os, glob, time, shutil
@@ -59,7 +59,6 @@ os.chdir('/gpt')
 arxiv_id        = sys.argv[1] if len(sys.argv) > 1 else None
 no_cache        = "--no-cache" in sys.argv
 keep_translation = "--keep-translation" in sys.argv   # 保留已有翻译，只重跑编译
-max_retries = 0   # 只翻译一次，不重试
 
 if not arxiv_id:
     print("RESULT:ERROR:请提供 arxiv_id", flush=True)
@@ -73,7 +72,7 @@ os.environ["PAPER_TRANS_RECOVERY_FILE"] = (
     f"/gpt/gpt_log/paper_trans_recovery/{_recovery_id}.json"
 )
 
-print(f"[driver] 开始处理: {arxiv_id}  no_cache={no_cache}  keep_translation={keep_translation}  max_retries={max_retries}", flush=True)
+print(f"[driver] 开始处理: {arxiv_id}  no_cache={no_cache}  keep_translation={keep_translation}", flush=True)
 
 # ── 代理注入（必须在所有 gpt-academic 模块导入之前）──────────────────────────────
 HOST_PROXY   = os.environ.get("HOST_PROXY", "http://127.0.0.1:7890")
@@ -763,7 +762,7 @@ def prepare_keep_translation_workfolder():
         return False
 
 
-# ── 主逻辑：首次 + 重试 ────────────────────────────────────────────────────────
+# ── 主逻辑：单次翻译，重试由宿主 retry-pdf 负责 ────────────────────────────────
 result_pdf = None
 
 WORKFOLDER = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder')
@@ -801,20 +800,7 @@ else:
         actual_no_cache = False
 
     if not result_pdf:
-        for attempt in range(1, max_retries + 2):   # 最多3次（1次首次 + 2次重试）
-            if attempt == 1:
-                result_pdf = run_translation(actual_no_cache, attempt)
-            else:
-                # 重试：强制清缓存，重新翻译
-                print(f"\n[driver] ══ 第 {attempt} 次重试（清除缓存后重新翻译）══", flush=True)
-                clear_compile_cache()
-                result_pdf = run_translation(True, attempt)
-
-            if result_pdf:
-                break
-            if attempt <= max_retries:
-                print(f"[driver] 等待 5s 后重试...", flush=True)
-                time.sleep(5)
+        result_pdf = run_translation(actual_no_cache, 1)
 
     # ── Fallback：翻译完成但编译失败时，修补 verbatim 环境后重编译 ──────────────
     if not result_pdf:
@@ -831,5 +817,5 @@ if result_pdf:
 else:
     workfolder_ = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'workfolder')
     diagnose_failure(workfolder_, arxiv_id)
-    print(f"RESULT:ERROR:所有 {max_retries+1} 次尝试均未生成 PDF", flush=True)
+    print("RESULT:ERROR:本次未生成有效翻译 PDF", flush=True)
     os._exit(1)

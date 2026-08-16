@@ -53,6 +53,16 @@ class WeeklyRepairTest(unittest.TestCase):
         )
         self.assertEqual(patches[0]["strategy"], "reuse_translation")
 
+    def test_patch_catalog_prefers_persisted_retry_strategy(self):
+        patches = patches_for_records([
+            {
+                "category": "quality.untranslated_prose",
+                "retry_strategy": "manual_review",
+            },
+        ])
+
+        self.assertEqual(patches[0]["strategy"], "manual_review")
+
     def test_patch_catalog_covers_structured_failure_taxonomy(self):
         expected = {
             "translate.api_auth",

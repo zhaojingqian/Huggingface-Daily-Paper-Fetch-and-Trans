@@ -183,29 +183,7 @@ def _patch_latex_translation_splitter():
         r"homepage|orcidlink|thanks|newcommand|renewcommand|providecommand|"
         r"DeclareMathOperator|newtheorem|def)\b"
     )
-    inline_math_re = _re.compile(r"\$[^$]*\$")
-
-    def _rough_text(line: str) -> str:
-        rough = _ltf.strip_inline_code_commands(inline_math_re.sub(" ", line))
-        rough = _re.sub(
-            r"\\(?:begin|end)\{[^{}]+\}(?:\[[^\]]*\])?",
-            " ",
-            rough,
-        )
-        rough = _re.sub(
-            r"\\(?:textcolor|colorbox|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}\{([^{}]*)\}",
-            r" \1 ",
-            rough,
-        )
-        for _ in range(3):
-            rough = _re.sub(
-                r"\\(?:textbf|textit|texttt|emph|underline|small|footnotesize|"
-                r"scriptsize|normalsize|large|Large|captionof)\*?"
-                r"(?:\[[^\]]*\])?(?:\{[^{}]*\})?\{([^{}]*)\}",
-                r" \1 ",
-                rough,
-        )
-        return _ltf.latex_prose_probe(rough)
+    _rough_text = _ltf.latex_prose_text
 
     def _env_is_tracked(env: str | None) -> bool:
         return env == "center" or _ltf.is_tracked_env(env)
@@ -266,11 +244,7 @@ def _patch_latex_translation_splitter():
         else:
             nodes.append(_Node(text, preserve=preserve))
 
-    def _split_comment(line: str):
-        for idx, ch in enumerate(line):
-            if ch == "%" and (idx == 0 or line[idx - 1] != "\\"):
-                return line[:idx], line[idx:]
-        return line, ""
+    _split_comment = _ltf.split_tex_comment
 
     def _append_translatable_fragment(nodes, text: str, min_letters=32, min_words=5):
         if not text:

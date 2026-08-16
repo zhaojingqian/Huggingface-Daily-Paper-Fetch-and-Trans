@@ -9,6 +9,19 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_tex_comment_split_uses_backslash_parity(self):
+        literal_percent = r"\% keeps the following text"
+        comment_after_even_run = r"\\% drops the following text"
+
+        self.assertEqual(
+            filters.split_tex_comment(literal_percent),
+            (literal_percent, ""),
+        )
+        self.assertEqual(
+            filters.split_tex_comment(comment_after_even_run),
+            (r"\\", r"% drops the following text"),
+        )
+
     def test_main_tex_rank_prefers_entrypoint_over_imported_body(self):
         candidates = ["extract/paper_body.tex", "extract/main.tex"]
         body = r"\documentclass{article} \section{Body} \ref{x} \cite{key}"
