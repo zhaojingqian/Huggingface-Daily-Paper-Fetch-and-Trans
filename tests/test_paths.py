@@ -52,6 +52,7 @@ class SharedPathsTest(unittest.TestCase):
                 "latex_translation_filters.py",
                 "translation_policy.py",
                 "latex_pipeline.py",
+                "latex_compile.py",
                 "translation_runtime.py",
                 "failure_taxonomy.py",
                 "translation_quality.py",
