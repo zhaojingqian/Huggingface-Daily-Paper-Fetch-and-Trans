@@ -32,64 +32,24 @@ from datetime import datetime, timedelta
 
 from paperhub.modes import CONTENT_MODES, FETCH_MODES, mode_spec
 from paperhub.paths import ROOT_DIR as BASE_DIR, LOGS_DIR, mode_dir, mode_index_path
+from paperhub.repair_stats import (
+    REFETCH_FIELDS as _STAT_FIELDS,
+    finish_stats as _finish_stats,
+    merge_stats as _merge_stats,
+    new_stats as _shared_new_stats,
+    stats_line as _stats_line,
+)
 
 sys.path.insert(0, BASE_DIR)
 
 LOG_FILE = os.path.join(LOGS_DIR, "repair.log")
 REFETCH_MODES = FETCH_MODES
-_COUNTER_FIELDS = (
-    "metadata_attempted",
-    "metadata_succeeded",
-    "metadata_failed",
-    "summary_attempted",
-    "summary_succeeded",
-    "summary_failed",
-    "pdf_attempted",
-    "pdf_succeeded",
-    "pdf_failed",
-    "refetch_attempted",
-    "refetch_succeeded",
-    "refetch_failed",
-    "summary_repaired",
-)
-
-
 def _new_stats():
-    stats = {field: 0 for field in _COUNTER_FIELDS}
-    stats["residual_failures"] = 0
-    stats["residual_ids"] = []
-    stats["audited_ids"] = []
-    stats["abort_reason"] = ""
-    return stats
-
-
-def _merge_stats(target, source):
-    for field in _COUNTER_FIELDS:
-        target[field] += int(source.get(field, 0) or 0)
-    residual_ids = set(target.get("residual_ids", []))
-    source_residuals = set(source.get("residual_ids", []))
-    source_audited = set(source.get("audited_ids", []))
-    # A later persisted-state audit is authoritative for the IDs it inspected.
-    residual_ids.difference_update(source_audited - source_residuals)
-    residual_ids.update(source_residuals)
-    audited_ids = set(target.get("audited_ids", []))
-    audited_ids.update(source_audited)
-    target["audited_ids"] = sorted(audited_ids)
-    target["residual_ids"] = sorted(residual_ids)
-    target["residual_failures"] = len(residual_ids)
-    if source.get("abort_reason"):
-        target["abort_reason"] = source["abort_reason"]
-    return target
-
-
-def _finish_stats(stats, residual_ids=()):
-    result = dict(stats)
-    ids = set(result.get("residual_ids", []))
-    ids.update(str(item) for item in residual_ids if item)
-    result["residual_ids"] = sorted(ids)
-    result["residual_failures"] = len(ids)
-    result["audited_ids"] = sorted(set(result.get("audited_ids", [])))
-    return result
+    return _shared_new_stats(
+        _STAT_FIELDS,
+        audited=True,
+        abort_reason=True,
+    )
 
 
 def _include_failure_artifact_residuals(stats):
@@ -106,20 +66,6 @@ def _include_failure_artifact_residuals(stats):
     stats["residual_ids"] = sorted(residual_ids)
     stats["residual_failures"] = len(residual_ids)
     return stats
-
-
-def _stats_line(stats):
-    return (
-        f"metadata={stats['metadata_succeeded']}/{stats['metadata_attempted']}"
-        f"(失败={stats['metadata_failed']}) "
-        f"summary={stats['summary_succeeded']}/{stats['summary_attempted']}"
-        f"(失败={stats['summary_failed']}, 修复={stats['summary_repaired']}) "
-        f"pdf={stats['pdf_succeeded']}/{stats['pdf_attempted']}"
-        f"(失败={stats['pdf_failed']}) "
-        f"refetch={stats['refetch_succeeded']}/{stats['refetch_attempted']}"
-        f"(失败={stats['refetch_failed']}) "
-        f"残留={stats['residual_failures']}"
-    )
 
 
 def _return_stats_or_count(stats, field, return_stats):

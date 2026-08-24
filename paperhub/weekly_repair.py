@@ -20,6 +20,10 @@ from paperhub.json_io import read_json, write_json_atomic
 from paperhub.modes import mode_spec
 from paperhub.patch_catalog import patches_for_records
 from paperhub.paths import DATA_DIR, LOCK_DIR, LOGS_DIR, PAPER_STORE_DIR
+from paperhub.repair_stats import (
+    finish_stats as _finish_stats,
+    new_stats as _new_stats,
+)
 from paperhub.publication_lock import (
     InvalidIndexError,
     PublicationBusyError,
@@ -31,33 +35,7 @@ from paperhub.publication_lock import (
 
 
 _CONTENT_MODES = ("daily", "weekly", "monthly", "manual", "topic")
-_STAT_FIELDS = (
-    "metadata_attempted",
-    "metadata_succeeded",
-    "metadata_failed",
-    "summary_attempted",
-    "summary_succeeded",
-    "summary_failed",
-    "pdf_attempted",
-    "pdf_succeeded",
-    "pdf_failed",
-)
 _WEEK_KEY_RE = re.compile(r"^(\d{4})-W(\d{2})$")
-
-
-def _new_stats():
-    stats = {field: 0 for field in _STAT_FIELDS}
-    stats["residual_failures"] = 0
-    stats["residual_ids"] = []
-    return stats
-
-
-def _finish_stats(stats, residual_ids=()):
-    result = dict(stats)
-    ids = sorted({str(item) for item in residual_ids if item})
-    result["residual_ids"] = ids
-    result["residual_failures"] = len(ids)
-    return result
 
 
 def current_week_key(now: Optional[datetime] = None) -> str:

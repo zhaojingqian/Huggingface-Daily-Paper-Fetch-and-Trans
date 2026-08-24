@@ -33,6 +33,12 @@ from paperhub.paths import (
     mode_papers_dir,
 )
 from paperhub.residual_translation import terminal_repair_eligible
+from paperhub.repair_stats import (
+    finish_stats as _finalize_stats,
+    merge_stats as _merge_stats,
+    new_stats as _new_stats,
+    stats_line as _stats_line,
+)
 from paperhub.translation_quality import analyze_tex
 
 sys.path.insert(0, BASE_DIR)
@@ -107,58 +113,6 @@ def _paper_store_update_pdf_status(arxiv_id, status):
 def _paper_store_mark_pdf_verified(arxiv_id):
     """Clear a persistent quality taint only after a new PDF passes all gates."""
     return paper_store.mark_pdf_verified(arxiv_id)
-
-
-_STAT_FIELDS = (
-    "metadata_attempted",
-    "metadata_succeeded",
-    "metadata_failed",
-    "summary_attempted",
-    "summary_succeeded",
-    "summary_failed",
-    "pdf_attempted",
-    "pdf_succeeded",
-    "pdf_failed",
-)
-
-
-def _new_stats():
-    """Create a stable result shape shared by run/repair/retry commands."""
-    stats = {field: 0 for field in _STAT_FIELDS}
-    stats["residual_failures"] = 0
-    stats["residual_ids"] = []
-    return stats
-
-
-def _finalize_stats(stats, residual_ids=()):
-    result = dict(stats)
-    ids = sorted({str(item) for item in residual_ids if item})
-    result["residual_ids"] = ids
-    result["residual_failures"] = len(ids)
-    return result
-
-
-def _merge_stats(target, source):
-    """Merge counters and residual IDs into ``target`` in place."""
-    for field in _STAT_FIELDS:
-        target[field] = target.get(field, 0) + int(source.get(field, 0) or 0)
-    ids = set(target.get("residual_ids", []))
-    ids.update(source.get("residual_ids", []))
-    target["residual_ids"] = sorted(ids)
-    target["residual_failures"] = len(ids)
-    return target
-
-
-def _stats_line(stats):
-    return (
-        f"metadata={stats['metadata_succeeded']}/{stats['metadata_attempted']}"
-        f"(失败={stats['metadata_failed']}) "
-        f"summary={stats['summary_succeeded']}/{stats['summary_attempted']}"
-        f"(失败={stats['summary_failed']}) "
-        f"pdf={stats['pdf_succeeded']}/{stats['pdf_attempted']}"
-        f"(失败={stats['pdf_failed']}) "
-        f"残留={stats['residual_failures']}"
-    )
 
 
 def _audit_translation_state(arxiv_ids, structural_residuals=(), missing_attempts=0):
