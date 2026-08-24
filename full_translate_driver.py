@@ -4,7 +4,7 @@
 用法: python3 full_translate_driver.py <arxiv_id> [--no-cache]
 输出: RESULT:SUCCESS:<pdf_path>  或  RESULT:ERROR:<msg>
 """
-import sys, os, glob, time, shutil
+import sys, os, glob, time
 import latex_translation_filters as _ltf
 from failure_taxonomy import classify_failure
 try:
@@ -27,6 +27,11 @@ except ImportError:
         residual_score as _residual_score,
         terminal_repair_eligible as _terminal_repair_eligible,
     )
+
+try:
+    from translation_source import SourceCache, SourceDownloadPolicy
+except ImportError:
+    from paperhub.translation_source import SourceCache, SourceDownloadPolicy
 
 try:
     from latex_pipeline import (
@@ -113,36 +118,6 @@ _LLM_HTTP_TIMEOUT = _bounded_policy_int(
     maximum=3600,
 )
 
-# arXiv source retrieval is deliberately bounded separately from LLM requests.
-# ``requests``' read timeout is an *idle* timeout: a peer that sends one byte
-# periodically can otherwise hold the global translation lock forever.  Keep
-# these knobs operator-configurable, but put safe ceilings on each attempt and
-# on the complete proxy/direct fallback sequence.
-_SOURCE_DOWNLOAD_CONNECT_TIMEOUT = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_CONNECT_TIMEOUT", 15, minimum=5, maximum=60,
-)
-_SOURCE_DOWNLOAD_READ_TIMEOUT = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_READ_TIMEOUT", 90, minimum=15, maximum=300,
-)
-_SOURCE_DOWNLOAD_ATTEMPT_SECONDS = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_ATTEMPT_SECONDS", 300, minimum=60, maximum=1800,
-)
-_SOURCE_DOWNLOAD_TOTAL_SECONDS = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_TOTAL_SECONDS", 600, minimum=120, maximum=3600,
-)
-_SOURCE_DOWNLOAD_RATE_GRACE_SECONDS = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_RATE_GRACE_SECONDS", 45, minimum=10, maximum=300,
-)
-_SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_MIN_BYTES_PER_SECOND", 8 * 1024,
-    minimum=1024, maximum=512 * 1024,
-)
-_SOURCE_DOWNLOAD_MAX_BYTES = _bounded_policy_int(
-    "PAPER_TRANS_SOURCE_MAX_BYTES", 512 * 1024 * 1024,
-    minimum=1024 * 1024, maximum=2 * 1024 * 1024 * 1024,
-)
-
-
 class _PatchedSession(_OrigSession):
     def __init__(self):
         super().__init__()
@@ -187,6 +162,15 @@ os.environ["PAPER_TRANS_EFFECTIVE_MODEL"] = str(llm_model)
 ARXIV_CACHE_DIR = get_conf('ARXIV_CACHE_DIR')
 print(f"[driver] 模型: {llm_model}", flush=True)
 print(f"[driver] 缓存目录: {ARXIV_CACHE_DIR}", flush=True)
+
+source_cache = SourceCache(
+    cache_dir=ARXIV_CACHE_DIR,
+    paper_id=arxiv_id,
+    proxies=PROXIES_DICT,
+    session_factory=_OrigSession,
+    safety_error=_ltf.source_tar_safety_error,
+    policy=SourceDownloadPolicy.from_env(),
+)
 
 from crazy_functions.Latex_Function import Latex翻译中文并重新编译PDF
 
@@ -545,223 +529,6 @@ def diagnose_failure(workfolder, arxiv_id_):
     return diag
 
 
-def clear_compile_cache(full=False):
-    """清除 workfolder 和 translation（full=True 时也清 extract）。"""
-    cache_base = os.path.join(ARXIV_CACHE_DIR, arxiv_id)
-    targets = ['workfolder', 'translation']
-    if full:
-        targets += ['extract']
-    for subdir in targets:
-        d = os.path.join(cache_base, subdir)
-        if os.path.exists(d):
-            shutil.rmtree(d)
-            print(f"[driver] 已清除缓存: {d}", flush=True)
-
-
-def source_cache_is_valid():
-    """检查已下载的 arXiv 源码包是否可复用，避免 --no-cache 重试反复卡在下载断流。"""
-    src_tar = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print', arxiv_id + '.tar')
-    if not os.path.exists(src_tar) or os.path.getsize(src_tar) < 1024:
-        return False
-    reason = _ltf.source_tar_safety_error(src_tar)
-    if reason:
-        print(f"[driver] ⚠️  arXiv 源码缓存不安全/无效: {reason}", flush=True)
-        return False
-    return True
-
-
-def _source_content_length(response):
-    """Return a sane Content-Length when the server supplied one."""
-    raw = response.headers.get('Content-Length')
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        raise RuntimeError(f'invalid Content-Length: {raw!r}')
-    if value < 0:
-        raise RuntimeError(f'invalid Content-Length: {raw!r}')
-    if value > _SOURCE_DOWNLOAD_MAX_BYTES:
-        raise RuntimeError(
-            'source archive exceeds download limit: '
-            f'{value} > {_SOURCE_DOWNLOAD_MAX_BYTES} bytes'
-        )
-    return value
-
-
-def prefetch_source_cache(max_rounds=3):
-    """预下载 arXiv 源码包，代理/直连交替重试，且为慢速断流设总时限。"""
-    src_dir = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print')
-    src_tar = os.path.join(src_dir, arxiv_id + '.tar')
-    tmp_tar = src_tar + '.part'
-    url = f'https://arxiv.org/e-print/{arxiv_id}'
-
-    if source_cache_is_valid():
-        print(f"[driver] ♻️  arXiv 源码缓存已存在: {src_tar}", flush=True)
-        return True
-
-    os.makedirs(src_dir, exist_ok=True)
-    plans = [('proxy', True), ('direct', False)]
-    started_at = time.monotonic()
-    total_deadline = started_at + _SOURCE_DOWNLOAD_TOTAL_SECONDS
-
-    for round_idx in range(1, max_rounds + 1):
-        for label, use_proxy in plans:
-            try:
-                remaining = total_deadline - time.monotonic()
-                if remaining <= 0:
-                    print(
-                        '[driver] ⚠️  arXiv 源码预下载达到总时限 '
-                        f'({_SOURCE_DOWNLOAD_TOTAL_SECONDS}s)，停止重试',
-                        flush=True,
-                    )
-                    return False
-                attempt_started = time.monotonic()
-                attempt_deadline = min(
-                    total_deadline,
-                    attempt_started + _SOURCE_DOWNLOAD_ATTEMPT_SECONDS,
-                )
-                if os.path.exists(tmp_tar):
-                    os.remove(tmp_tar)
-                session = _OrigSession()
-                if use_proxy:
-                    session.proxies.update(PROXIES_DICT)
-                else:
-                    session.trust_env = False
-                print(f"[driver] ⬇️  预下载 arXiv 源码 ({label}, round={round_idx}): {url}", flush=True)
-                request_read_timeout = min(
-                    _SOURCE_DOWNLOAD_READ_TIMEOUT,
-                    max(15, int(remaining)),
-                )
-                with session.get(
-                    url,
-                    stream=True,
-                    timeout=(_SOURCE_DOWNLOAD_CONNECT_TIMEOUT, request_read_timeout),
-                ) as r:
-                    r.raise_for_status()
-                    content_length = _source_content_length(r)
-                    # requests may transparently decode an HTTP-compressed
-                    # entity, so its yielded byte count need not equal the
-                    # wire Content-Length in that rare case.
-                    if r.headers.get('Content-Encoding', '').lower() not in ('', 'identity'):
-                        content_length = None
-                    written = 0
-                    with open(tmp_tar, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=1024 * 256):
-                            if chunk:
-                                f.write(chunk)
-                                written += len(chunk)
-                            elapsed = time.monotonic() - attempt_started
-                            if time.monotonic() > attempt_deadline:
-                                raise TimeoutError(
-                                    'source download attempt exceeded '
-                                    f'{int(attempt_deadline - attempt_started)}s'
-                                )
-                            if (
-                                elapsed >= _SOURCE_DOWNLOAD_RATE_GRACE_SECONDS
-                                and written / max(elapsed, 1) < _SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND
-                            ):
-                                raise TimeoutError(
-                                    'source download below minimum rate: '
-                                    f'{written / max(elapsed, 1):.0f}B/s < '
-                                    f'{_SOURCE_DOWNLOAD_MIN_BYTES_PER_SECOND}B/s'
-                                )
-                    if content_length is not None and written != content_length:
-                        raise RuntimeError(
-                            'incomplete source archive: '
-                            f'expected {content_length} bytes, got {written}'
-                        )
-                if os.path.getsize(tmp_tar) < 1024:
-                    raise RuntimeError('downloaded source is too small')
-                unsafe_reason = _ltf.source_tar_safety_error(tmp_tar)
-                if unsafe_reason:
-                    raise RuntimeError(
-                        "downloaded source archive rejected: " + unsafe_reason
-                    )
-                os.replace(tmp_tar, src_tar)
-                kb = os.path.getsize(src_tar) // 1024
-                print(f"[driver] ✅ arXiv 源码预下载成功: {src_tar} ({kb}KB)", flush=True)
-                return True
-            except Exception as e:
-                print(f"[driver] ⚠️  arXiv 源码预下载失败 ({label}, round={round_idx}): {type(e).__name__}: {e}", flush=True)
-                try:
-                    if os.path.exists(tmp_tar):
-                        os.remove(tmp_tar)
-                except Exception:
-                    pass
-        remaining = total_deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        time.sleep(min(2 * round_idx, 6, remaining))
-
-    return False
-
-
-def prepare_keep_translation_workfolder():
-    """
-    只有宿主机恢复了 merge_translate_zh.tex、但 workfolder 源码不完整时：
-    1. 确保 arXiv 源码包已缓存；
-    2. 解压源码并重建 gpt-academic workfolder；
-    3. 放回已翻译 tex，并尽量生成 merge.tex 供修补/诊断使用。
-    """
-    src_tar = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'e-print', arxiv_id + '.tar')
-    extract_dst = os.path.join(ARXIV_CACHE_DIR, arxiv_id, 'extract')
-
-    if not os.path.exists(TRANSLATE_TEX):
-        return False
-    try:
-        with open(TRANSLATE_TEX, 'rb') as f:
-            translated_tex = f.read()
-    except Exception as e:
-        print(f"[driver] ⚠️  读取翻译 tex 失败，无法恢复 workfolder: {e}", flush=True)
-        return False
-
-    if not (source_cache_is_valid() or prefetch_source_cache()):
-        print(f"[driver] ⚠️  源码缓存不可用，无法恢复 workfolder", flush=True)
-        return False
-
-    try:
-        from toolbox import extract_archive
-        from crazy_functions.Latex_Function import (
-            descend_to_extracted_folder_if_exist,
-            move_project,
-        )
-        from crazy_functions.latex_fns import latex_toolbox as _lt_local
-
-        if os.path.exists(extract_dst):
-            shutil.rmtree(extract_dst)
-        os.makedirs(extract_dst, exist_ok=True)
-        extract_archive(file_path=src_tar, dest_dir=extract_dst)
-
-        project_folder = descend_to_extracted_folder_if_exist(extract_dst)
-        os.makedirs(project_folder, exist_ok=True)
-        # 也放一份到 extract 侧，若后续退回插件编译，move_project 后仍可跳过 GPT。
-        with open(os.path.join(project_folder, 'merge_translate_zh.tex'), 'wb') as f:
-            f.write(translated_tex)
-
-        workfolder = move_project(project_folder, arxiv_id)
-        with open(os.path.join(workfolder, 'merge_translate_zh.tex'), 'wb') as f:
-            f.write(translated_tex)
-
-        file_manifest = [
-            f for f in glob.glob(f'{workfolder}/**/*.tex', recursive=True)
-            if not os.path.basename(f).startswith('merge')
-        ]
-        if file_manifest:
-            maintex = _lt_local.find_main_tex_file(file_manifest, 'translate_zh')
-            with open(maintex, 'r', encoding='utf-8', errors='replace') as f:
-                merged_content = _lt_local.merge_tex_files(workfolder, f.read(), 'translate_zh')
-            with open(os.path.join(workfolder, 'merge.tex'), 'w', encoding='utf-8', errors='replace') as f:
-                f.write(merged_content)
-            print(f"[driver] ✅ 已恢复完整 workfolder 并生成 merge.tex: {workfolder}", flush=True)
-        else:
-            print(f"[driver] ⚠️  源码解压后未找到 tex 文件，仅恢复中文 tex: {workfolder}", flush=True)
-        return True
-    except Exception as e:
-        print(f"[driver] ⚠️  恢复 keep-translation workfolder 失败: {type(e).__name__}: {e}", flush=True)
-        return False
-
-
 # ── 主逻辑：单次翻译，重试由宿主 retry-pdf 负责 ────────────────────────────────
 result_pdf = None
 
@@ -778,7 +545,7 @@ else:
     if keep_translation and os.path.exists(TRANSLATE_TEX):
         # 只有中文 tex、没有完整源码 workfolder 时，先重建 workfolder 并直编译。
         print(f"[driver] ♻️  发现翻译缓存但 workfolder 不完整，尝试恢复源码后直编译", flush=True)
-        if prepare_keep_translation_workfolder():
+        if source_cache.restore_workfolder(TRANSLATE_TEX):
             repair_terminal_translation_residuals(WORKFOLDER, arxiv_id)
             result_pdf = patch_and_recompile(WORKFOLDER, arxiv_id)
         if result_pdf:
@@ -788,15 +555,15 @@ else:
         actual_no_cache = False
     elif no_cache:
         # 强制重新翻译/编译；若源码包已经有效缓存，则复用源码，避免 arXiv 下载断流导致无法进入编译阶段。
-        clear_compile_cache(full=True)
-        if source_cache_is_valid() or prefetch_source_cache():
+        source_cache.clear_compile_cache(full=True)
+        if source_cache.is_valid() or source_cache.prefetch():
             print(f"[driver] ♻️  复用已下载源码缓存（仍会重新翻译/编译）", flush=True)
             actual_no_cache = False
         else:
             actual_no_cache = True
     else:
-        if not source_cache_is_valid():
-            prefetch_source_cache()
+        if not source_cache.is_valid():
+            source_cache.prefetch()
         actual_no_cache = False
 
     if not result_pdf:

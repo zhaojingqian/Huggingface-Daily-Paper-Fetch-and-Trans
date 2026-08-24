@@ -421,7 +421,12 @@ class TranslateFullCommandTest(unittest.TestCase):
 
     def test_driver_bounds_slow_source_prefetch_and_validates_length(self):
         """A trickling arXiv response cannot hold the global lock indefinitely."""
-        with open(translate_full.DRIVER_SCRIPT, encoding="utf-8") as handle:
+        source_module = os.path.join(
+            translate_full.BASE_DIR,
+            "paperhub",
+            "translation_source.py",
+        )
+        with open(source_module, encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("PAPER_TRANS_SOURCE_TOTAL_SECONDS", source)
