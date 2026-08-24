@@ -390,22 +390,31 @@ class TranslateFullCommandTest(unittest.TestCase):
             "latex_pipeline.py",
         )
         with open(pipeline, encoding="utf-8") as handle:
-            source = handle.read()
+            pipeline_source = handle.read()
+        runtime = os.path.join(
+            translate_full.BASE_DIR,
+            "paperhub",
+            "latex_runtime.py",
+        )
+        with open(runtime, encoding="utf-8") as handle:
+            runtime_source = handle.read()
 
-        self.assertIn('"openin_any": "p"', source)
-        self.assertIn('"openout_any": "p"', source)
-        self.assertIn('"shell_escape": "0"', source)
-        self.assertIn("'-no-shell-escape'", source)
-        self.assertIn("actions.compile_latex_with_timeout = _patched_compile_with_timeout", source)
+        self.assertIn('"openin_any": "p"', pipeline_source)
+        self.assertIn('"openout_any": "p"', pipeline_source)
+        self.assertIn('"shell_escape": "0"', pipeline_source)
+        self.assertIn("'-no-shell-escape'", pipeline_source)
+        self.assertIn(
+            "actions.compile_latex_with_timeout = _patched_compile_with_timeout",
+            runtime_source,
+        )
 
     def test_driver_compile_wrapper_rejects_nonzero_tex_exit(self):
         """A TeX failure must not advance the upstream compile-success path."""
-        pipeline = os.path.join(
+        runtime = os.path.join(
             translate_full.BASE_DIR,
-            "paperhub",
-            "latex_pipeline.py",
+            "paperhub", "latex_runtime.py",
         )
-        with open(pipeline, encoding="utf-8") as handle:
+        with open(runtime, encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("return process.returncode == 0", source)

@@ -12,6 +12,7 @@ SUPPORT_RELATIVE_PATHS = (
     "paperhub/translation_policy.py",
     "paperhub/latex_pipeline.py",
     "paperhub/latex_compile.py",
+    "paperhub/latex_runtime.py",
     "paperhub/translation_source.py",
     "paperhub/translation_runtime.py",
     "failure_taxonomy.py",

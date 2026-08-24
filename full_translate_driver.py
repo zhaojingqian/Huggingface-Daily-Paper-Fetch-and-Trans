@@ -37,7 +37,6 @@ try:
     from latex_pipeline import (
         configure as _configure_latex_pipeline,
         _compile_health_report,
-        install_gpt_academic_patches as _install_gpt_academic_latex_patches,
         latex_compile_health_ok as _latex_compile_health_ok,
         latex_compile_health_only_stale_refs as _latex_compile_health_only_stale_refs,
         pdf_integrity_ok as _pdf_integrity_ok,
@@ -49,7 +48,6 @@ except ImportError:
     from paperhub.latex_pipeline import (
         configure as _configure_latex_pipeline,
         _compile_health_report,
-        install_gpt_academic_patches as _install_gpt_academic_latex_patches,
         latex_compile_health_ok as _latex_compile_health_ok,
         latex_compile_health_only_stale_refs as _latex_compile_health_only_stale_refs,
         pdf_integrity_ok as _pdf_integrity_ok,
@@ -57,6 +55,11 @@ except ImportError:
         translation_quality_ok as _translation_quality_ok,
         translation_quality_report as _translation_quality_report,
     )
+
+try:
+    from latex_runtime import install_gpt_academic_patches as _install_gpt_academic_latex_patches
+except ImportError:
+    from paperhub.latex_runtime import install_gpt_academic_patches as _install_gpt_academic_latex_patches
 
 sys.path.insert(0, '/gpt')
 os.chdir('/gpt')
