@@ -37,12 +37,15 @@ gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前
 6.75GB；删除它不会消除依赖，只会把约 3.2GB TeX、818MB 字体和 Python 运行时
 搬回宿主机，因此只做镜像/缓存瘦身，不直接删容器。
 
-翻译链路按职责收敛为三层：`full_translate_driver.py` 只负责单篇
-生命周期、源码缓存、请求生命周期和结果诊断；`paperhub/translation_runtime.py`
+翻译链路按职责收敛为明确边界：`full_translate_driver.py` 只负责单篇
+生命周期、请求生命周期和结果诊断；`paperhub/translation_source.py` 独占源码
+预取、缓存清理和 tex-only workfolder 恢复；`paperhub/translation_runtime.py`
 负责 gpt-academic splitter、响应校验、失败槽重试和归档安全适配；
-`paperhub/latex_pipeline.py` 同时拥有容器内 PDF、翻译质量、编译健康门禁，以及
-TeX 修补、BibTeX/XeLaTeX/LuaLaTeX fallback；`paperhub/translation_policy.py`
-统一 chunk 与并发策略。编译 patch 会同时绑定 `latex_toolbox` 和
+`paperhub/latex_runtime.py` 只负责容器内第三方 monkey patch；
+`paperhub/latex_pipeline.py` 拥有 PDF、翻译质量、编译健康门禁，以及 TeX 修补
+和 BibTeX/XeLaTeX/LuaLaTeX fallback；`paperhub/latex_compile.py` 只执行受限
+TeX 命令序列；`paperhub/translation_policy.py` 统一 chunk 与并发策略。
+编译 patch 会同时绑定 `latex_toolbox` 和
 `latex_actions` 的实际引用，并只从用户 `.tex` 源恢复被翻译丢失的自定义宏；
 `.sty/.cls` 包实现不被复制到导言区，避免算法等环境的延迟宏重复定义。
 
@@ -394,7 +397,12 @@ paper-trans/
 │   ├── audit.py                 # 全项目索引/store/PDF 一致性审计
 │   ├── failure_reports.py       # 结构化与历史失败日志聚合
 │   ├── translation_policy.py    # chunk 上限与并发/重试策略
+│   ├── repair_stats.py          # repair/refetch/retry 统计与残留归并
+│   ├── translation_bundle.py    # 容器驱动 bundle 的唯一 manifest
+│   ├── translation_source.py    # arXiv 源码缓存与 workfolder 恢复
 │   ├── translation_runtime.py   # gpt-academic 适配与响应调度
+│   ├── latex_runtime.py         # gpt-academic LaTeX monkey patch
+│   ├── latex_compile.py         # 受限 TeX 命令序列执行
 │   └── latex_pipeline.py        # TeX 修补、编译与健康门禁
 ├── tests/
 │   ├── test_web_server_contract.py
