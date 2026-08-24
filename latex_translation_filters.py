@@ -1065,6 +1065,10 @@ def llm_translation_response_invalid(source: str, response: str) -> str:
         if value == source_value:
             return ""
         return "protected_source_data_modified"
+    if is_structural_input_command_fragment(source_value):
+        if value == source_value:
+            return ""
+        return "protected_source_data_modified"
     if is_structural_command_data_fragment(source_value):
         if value == source_value:
             return ""
@@ -1210,7 +1214,8 @@ _CATALOG_CONNECTOR_WORDS = {"and", "or", "plus", "with"}
 # policy below keeps a multiline invocation intact.
 STRUCTURAL_INPUT_COMMAND_RE = re.compile(
     r"\\(?:VerbatimInput|verbatiminput|lstinputlisting|inputminted|"
-    r"includegraphics\*?|prompttext)\b",
+    r"includegraphics\*?|prompttext)\b"
+    r"|\\input[A-Za-z@]*(?=\s*(?:\[[^\]]*\]\s*)?\{)",
     re.IGNORECASE,
 )
 AFFILIATION_MARKER_RE = re.compile(
@@ -1306,12 +1311,23 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|\\textbf\{(?:for|if|when)\s+(?:safe|unsafe|harmful|benign)\s+trajectories\s*:"
     r")"
 )
+SINGLE_LINE_SOURCE_DATA_DIRECTIVE_RE = re.compile(
+    r"(?ix)^\s*(?:\\item(?:\[[^\]]*\])?\s*)?(?:"
+    r"fill\s+the\s+exact\s+template\b(?=.*\b(?:field|fields|section|answer|"
+    r"conclusion|outlook)\b)"
+    r"|exclude\s+(?:every|all)\s+word\b(?=.*\b(?:supplied|forbidden|list)\b)"
+    r"|end\s+with\s+the\s+exact\s+supplied\s+phrase\b"
+    r"|(?:include|preserve|use|omit)\s+the\s+exact\s+supplied\b"
+    r"(?=.*\b(?:template|format|phrase|fields?|list)\b)"
+    r")"
+)
 
 
 def _is_single_line_source_instruction(value: str) -> bool:
     return bool(
         SINGLE_LINE_OUTPUT_INSTRUCTION_RE.search(value or "")
         or SINGLE_LINE_FORMAT_DIRECTIVE_RE.search(value or "")
+        or SINGLE_LINE_SOURCE_DATA_DIRECTIVE_RE.search(value or "")
     )
 
 
@@ -1522,7 +1538,11 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
     # unmatched closers, then retain all strict key/value and prose checks.
     if not bracketed:
         trimmed_closers = 0
-        while items is None and trimmed_closers < 2 and inner.rstrip().endswith("}"):
+        while (
+            items is None
+            and trimmed_closers < 3
+            and inner.rstrip().endswith(("}", "]", ")"))
+        ):
             inner = inner.rstrip()[:-1].rstrip()
             trimmed_closers += 1
             items = _split_top_level_option_items(inner)
@@ -1531,6 +1551,7 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
         return False
 
     assignment_count = 0
+    parsed_assignments = []
     key_re = re.compile(
         r"/?[A-Za-z][A-Za-z0-9_.:/-]*"
         r"(?:[ \t]+[A-Za-z][A-Za-z0-9_.:/-]*){0,5}"
@@ -1538,6 +1559,34 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
     prose_value_re = re.compile(
         r"\b[A-Za-z]{2,}\b(?:\s+\b[A-Za-z]{2,}\b){2,}"
     )
+    layout_key_re = re.compile(
+        r"(?i)(?:^|\s)(?:"
+        r"col(?:back|frame|backtitle|title)|box(?:rule|sep)|arc|"
+        r"(?:x|y)shift|(?:left|right|top|bottom)|font(?:title)?|"
+        r"attach\s+boxed(?:\s+title)?|boxed\s+title\s+style|"
+        r"(?:line\s+)?(?:width|height)|(?:inner|outer)\s+sep"
+        r")(?:\s|$)"
+    )
+    layout_value_re = re.compile(
+        r"(?i)(?:"
+        r"\\(?:bfseries|mdseries|itshape|slshape|scshape|rmfamily|sffamily|ttfamily)\b|"
+        r"\b(?:x|y)shift\s*=|\bbox(?:rule|sep)\s*=|\b(?:colback|colframe)\s*=|"
+        r"\b(?:arc|left|right|top|bottom)\s*=|"
+        r"\b\d+(?:\.\d+)?\s*(?:pt|mm|cm|in|em|ex)\b|"
+        r"\b[A-Za-z][A-Za-z-]*!\d+(?:!\w+)?\b"
+        r")"
+    )
+
+    def _is_layout_option(key: str, option_value: str) -> bool:
+        # Layout/style values can look like prose after TeX punctuation is
+        # stripped (``yshift in xshift``).  Require a geometry/style key or
+        # an unmistakable TeX layout marker; ordinary values such as
+        # ``method=This ordinary English sentence`` remain translatable.
+        return bool(
+            layout_key_re.search(key)
+            or layout_value_re.search(option_value)
+        )
+
     for item in items:
         assignment = _top_level_assignment(item)
         if assignment is None:
@@ -1556,9 +1605,21 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
             return False
         prose_probe = re.sub(r"\\[A-Za-z@]+", " ", option_value)
         prose_probe = re.sub(r"[^A-Za-z\s]", " ", prose_probe)
-        if prose_value_re.search(prose_probe):
-            return False
+        parsed_assignments.append((key, option_value, prose_probe))
         assignment_count += 1
+    # A tcolorbox/pgf list may contain one natural-language ``title=...``
+    # value beside several geometry/style options. Classify the list as one
+    # structural unit once it has a layout signal; judging each value in
+    # isolation would send only the title to the LLM and break the option
+    # list's exact pass-through contract.
+    layout_evidence = any(
+        _is_layout_option(key, option_value)
+        for key, option_value, _ in parsed_assignments
+    )
+    if not layout_evidence:
+        for _, _, prose_probe in parsed_assignments:
+            if prose_value_re.search(prose_probe):
+                return False
     return assignment_count >= 2
 
 
@@ -1791,7 +1852,9 @@ def is_translated_heading_proper_name_catalog(
 
 def _natural_language_probe(text: str) -> str:
     """Remove non-prose LaTeX payloads before language-ratio decisions."""
-    value = strip_inline_code_commands(extract_translation_fragment(text))
+    value = extract_translation_fragment(text)
+    value = _hide_marked_acronym_expansions(value)
+    value = strip_inline_code_commands(value)
     # Formatting commands with a configuration argument and a human-text
     # argument must expose only the latter. Otherwise color/style identifiers
     # such as ``iclrdeepblue`` make a correctly localized compact table label
@@ -1925,20 +1988,51 @@ def _hide_marked_acronym_expansions(text: str) -> str:
     allow-list.
     """
     value = str(text or "")
-    head_re = re.compile(r"\\(?:textbf|textit)\{[A-Z]{2,}\}")
+    # Initials are marked with several equivalent TeX wrappers in real
+    # papers. Keep this grammar explicit rather than hiding every emphasized
+    # English word.
     marker_re = re.compile(
-        r"\\(?:textbf|textit)\{[A-Z][a-z]?\}[A-Za-z][A-Za-z-]*"
+        r"(?:"
+        r"\\underline\{\\texttt\{[A-Z]\}\}"
+        r"|\\(?:underline|textbf|textit)\{[A-Z][a-z]?\}"
+        r")[A-Za-z][A-Za-z-]*"
     )
-    for head in list(head_re.finditer(value)):
+    head_re = re.compile(
+        r"\\(?:textbf|textit|texttt)\{"
+        r"(?=[A-Za-z0-9-]*[A-Z][A-Za-z0-9-]*[A-Z])"
+        r"[A-Za-z][A-Za-z0-9-]{2,}\}"
+    )
+    spans = []
+
+    def _expansion_span(start: int, window_end: int, markers) -> None:
+        if len(markers) < 2:
+            return
+        first = markers[0]
+        absolute_start = start + first.start()
+        tail = value[absolute_start:window_end]
+        terminal = re.search(r"[,.;:!?)]|$", tail)
+        absolute_end = absolute_start + (
+            terminal.start() if terminal else len(tail)
+        )
+        if absolute_end > absolute_start:
+            spans.append((absolute_start, absolute_end))
+
+    for head in head_re.finditer(value):
         window_end = min(len(value), head.end() + 320)
         window = value[head.end():window_end]
+        _expansion_span(head.end(), window_end, list(marker_re.finditer(window)))
+
+    # Some acronym heads are plain text while only the expansion initials are
+    # marked. Three explicit initials are enough evidence without treating a
+    # pair of ordinary underlined words as source data.
+    for first in marker_re.finditer(value):
+        window_end = min(len(value), first.start() + 240)
+        window = value[first.start():window_end]
         markers = list(marker_re.finditer(window))
-        if len(markers) < 2:
-            continue
-        start = head.end() + markers[0].start()
-        tail = value[start:window_end]
-        terminal = re.search(r"[,.;:!?)]|$", tail)
-        end = start + (terminal.start() if terminal else len(tail))
+        if len(markers) >= 3 and "\\underline" in window:
+            _expansion_span(first.start(), window_end, markers)
+
+    for start, end in sorted(set(spans), reverse=True):
         value = value[:start] + " " + value[end:]
     return value
 
@@ -2410,6 +2504,35 @@ def is_tool_call_result_fragment(text: str) -> bool:
     )
 
 
+def _is_code_like_environment_fragment(value: str) -> bool:
+    """Recognize a short LaTeX box that embeds executable-looking code.
+
+    Papers often typeset Python/pseudocode inside a normal ``tcolorbox`` or
+    custom environment. Requiring both an environment boundary and multiple
+    code signatures avoids hiding ordinary prose that merely says "if" or
+    "return".
+    """
+    probe = value.replace(r"\_", "_")
+    has_environment = bool(re.search(r"\\begin\{[A-Za-z][^{}]*\}", probe))
+    if len(probe) > 2400:
+        return False
+    signals = (
+        bool(re.search(r"\bclass\s+[A-Za-z_]\w*(?:\([^\n{}]*\))?\s*:", probe)),
+        bool(re.search(r"\bdef\s+[A-Za-z_]\w*\s*\(", probe)),
+        bool(re.search(r"\bself\.[A-Za-z_]\w*", probe)),
+        bool(re.search(r"\b(?:return|yield|elif|else)\b", probe)),
+        bool(re.search(r"\b(?:state|transition|kwargs|env_state)\b\s*[.:]", probe)),
+        bool(re.search(r"\b(?:EnvResponse|Observation)\s*\(", probe)),
+        bool(re.search(r"\b[A-Za-z_]\w*\s*=\s*[^=]", probe)),
+    )
+    strong = signals[0] or signals[1] or signals[2] or signals[5]
+    return strong and (
+        sum(signals) >= 2
+        if has_environment
+        else sum(signals) >= 3 and not re.search(r"[。！？]", probe)
+    )
+
+
 def is_structural_command_data_fragment(text: str) -> bool:
     r"""Recognize command-heavy labels/data detached from surrounding prose.
 
@@ -2421,7 +2544,11 @@ def is_structural_command_data_fragment(text: str) -> bool:
     field), and no ordinary grammatical glue.
     """
     value = extract_translation_fragment(text or "").strip()
-    if not value or len(value) > 500:
+    if not value:
+        return False
+    if _is_code_like_environment_fragment(value):
+        return True
+    if len(value) > 500:
         return False
     if is_latex_configuration_command_fragment(value):
         return True
@@ -3547,7 +3674,7 @@ def restore_environment_opening_options(
 ) -> Tuple[str, int]:
     """Restore bracketed environment options by occurrence from the source TeX."""
 
-    def spans(source: str):
+    def spans(source: str, tolerate_malformed: bool = False):
         results = []
         pattern = re.compile(r"\\begin\{" + re.escape(environment) + r"\}")
         for match in pattern.finditer(source):
@@ -3573,9 +3700,29 @@ def restore_environment_opening_options(
                     if depth == 0:
                         results.append((pos, end + 1, source[pos:end + 1]))
                         break
+            if results and results[-1][0] == pos:
+                continue
+            if not tolerate_malformed:
+                continue
+            # A translated option key can lose its closing ``]`` (or have
+            # prose inserted before the body). Stop at the next environment
+            # boundary and replace that whole malformed tail with the source
+            # option list. This keeps the repair occurrence-based and does
+            # not guess individual package keys.
+            boundaries = [
+                candidate
+                for candidate in (
+                    source.find(r"\begin{", pos),
+                    source.find(r"\end{", pos),
+                )
+                if candidate >= 0
+            ]
+            if boundaries:
+                end = min(boundaries)
+                results.append((pos, end, source[pos:end]))
         return results
 
-    translated_spans = spans(translated or "")
+    translated_spans = spans(translated or "", tolerate_malformed=True)
     original_spans = spans(original or "")
     replacements = []
     for translated_span, original_span in zip(translated_spans, original_spans):
@@ -3768,6 +3915,10 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         and not _latex_command_defined(source, "xspace")
         and not _latex_package_loaded(source, "xspace")
     )
+    needs_pdfmatch_noop = (
+        r"\pdfmatch" in source
+        and not _latex_command_defined(source, "pdfmatch")
+    )
     needs_textls_fallback = (
         r"\textls" in source
         and not _latex_command_defined(source, "textls")
@@ -3873,6 +4024,14 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\xspace}{}",
         ])
         source, changed = insert_latex_preamble_snippet(source, insertion, ["xspace"])
+        total += int(changed)
+
+    if needs_pdfmatch_noop:
+        insertion = "\n".join([
+            r"% paper-trans fallback for missing pdfTeX regex primitive",
+            r"\providecommand{\pdfmatch}[2]{0}",
+        ])
+        source, changed = insert_latex_preamble_snippet(source, insertion, ["pdfmatch"])
         total += int(changed)
 
     if needs_textls_fallback:
@@ -4049,6 +4208,18 @@ ZERO_ARG_LAYOUT_COMMANDS = (
     "cleardoublepage",
     "clearpage",
     "noindent",
+    "small",
+    "footnotesize",
+    "scriptsize",
+    "tiny",
+    "normalsize",
+    "large",
+    "Large",
+    "LARGE",
+    "huge",
+    "Huge",
+    "centering",
+    "raggedright",
     "smallskip",
     "medskip",
     "bigskip",
@@ -4155,6 +4326,39 @@ def separate_builtin_layout_ascii_glue(
                 del env_stack[pos:]
 
     return "".join(output), total
+
+
+COMMON_TEXT_COMMAND_TYPO_RE = re.compile(
+    r"\\tex(?P<suffix>bf|it|rm|sf|sl|up|tt|md|normal)\b(?=\s*\{)"
+)
+MALFORMED_PROOF_HEADING_RE = re.compile(
+    r"(\\begin\{proof\}\s*\[\s*)\\proof\b",
+    re.IGNORECASE,
+)
+
+
+def repair_common_text_command_typos(
+    text: str,
+    defined_commands: Iterable[str] = (),
+) -> Tuple[str, int]:
+    r"""Repair ``\texbf``-style omissions without touching defined macros."""
+    defined = {str(name) for name in defined_commands}
+    total = 0
+
+    def replace(match) -> str:
+        nonlocal total
+        full_name = "tex" + match.group("suffix")
+        if full_name in defined:
+            return match.group(0)
+        total += 1
+        return r"\text" + match.group("suffix")
+
+    return COMMON_TEXT_COMMAND_TYPO_RE.sub(replace, text or ""), total
+
+
+def repair_malformed_proof_headings(text: str) -> Tuple[str, int]:
+    r"""Turn a translated ``\proof`` heading token back into plain text."""
+    return MALFORMED_PROOF_HEADING_RE.subn(r"\1Proof", text or "")
 
 
 def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:

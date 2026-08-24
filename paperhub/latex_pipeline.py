@@ -637,13 +637,13 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
                 pass
 
     new_text, total = _ltf.repair_duplicated_macro_initials(text)
-    new_text, builtin_ascii = _ltf.separate_builtin_layout_ascii_glue(
+    new_text, separated = _ltf.separate_custom_macro_cjk_glue(new_text)
+    total += separated
+    new_text, builtin_layout = _ltf.separate_builtin_layout_ascii_glue(
         new_text,
         sibling_definitions,
     )
-    total += builtin_ascii
-    new_text, separated = _ltf.separate_custom_macro_cjk_glue(new_text)
-    total += separated
+    total += builtin_layout
     new_text, spaced = _ltf.collapse_spaced_cjk_characters(new_text)
     total += spaced
     if total:
@@ -720,17 +720,23 @@ def patch_stray_text_word_commands(trans_tex_path):
         )
     }
     pattern = _re.compile(r'\\text([A-Z][A-Za-z]{1,40})(?=[:：,，.;；!?！？\s])')
-    total = 0
+    stray_total = 0
 
     def _replace(m):
-        nonlocal total
+        nonlocal stray_total
         full_name = 'text' + m.group(1)
         if full_name in defined:
             return m.group(0)
-        total += 1
+        stray_total += 1
         return r'\textbf{' + m.group(1) + '}'
 
-    new_text = pattern.sub(_replace, text)
+    new_text, typo_total = _ltf.repair_common_text_command_typos(
+        text,
+        defined,
+    )
+    new_text, proof_total = _ltf.repair_malformed_proof_headings(new_text)
+    new_text = pattern.sub(_replace, new_text)
+    total = typo_total + proof_total + stray_total
     if total:
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.write(new_text)
@@ -938,26 +944,6 @@ def patch_inline_math_delimiter_artifacts(trans_tex_path):
         with open(trans_tex_path, 'w', encoding='utf-8') as f:
             f.writelines(new_lines)
         print(f"[driver] 🔧 patch_inline_math_delimiter_artifacts: 修复了 {total} 行 orphan inline math delimiter", flush=True)
-    return total
-
-
-def patch_common_command_cjk_glue(trans_tex_path):
-    """Add a separating space when safe LaTeX commands are glued to CJK text."""
-    import re as _re
-
-    with open(trans_tex_path, encoding='utf-8') as f:
-        text = f.read()
-
-    safe_commands = (
-        'newline', 'newpage', 'clearpage', 'noindent', 'indent',
-        'smallskip', 'medskip', 'bigskip',
-    )
-    pattern = _re.compile(r'\\(' + '|'.join(safe_commands) + r')(?=[\u4e00-\u9fff])')
-    new_text, total = pattern.subn(lambda m: '\\' + m.group(1) + ' ', text)
-    if total:
-        with open(trans_tex_path, 'w', encoding='utf-8') as f:
-            f.write(new_text)
-        print(f"[driver] 🔧 patch_common_command_cjk_glue: 修复了 {total} 处命令/CJK 粘连", flush=True)
     return total
 
 
@@ -2253,7 +2239,6 @@ def patch_and_recompile(workfolder, arxiv_id_):
     patch_stray_closing_brace_after_cjk_sentence(trans_tex)
     patch_unclosed_textbf_reference_heads(trans_tex)
     patch_inline_math_delimiter_artifacts(trans_tex)
-    patch_common_command_cjk_glue(trans_tex)
     patch_bare_citation_commands(trans_tex)
     patch_declaration_command_cjk_glue(trans_tex)
     patch_spurious_cjk_command_escapes(trans_tex)

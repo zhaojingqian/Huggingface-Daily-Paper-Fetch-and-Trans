@@ -173,6 +173,8 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "separate_builtin_layout_commands_from_cjk",
             "patch_bbding_symbol_fallbacks",
             "patch_missing_custom_macro_definitions",
+            "repair_common_text_command_typos",
+            "repair_malformed_proof_headings",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
@@ -181,6 +183,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
     "compile.numeric_syntax": {
         "patches": (
             "patch_tcolorbox_opening_options",
+            "restore_malformed_environment_opening_options",
             "patch_numeric_argument",
             "patch_enumitem_for_optional_lists",
             "patch_local_tex_microtype_loads",
@@ -219,7 +222,10 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "note": "确认容器内存、Swap 和超时，再用资源友好的编译参数重试。",
     },
     "compile.pdftex_primitive": {
-        "patches": ("patch_pdftex_primitives_for_xelatex",),
+        "patches": (
+            "patch_pdftex_primitives_for_xelatex",
+            "add_pdfmatch_noop_for_xelatex",
+        ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
         "note": "为 XeLaTeX 不支持的 pdfTeX 原语加 engine guard。",
@@ -309,6 +315,11 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "preserve_citations_after_urls",
             "protect_email_href_catalogs",
             "protect_name_catalogs_with_conjunctions",
+            "protect_inline_source_directives",
+            "protect_code_like_environment_fragments",
+            "protect_structural_input_commands",
+            "protect_marked_acronym_expansions",
+            "aggregate_layout_option_lists",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",

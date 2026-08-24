@@ -1130,6 +1130,12 @@ Language: Chinese
         self.assertFalse(filters.llm_translation_response_untranslated(math, math))
         self.assertFalse(filters.llm_translation_response_untranslated(command, command))
 
+    def test_custom_input_command_with_path_is_structural(self):
+        source = r"\inputwithdeltacolors{tables/ablation_tables}"
+
+        self.assertTrue(filters.is_structural_input_command_fragment(source))
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+
     def test_grader_prompt_and_question_preamble_are_source_data(self):
         grader = (
             "You are a strict grader. Below you are given the problem, the student's "
@@ -1139,6 +1145,48 @@ Language: Chinese
         self.assertTrue(filters.is_inline_prompt_source_data_block(grader))
         self.assertTrue(filters.is_inline_prompt_source_data_block(preamble))
         self.assertFalse(filters.llm_translation_response_untranslated(grader, grader))
+
+    def test_inline_template_directive_lines_are_structural(self):
+        for source in (
+            "Fill the exact template containing Answer, Conclusion, and Future Outlook fields.",
+            "Exclude every word in the supplied forbidden list.",
+            "End with the exact supplied phrase and place nothing after it.",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(filters.is_inline_prompt_source_data_block(source))
+                self.assertFalse(
+                    filters.llm_translation_response_untranslated(source, source)
+                )
+
+    def test_code_inside_latex_box_is_structural(self):
+        source = (
+            r"\begin{componentbox}{Dynamic Branching on Outcome ($g$)} "
+            r"class BranchOnOutcome(Link): "
+            r"def modify_transition(self, state): return state "
+            r"\end{componentbox}"
+        )
+        continuation = (
+            'stdout = "bash: pytest: command not found\\n" '
+            "return EnvResponse(observation=Observation(text=stdout, "
+            "data=raw_response.observation.data), reward=raw_response.reward)"
+        )
+
+        for fragment in (source, continuation):
+            with self.subTest(fragment=fragment):
+                self.assertTrue(filters.is_structural_command_data_fragment(fragment))
+                self.assertFalse(
+                    filters.llm_translation_response_untranslated(fragment, fragment)
+                )
+
+    def test_marked_acronym_expansion_is_not_mixed_prose(self):
+        source = (
+            r"\textbf{MileGPO} (\underline{M}ilestone "
+            r"\underline{I}nference \underline{L}earning "
+            r"\underline{E}valuation)"
+        )
+
+        self.assertEqual(filters.mixed_untranslated_english_clauses(source), [])
+        self.assertFalse(filters.llm_translation_response_untranslated(source, source))
 
     def test_multiline_verbatim_input_stays_one_structural_unit(self):
         lines = (
@@ -1263,6 +1311,19 @@ Language: Chinese
         self.assertFalse(filters.is_latex_key_value_option_list(prose))
         self.assertTrue(
             filters.llm_translation_response_untranslated(prose, prose)
+        )
+
+    def test_tcolorbox_layout_option_tail_with_nested_shifts_is_structural(self):
+        options = (
+            "center, arc=0mm, boxrule=1pt, colback=blue!6!white, "
+            "colframe=black, colbacktitle=black, "
+            "attach boxed title to top left={yshift=-0.1in,xshift=0.15in}, "
+            "boxed title style={boxrule=0pt}"
+        )
+
+        self.assertTrue(filters.is_latex_key_value_option_list(options))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(options, options)
         )
 
     def test_detached_style_option_tail_is_structural(self):
@@ -1931,17 +1992,37 @@ Language: Chinese
             r"\noindentThis paragraph is retained." "\n"
             r"\smallskipNext paragraph." "\n"
             r"\par在我们的情形中，结论成立。" "\n"
+            r"\small随着规模增加，误差下降。" "\n"
             r"\parTherefore\par"
         )
 
         fixed, count = filters.separate_builtin_layout_ascii_glue(text)
 
-        self.assertEqual(count, 5)
+        self.assertEqual(count, 6)
         self.assertIn(r"\par From (A)-(C)", fixed)
         self.assertIn(r"\noindent This paragraph", fixed)
         self.assertIn(r"\smallskip Next paragraph", fixed)
         self.assertIn(r"\par 在我们的情形中", fixed)
+        self.assertIn(r"\small 随着规模", fixed)
         self.assertIn(r"\par Therefore\par", fixed)
+
+    def test_common_text_command_typos_are_repaired(self):
+        fixed, count = filters.repair_common_text_command_typos(
+            r"\texbf {重点} \texit{斜体} \texbfCustom{keep}"
+        )
+
+        self.assertEqual(count, 2)
+        self.assertIn(r"\textbf {重点}", fixed)
+        self.assertIn(r"\textit{斜体}", fixed)
+        self.assertIn(r"\texbfCustom{keep}", fixed)
+
+    def test_malformed_proof_heading_command_is_repaired(self):
+        fixed, count = filters.repair_malformed_proof_headings(
+            r"\begin{proof}[\proof of \ref{lem:x}]正文\end{proof}"
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\begin{proof}[Proof of \ref{lem:x}]", fixed)
 
     def test_builtin_layout_ascii_glue_preserves_real_or_ambiguous_commands(self):
         text = (
@@ -2364,6 +2445,24 @@ Language: Chinese
         self.assertIn("boxsep=1.5mm, attach boxed title to top left", fixed)
         self.assertIn("正文", fixed)
 
+    def test_restore_malformed_tcolorbox_options_before_nested_environment(self):
+        original = (
+            r"\begin{tcolorbox}[title={Prompt}, colframe=black]"
+            r"\begin{lstlisting}body\end{lstlisting}\end{tcolorbox}"
+        )
+        translated = (
+            r"\begin{tcolorbox}[title={提示}, colframe=black"
+            r"\begin{lstlisting}body\end{lstlisting}\end{tcolorbox}"
+        )
+
+        fixed, count = filters.restore_environment_opening_options(
+            translated, original, "tcolorbox"
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"[title={Prompt}, colframe=black]", fixed)
+        self.assertIn(r"\begin{lstlisting}body", fixed)
+
     def test_remove_unmatched_tcolorbox_ending(self):
         text = (
             r"\begin{tcolorbox}外层"
@@ -2631,6 +2730,21 @@ Language: Chinese
         self.assertEqual(count, 1)
         self.assertIn(r"\providecommand{\xspace}{}", fixed)
         self.assertLess(fixed.index(r"\providecommand{\xspace}"), fixed.index(r"\newcommand{\model}"))
+
+    def test_add_xelatex_compatibility_fallbacks_for_pdfmatch(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\newcommand{\tabletextbf}[1]{\ifnum\pdfmatch{regex}{#1}>0 #1\fi}" "\n"
+            r"\begin{document}" "\n"
+            r"\tabletextbf{Model}" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+
+        self.assertEqual(count, 1)
+        self.assertIn(r"\providecommand{\pdfmatch}[2]{0}", fixed)
+        self.assertLess(fixed.index(r"\providecommand{\pdfmatch}"), fixed.index(r"\begin{document}"))
 
     def test_add_xelatex_compatibility_fallbacks_for_abscontent(self):
         text = (

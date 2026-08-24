@@ -26,7 +26,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-16-v64-name-catalogs"
+    "paper-trans-splitter-2026-08-24-v65-code-data"
 )
 
 
