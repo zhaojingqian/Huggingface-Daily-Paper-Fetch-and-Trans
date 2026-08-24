@@ -24,6 +24,7 @@ from failure_taxonomy import classify_failure
 from paperhub.json_io import write_json_atomic
 from paperhub.paper_store import pdf_file_valid
 from paperhub.publication_lock import paper_publication_lock
+from paperhub.translation_bundle import missing_support_files, support_files
 from paperhub.translation_policy import bounded_int
 from paperhub.paths import (
     ROOT_DIR as BASE_DIR,
@@ -35,16 +36,7 @@ from paperhub.paths import (
 
 CONTAINER_NAME = gpt_academic_container()
 DRIVER_SCRIPT   = os.path.join(BASE_DIR, "full_translate_driver.py")
-DRIVER_SUPPORT_FILES = [
-    DRIVER_SCRIPT,
-    os.path.join(BASE_DIR, "latex_translation_filters.py"),
-    os.path.join(BASE_DIR, "paperhub", "translation_policy.py"),
-    os.path.join(BASE_DIR, "paperhub", "latex_pipeline.py"),
-    os.path.join(BASE_DIR, "paperhub", "translation_runtime.py"),
-    os.path.join(BASE_DIR, "failure_taxonomy.py"),
-    os.path.join(BASE_DIR, "paperhub", "translation_quality.py"),
-    os.path.join(BASE_DIR, "paperhub", "residual_translation.py"),
-]
+DRIVER_SUPPORT_FILES = support_files(BASE_DIR)
 # 容器内 gpt_log/arxiv_cache 对应的绝对路径
 CONTAINER_CACHE = "/gpt/gpt_log/arxiv_cache"
 # 宿主机侧 tex 备份目录（容器重启后可从这里恢复翻译缓存，避免重复调 GPT）
@@ -658,6 +650,14 @@ def check_container():
 
 def copy_driver_to_container():
     """将驱动脚本及其纯 Python 支持模块复制进容器"""
+    missing = missing_support_files(DRIVER_SUPPORT_FILES)
+    if missing:
+        print(
+            "❌ 容器驱动 bundle 缺少文件: "
+            + ", ".join(os.path.relpath(path, BASE_DIR) for path in missing),
+            flush=True,
+        )
+        return False
     copied = []
     for src in DRIVER_SUPPORT_FILES:
         name = os.path.basename(src)
