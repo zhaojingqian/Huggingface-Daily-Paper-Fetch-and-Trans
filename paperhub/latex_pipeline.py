@@ -13,6 +13,10 @@ import glob
 import shutil
 
 import latex_translation_filters as _ltf
+try:
+    from latex_compile import command_sequence, run_sequence
+except ImportError:
+    from paperhub.latex_compile import command_sequence, run_sequence
 
 try:
     from translation_quality import (
@@ -2265,69 +2269,27 @@ def patch_and_recompile(workfolder, arxiv_id_):
     # so a restored ``\中文`` artifact cannot survive into the final pass.
     patch_spurious_cjk_command_escapes(trans_tex)
 
-    def _latex_cmds(engine, has_bbl):
-        if engine == 'xelatex':
-            engine_cmd = [
-                engine, '-no-shell-escape', '-no-pdf',
-                '-interaction=nonstopmode', '-file-line-error',
-                'merge_translate_zh.tex',
-            ]
-        else:
-            engine_cmd = [
-                engine, '-no-shell-escape',
-                '-interaction=nonstopmode', '-file-line-error',
-                'merge_translate_zh.tex',
-            ]
-        if has_bbl:
-            return [engine_cmd, engine_cmd, engine_cmd, engine_cmd]
-        return [
-            engine_cmd,
-            ['bibtex', 'merge_translate_zh'],
-            engine_cmd,
-            engine_cmd,
-            engine_cmd,
-        ]
-
-    def _run_latex_cmds(cmds):
-        segfault = False
-        is_xelatex = False
-        for idx, cmd in enumerate(cmds):
-            r = _sp.run(
-                cmd, cwd=workfolder, timeout=900,
-                stdout=_sp.DEVNULL, stderr=_sp.PIPE,
-                env=_restricted_tex_env(),
-            )
-            if cmd[0] == 'xelatex':
-                is_xelatex = True
-            if cmd[0] in ('xelatex', 'lualatex') and idx < len(cmds) - 1:
-                sanitize_latex_aux_file(workfolder)
-            stderr = (r.stderr or b'').decode('utf-8', errors='replace')
-            if r.returncode >= 128 or 'Segmentation fault' in stderr:
-                segfault = True
-                break
-
-        if not segfault and is_xelatex:
-            print("[driver] 🛠️  运行 xdvipdfmx 转换 DVI 为 PDF (zlib compression level = 3)", flush=True)
-            r_pdf = _sp.run(
-                ['xdvipdfmx', '-z', '3', 'merge_translate_zh.xdv'],
-                cwd=workfolder, timeout=900,
-                stdout=_sp.DEVNULL, stderr=_sp.PIPE,
-            )
-            stderr_pdf = (r_pdf.stderr or b'').decode('utf-8', errors='replace')
-            if r_pdf.returncode != 0 or 'Segmentation fault' in stderr_pdf:
-                print(f"[driver] ❌ xdvipdfmx 运行失败: returncode={r_pdf.returncode}, stderr={stderr_pdf[:200]}", flush=True)
-                segfault = True
-        return segfault
-
     try:
-        segfault = _run_latex_cmds(_latex_cmds('xelatex', synthesized_bbl))
+        segfault = run_sequence(
+            workfolder,
+            command_sequence("xelatex", synthesized_bbl),
+            _restricted_tex_env(),
+            sanitize_latex_aux_file,
+            runner=_sp.run,
+        )
         if segfault:
             print("[driver] ⚠️  xelatex 触发 segfault，切换 lualatex 重编译", flush=True)
             clean_latex_intermediates(workfolder)
             synthesized_bbl = synthesize_bbl_from_tex(workfolder, trans_tex)
             if synthesized_bbl:
                 patch_bibliography_to_generated_bbl(workfolder, trans_tex)
-            _run_latex_cmds(_latex_cmds('lualatex', synthesized_bbl))
+            run_sequence(
+                workfolder,
+                command_sequence("lualatex", synthesized_bbl),
+                _restricted_tex_env(),
+                sanitize_latex_aux_file,
+                runner=_sp.run,
+            )
     except Exception as e:
         print(f"[driver] ⚠️  LaTeX/BibTeX 执行异常: {e}", flush=True)
         return None
