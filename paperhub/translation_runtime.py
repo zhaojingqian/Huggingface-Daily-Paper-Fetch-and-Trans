@@ -26,7 +26,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-24-v65-code-data"
+    "paper-trans-splitter-2026-08-28-v70-editorial-boundary"
 )
 
 
@@ -203,6 +203,8 @@ def _patch_latex_translation_splitter():
             or _ltf.is_structural_command_data_fragment(stripped)
             or _ltf.is_graphics_path_fragment(stripped)
             or _ltf.is_formatting_label_fragment(stripped)
+            or _ltf.is_tikz_drawing_fragment(stripped)
+            or _ltf.is_tikz_style_definition_fragment(stripped)
             or _ltf.is_unbalanced_latex_fragment(stripped)
         ):
             return False
@@ -436,6 +438,40 @@ def _patch_latex_translation_splitter():
             begins = _re.findall(r"\\begin\{([^}]+)\}", line)
             ends = _re.findall(r"\\end\{([^}]+)\}", line)
             structural_line = any(_env_is_tracked(env) for env in begins + ends)
+
+            # Review annotations combine a command-owned name list with a
+            # visible natural-language action. Split that one typed boundary
+            # before the generic prose policy so the action is translated and
+            # the command/owner syntax remains byte-for-byte stable.
+            editorial = (
+                _ltf.split_editorial_macro_prose(line)
+                if state["in_document"]
+                and not hard_active
+                and not structural_line
+                and not inline_source_data
+                and not structural_input_data
+                else None
+            )
+            if editorial:
+                prefix, prose, suffix = editorial
+                _append(nodes, prefix, True, merge=False)
+                _append_translatable_fragment(
+                    nodes,
+                    prose,
+                    min_letters=8,
+                    min_words=2,
+                )
+                # ``suffix`` starts at the second argument's closing brace;
+                # only the text after that delimiter may be ordinary prose.
+                _append(nodes, suffix[:1], True, merge=False)
+                tail = suffix[1:]
+                if tail and _line_has_translatable_prose(tail):
+                    for part in _split_long_transform_line(tail):
+                        _append(nodes, part, False, merge=False)
+                else:
+                    _append(nodes, tail, True, merge=False)
+                state["env_stack"] = _update_env_stack(line, state["env_stack"])
+                continue
 
             if (
                 state["in_document"]
@@ -1015,12 +1051,23 @@ def _patch_latex_llm_rate_limit_handling():
                 adaptive = [
                     index
                     for index in remaining
-                    if invalid_reasons.get(index) in {
-                        "critical_latex_structure_mismatch",
-                        "citation_structure_mismatch",
-                        "latex_brace_balance_mismatch",
-                    }
-                    and len(validation_sources[index]) > 480
+                    if len(validation_sources[index]) > 480
+                    and (
+                        invalid_reasons.get(index) in {
+                            "critical_latex_structure_mismatch",
+                            "citation_structure_mismatch",
+                            "latex_brace_balance_mismatch",
+                        }
+                        or (
+                            invalid_reasons.get(index) == "request_or_untranslated"
+                            and not _ltf.is_inline_prompt_source_data_block(
+                                validation_sources[index]
+                            )
+                            and not _ltf.is_structural_command_data_fragment(
+                                validation_sources[index]
+                            )
+                        )
+                    )
                 ]
                 adaptive_groups = []
                 adaptive_inputs = []

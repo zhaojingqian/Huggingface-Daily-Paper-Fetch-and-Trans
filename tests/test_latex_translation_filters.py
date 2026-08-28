@@ -154,6 +154,93 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertFalse(filters.llm_translation_response_untranslated(fragment, fragment))
         self.assertEqual(filters.llm_translation_response_invalid(fragment, fragment), "")
 
+    def test_structural_appendix_entry_is_not_sent_to_translation(self):
+        fragment = r"\appsubentry{F.1}{Gym--MuJoCo}{app:results-mujoco}"
+
+        self.assertTrue(filters.is_structural_command_data_fragment(fragment))
+        self.assertFalse(filters.llm_translation_response_untranslated(fragment, fragment))
+
+    def test_structural_custom_box_and_tikz_path_are_not_sent_to_translation(self):
+        box = r"\vbvrPairBox[title=\textbf{Overlap}]{Green}{GreenLight}{maze_square}{\textsc{maze\_square}}"
+        path = r"arc[start angle=90, end angle=\stopangle, radius=\r] -- cycle;"
+
+        self.assertTrue(filters.is_structural_command_data_fragment(box))
+        self.assertTrue(filters.is_tikz_drawing_fragment(path))
+
+    def test_fontspec_declaration_is_configuration_not_prose(self):
+        declaration = (
+            r"\newfontfamily\casemonoface{lmmonolt10-regular.otf}"
+            r"[BoldFont=lmmonolt10-bold.otf]"
+        )
+
+        self.assertTrue(filters.is_latex_configuration_command_fragment(declaration))
+        self.assertTrue(filters.is_structural_command_data_fragment(declaration))
+        self.assertFalse(filters.llm_translation_response_untranslated(declaration, declaration))
+
+    def test_choice_placeholder_row_is_source_data(self):
+        row = r"A. \{option\_a\} / B. \{option\_b\} / C. \{option\_c\} / D. \{option\_d\} \newline"
+
+        self.assertTrue(filters.is_structural_command_data_fragment(row))
+        self.assertFalse(filters.llm_translation_response_untranslated(row, row))
+
+    def test_image_output_instruction_is_source_data(self):
+        instruction = (
+            "Please output only the text content from the image without any "
+            "additional descriptions or formatting."
+        )
+
+        self.assertTrue(filters.is_inline_prompt_source_data_block(instruction))
+        self.assertFalse(filters.llm_translation_response_untranslated(instruction, instruction))
+
+    def test_answer_format_instruction_is_source_data_regardless_of_marker_order(self):
+        instruction = (
+            r"Think step by step before answering. Add ``Answer: \{Your final "
+            r"answer\}'' at the end of your reply."
+        )
+
+        self.assertTrue(filters.is_inline_prompt_source_data_block(instruction))
+        self.assertFalse(filters.llm_translation_response_untranslated(instruction, instruction))
+
+    def test_choice_answer_directives_are_source_data(self):
+        directives = (
+            "Please select the correct answer from the options above.",
+            "Answer with the option's letter from the given choices directly.",
+        )
+
+        for directive in directives:
+            with self.subTest(directive=directive):
+                self.assertTrue(filters.is_inline_prompt_source_data_block(directive))
+                self.assertFalse(filters.llm_translation_response_untranslated(directive, directive))
+
+    def test_placeholder_coordinate_directive_is_source_data(self):
+        directive = (
+            r"Please provide the bounding box coordinate of the region this "
+            r"sentence describes: <ref>\{sentence\}</ref>"
+        )
+
+        self.assertTrue(filters.is_inline_prompt_source_data_block(directive))
+        self.assertFalse(filters.llm_translation_response_untranslated(directive, directive))
+
+    def test_editorial_macro_splits_action_from_owner_metadata(self):
+        source = (
+            r"\ownercheck{Chris, Liangcai SU}{Rewrite and approve the core "
+            r"insights.} Remaining paper prose."
+        )
+
+        self.assertEqual(
+            filters.split_editorial_macro_prose(source),
+            (
+                r"\ownercheck{Chris, Liangcai SU}{",
+                "Rewrite and approve the core insights.",
+                "} Remaining paper prose.",
+            ),
+        )
+
+    def test_editorial_macro_inside_prose_is_not_silently_preserved(self):
+        source = "See the note: " + r"\ownercheck{Chris}{Review this section.}"
+
+        self.assertIsNone(filters.split_editorial_macro_prose(source))
+
     def test_structural_command_data_does_not_hide_sentence(self):
         sentence = r"The \hfds{dataset} command loads the training data."
 
@@ -2830,6 +2917,22 @@ Language: Chinese
         self.assertIn(r"\providecommand{\toprule}{\hline}", fixed)
         self.assertIn(r"\providecommand{\multirow}[4][]{#4}", fixed)
         self.assertNotIn(r"\cmidrule", fixed)
+
+    def test_adds_textcomp_symbol_fallbacks(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\begin{document}安全\textendash效用与\textemdash边界。" "\n"
+            r"\end{document}"
+        )
+
+        fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
+        again, second_count = filters.add_xelatex_compatibility_fallbacks(fixed)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(second_count, 0)
+        self.assertEqual(again, fixed)
+        self.assertIn(r"\providecommand{\textendash}{--}", fixed)
+        self.assertIn(r"\providecommand{\textemdash}{---}", fixed)
 
     def test_add_xelatex_compatibility_fallbacks_for_bbding_symbols(self):
         text = (

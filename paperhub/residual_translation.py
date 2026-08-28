@@ -46,18 +46,23 @@ def candidate_line_numbers(
 def terminal_repair_eligible(
     report: Dict[str, object], max_lines: int = DEFAULT_MAX_LINES
 ) -> bool:
-    """Limit targeted repair to high-coverage, small-residual translations."""
+    """Limit targeted repair to high-coverage, small-residual translations.
+
+    Several clauses can share one TeX line (notably ``itemize`` entries).  The
+    repair call already replaces a whole line, so eligibility is bounded by
+    unique affected lines rather than counting every detector window.
+    """
     if report.get("ok", True):
         return False
     cjk_pct = float(report.get("cjk_pct_exact", report.get("cjk_pct", 0.0)))
     long_lines = int(report.get("long_english_lines", 0))
-    mixed_clauses = int(report.get("mixed_english_clause_count", 0))
     lines = candidate_line_numbers(report, max_lines=max_lines + 1)
+    mixed_lines = int(report.get("mixed_english_clause_lines", 0))
+    residual_lines = max(len(lines), mixed_lines, long_lines)
     return (
         cjk_pct >= 60.0
         and long_lines <= 8
-        and 0 < mixed_clauses + long_lines <= max_lines
-        and 0 < len(lines) <= max_lines
+        and 0 < residual_lines <= max_lines
     )
 
 

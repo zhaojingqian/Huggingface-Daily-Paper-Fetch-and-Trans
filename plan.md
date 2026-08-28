@@ -58,7 +58,7 @@ full_translate_driver.py (591 lines: lifecycle + diagnostics)
     ├─ latex_runtime.py (container monkey patches)
     ├─ latex_compile.py (restricted TeX command runner)
     └─ latex_pipeline.py (TeX repair + publication gates + compile fallback)
-    ↓ chunk v65 policy + structural guards + shared quality gate
+    ↓ chunk v70 policy + structural guards + shared quality gate
     ↓
 data/papers/<arxiv_id>_zh.pdf
     ↓ PDF header + EOF gate / quality taint
@@ -210,6 +210,8 @@ curl -k -I https://zzzgry.top/paper/weekly/2026-W22/papers/2605.23904
 - [x] 将模型序列化残留、字体族、engine driver、环境失配、TikZ matrix 图例和重复宏首字母归入稳定 taxonomy，并为每类登记通用 patch。
 - [x] 摘要翻译兼容 OpenAI-compatible 多形态 content、截断/非法反斜杠 JSON，并可从已成功中文 TeX 回填缺失字段。
 - [x] 针对 `quality.untranslated_prose` 增加 chunk 级失败响应验证与局部重试；首轮 50 路，失败槽使用最多 16 路有界并发，仍失败则拒绝半成品缓存。
+- [x] 将 raw TikZ path、fontspec 配置、appendix/custom-box 命令和评测占位指令纳入共享结构边界；`*check` 审阅宏按参数拆分，避免命令元数据与正文互相污染。
+- [x] 长的真实漏译 chunk 只在失败槽内按句边界自适应细分，保持首轮请求数量不变并复用有效恢复账本。
 - [x] chunk v45 取消 citation/ref 密集正文的预切碎；普通正文上限 2400 字符，结构/引用密集片段自动降为 1900/1500，仅对结构门禁真正失败的 slot 自适应细分。
 - [x] 为高覆盖 TeX 增加最多 12 行的末端残留定向重译；逐行结构校验和质量
   分数提交，`2607.23782` 已从 3 个混合英文 clause 降至 0 并真实发布。

@@ -37,6 +37,18 @@ class ResidualTranslationTests(unittest.TestCase):
         self.assertFalse(terminal_repair_eligible({**report, "cjk_pct_exact": 40}))
         self.assertFalse(terminal_repair_eligible({**report, "ok": True}))
 
+    def test_many_clauses_on_few_lines_remain_targeted(self):
+        report = {
+            "ok": False,
+            "cjk_pct": 81.0,
+            "long_english_lines": 3,
+            "mixed_english_clause_count": 17,
+            "mixed_english_clause_lines": 5,
+            "samples": [{"line": line} for line in (401, 403, 405)],
+        }
+
+        self.assertTrue(terminal_repair_eligible(report))
+
     def test_normalize_removes_only_exact_outer_fence(self):
         self.assertEqual(
             normalize_residual_response("```latex\n\\item 中文\n```"),

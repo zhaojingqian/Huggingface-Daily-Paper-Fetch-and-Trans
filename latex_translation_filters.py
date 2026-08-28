@@ -1307,6 +1307,11 @@ SINGLE_LINE_FORMAT_DIRECTIVE_RE = re.compile(
     r"|do\s+not\s+mention\s+being\s+given\s+(?:oracle\s+labels|confusers|hints|internal\s+guidance)\b"
     r"|you\s+are\s+a\s+strict\s+grader\b(?=.*\b(?:student's\s+answer|reference\s+answer)\b)"
     r"|the\s+question\s+prompt\s+is\s+structured\s+as\s+follows\b"
+    r"|please\s+output\s+only\s+the\s+(?:text(?:\s+content)?|content)\s+from\s+the\s+"
+    r"(?:image|figure|input)\b"
+    r"|(?:please\s+)?(?:select|choose|pick)\s+(?:the\s+)?"
+    r"(?:correct|best)\s+answer\b"
+    r"|answer\s+with\s+(?:the\s+)?option(?:'s)?\s+letter\b"
     r"|your\s+final\s+output\s+must\s+be\s+\\emph\{strictly\}\s+one\s+of\s+the\s+following\s*:"
     r"|\\textbf\{(?:for|if|when)\s+(?:safe|unsafe|harmful|benign)\s+trajectories\s*:"
     r")"
@@ -1321,6 +1326,17 @@ SINGLE_LINE_SOURCE_DATA_DIRECTIVE_RE = re.compile(
     r"(?=.*\b(?:template|format|phrase|fields?|list)\b)"
     r")"
 )
+SINGLE_LINE_ANSWER_FORMAT_RE = re.compile(
+    r"(?i)^\s*(?=.*\banswer\s*:?)"
+    r"(?=.*\b(?:last\s+line|end\s+(?:your\s+)?(?:reply|response)|"
+    r"at\s+the\s+end)\b).*"
+)
+SINGLE_LINE_PLACEHOLDER_DIRECTIVE_RE = re.compile(
+    r"(?i)^\s*(?:please|kindly|think|answer|provide|output|return|"
+    r"add|select|choose|pick)\b"
+    r"(?=.*(?:<\s*[a-z][a-z0-9_-]*\s*>|"
+    r"\\\{[A-Za-z][A-Za-z0-9_\\-]*\\\}))"
+)
 
 
 def _is_single_line_source_instruction(value: str) -> bool:
@@ -1328,6 +1344,8 @@ def _is_single_line_source_instruction(value: str) -> bool:
         SINGLE_LINE_OUTPUT_INSTRUCTION_RE.search(value or "")
         or SINGLE_LINE_FORMAT_DIRECTIVE_RE.search(value or "")
         or SINGLE_LINE_SOURCE_DATA_DIRECTIVE_RE.search(value or "")
+        or SINGLE_LINE_ANSWER_FORMAT_RE.search(value or "")
+        or SINGLE_LINE_PLACEHOLDER_DIRECTIVE_RE.search(value or "")
     )
 
 
@@ -1651,6 +1669,11 @@ _LATEX_CONFIGURATION_COMMANDS = frozenset({
     "setcounter", "addtocounter", "hypersetup", "captionsetup",
     "pgfkeys", "tikzset", "lstset", "geometry",
 })
+_FONT_DEFINITION_COMMAND_RE = re.compile(
+    r"\A\s*\\(?:newfontfamily|newfontface|setmainfont|setsansfont|"
+    r"setmonofont|setromanfont|setmathfont|defaultfontfeatures|fontspec)\b",
+    re.IGNORECASE,
+)
 _LATEX_CONFIGURATION_COMMAND_RE = re.compile(
     r"\A\s*\\(?P<name>[A-Za-z@]+)\*?"
     r"(?:\s*\[[^\]]*\])*\s*\{(?P<body>.*)\}\s*\Z",
@@ -1666,6 +1689,17 @@ def is_latex_configuration_command_fragment(text: str) -> bool:
     contribute many English-looking words to a line-level heuristic.
     """
     value = extract_translation_fragment(text or "").strip()
+    # fontspec declarations use a control-sequence argument between the
+    # command and its font name (``\\newfontfamily\\codefont{...}[...]``),
+    # so they do not fit the generic key/value command grammar below.  They
+    # are preamble configuration, never natural-language paper prose.
+    if (
+        _FONT_DEFINITION_COMMAND_RE.match(value)
+        and _unescaped_brace_balance(value) == 0
+        and ("{" in value or "[" in value)
+        and not re.search(r"[!?。！？]", value)
+    ):
+        return True
     match = _LATEX_CONFIGURATION_COMMAND_RE.fullmatch(value)
     if not match or match.group("name").lower() not in _LATEX_CONFIGURATION_COMMANDS:
         return False
@@ -2091,16 +2125,20 @@ def is_tikz_drawing_fragment(text: str) -> bool:
         value,
     )
     lowered = value.lower()
+    raw_path = bool(
+        re.search(r"(?i)(?:^|\s)(?:arc|plot)\s*\[[^\]\n]+\]", value)
+        and re.search(r"(?i)--\s*cycle\b", value)
+    )
     return bool(
-        commands
-        and (
+        (commands and (
             "path picture bounding box" in lowered
             or (
                 len(commands) >= 2
                 and "rectangle" in lowered
                 and "shift=" in lowered
             )
-        )
+        ))
+        or raw_path
     )
 
 
@@ -2504,6 +2542,59 @@ def is_tool_call_result_fragment(text: str) -> bool:
     )
 
 
+_EDITORIAL_MACRO_RE = re.compile(
+    r"\\(?P<name>[A-Za-z@]*check)\*?\s*\{",
+    re.IGNORECASE,
+)
+_EDITORIAL_ACTION_RE = re.compile(
+    r"(?i)\b(?:approve|check|confirm|review|rewrite|validate|verify)\b"
+)
+
+
+def split_editorial_macro_prose(text: str):
+    r"""Split an editorial ``*check`` macro from its prose action argument.
+
+    Internal review annotations such as ``\\ownercheck{Alice}{Rewrite and
+    approve the introduction.}`` are command syntax plus a human instruction.
+    Sending the complete macro to the model makes it preserve the instruction
+    verbatim; preserving the first argument and translating only the second
+    keeps both the macro contract and the visible language correct.  Return
+    ``(prefix, prose, suffix)`` or ``None`` when the shape is not unambiguous.
+    """
+    value = str(text or "")
+    match = _EDITORIAL_MACRO_RE.search(value)
+    if not match:
+        return None
+    # Only split a line-owned annotation. If ordinary prose precedes the
+    # macro, preserving the prefix while translating one nested argument
+    # would silently leave that prose untranslated.
+    if value[:match.start()].strip():
+        return None
+    first_open = match.end() - 1
+    first_close = _matching_unescaped_brace(value, first_open)
+    if first_close < 0:
+        return None
+    second_open = first_close + 1
+    while second_open < len(value) and value[second_open].isspace():
+        second_open += 1
+    if second_open >= len(value) or value[second_open] != "{":
+        return None
+    second_close = _matching_unescaped_brace(value, second_open)
+    if second_close < 0:
+        return None
+    prose = value[second_open + 1:second_close]
+    probe = latex_prose_probe(prose)
+    words = re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", probe)
+    if (
+        len(words) < 2
+        or len(probe) < 10
+        or not _EDITORIAL_ACTION_RE.search(probe)
+        or re.search(r"[\n\r]", prose)
+    ):
+        return None
+    return value[:second_open + 1], prose, value[second_close:]
+
+
 def _is_code_like_environment_fragment(value: str) -> bool:
     """Recognize a short LaTeX box that embeds executable-looking code.
 
@@ -2552,6 +2643,44 @@ def is_structural_command_data_fragment(text: str) -> bool:
         return False
     if is_latex_configuration_command_fragment(value):
         return True
+    # Multiple-choice templates are source data, not prose.  The upstream
+    # splitter can detach this compact placeholder row from the surrounding
+    # prompt and otherwise send it to the LLM, which either echoes it or
+    # answers the (missing) question.  Require repeated choice labels and
+    # escaped placeholders so ordinary ``A. ...`` sentences remain eligible.
+    choice_labels = re.findall(r"(?<![A-Za-z0-9])(?:[A-H])\.\s*", value)
+    placeholders = re.findall(
+        r"\\\{[A-Za-z][A-Za-z0-9_\\-]*\\\}",
+        value,
+    )
+    choice_probe = re.sub(r"(?<![A-Za-z0-9])[A-H]\.\s*", " ", value)
+    if (
+        len(choice_labels) >= 2
+        and len(placeholders) >= 2
+        and (r"\newline" in value or r"\\" in value or "/" in value)
+        and not re.search(r"[!?。！？]", choice_probe)
+    ):
+        return True
+    custom_wrapper = re.match(r"^\s*\\([A-Za-z@]+)", value)
+    if (
+        custom_wrapper
+        and re.search(r"(?:Box|Entry|Label|Marker)$", custom_wrapper.group(1))
+        and _unescaped_brace_balance(value) == 0
+    ):
+        payload = re.sub(r"\\[A-Za-z@]+\*?(?:\[[^\]]*\])?", " ", value)
+        payload = re.sub(r"[{}\[\]]", " ", payload)
+        words = [
+            word.lower()
+            for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", payload)
+        ]
+        prose_glue = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for",
+            "from", "has", "have", "in", "is", "it", "of", "on", "or",
+            "that", "the", "this", "to", "use", "was", "we", "were", "which",
+            "with",
+        }
+        if words and not any(word in prose_glue for word in words) and len(words) <= 16:
+            return True
     if (
         re.search(r"\\(?:emailtext|email)\b", value, flags=re.IGNORECASE)
         and re.search(r"@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value)
@@ -2603,7 +2732,8 @@ def is_structural_command_data_fragment(text: str) -> bool:
     opaque_commands = {
         "hfds", "dataset", "datasetpath", "repo", "repository", "path",
         "url", "nolinkurl", "href", "includegraphics", "lstinline",
-        "verb", "email", "emails", "handle", "tocauthor",
+        "verb", "email", "emails", "handle", "tocauthor", "appentry",
+        "appsubentry",
     }
     if not commands or not any(name.lower() in opaque_commands for name in commands):
         return False
@@ -3923,6 +4053,16 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         r"\textls" in source
         and not _latex_command_defined(source, "textls")
     )
+    text_symbol_fallbacks = (
+        ("textendash", "--"),
+        ("textemdash", "---"),
+        ("textminus", "-"),
+    )
+    missing_text_symbols = [
+        (name, replacement)
+        for name, replacement in text_symbol_fallbacks
+        if "\\" + name in source and not _latex_command_defined(source, name)
+    ]
     needs_abscontent_fallback = (
         r"\abscontent" in source
         and not _latex_command_defined(source, "abscontent")
@@ -4040,6 +4180,21 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
             r"\providecommand{\textls}[2][]{#2}",
         ])
         source, changed = insert_latex_preamble_snippet(source, insertion, ["textls"])
+        total += int(changed)
+
+    if missing_text_symbols:
+        insertion = "\n".join(
+            [r"% paper-trans fallback for missing textcomp symbols"]
+            + [
+                rf"\providecommand{{\{name}}}{{{replacement}}}"
+                for name, replacement in missing_text_symbols
+            ]
+        )
+        source, changed = insert_latex_preamble_snippet(
+            source,
+            insertion,
+            [name for name, _replacement in missing_text_symbols],
+        )
         total += int(changed)
 
     if needs_abscontent_fallback:
