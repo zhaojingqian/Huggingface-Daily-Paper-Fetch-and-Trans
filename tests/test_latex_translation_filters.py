@@ -1159,6 +1159,71 @@ Language: Chinese
             filters.llm_translation_response_untranslated(source, source)
         )
 
+    def test_detached_email_catalog_is_exempt_from_translation(self):
+        source = (
+            "gansiyuan@smail.nju.edu.cn, menglinjian@pjlab.org.cn, "
+            "boyanwang@nju.edu.cn"
+        )
+
+        self.assertTrue(filters.is_email_catalog_fragment(source))
+        self.assertTrue(filters.is_translation_exempt_fragment(source))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, source)
+        )
+
+    def test_email_mention_inside_normal_sentence_still_requires_translation(self):
+        source = "Please email gansiyuan@smail.nju.edu.cn for the full report."
+
+        self.assertFalse(filters.is_email_catalog_fragment(source))
+        self.assertFalse(filters.is_translation_exempt_fragment(source))
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(source, source)
+        )
+
+    def test_detached_identifier_catalog_is_exempt_but_sentence_is_not(self):
+        identifier = r"esmfold\_struct\_multi\_scale\_frame\_refinement\_v1"
+        sentence = (
+            r"We compare esmfold\_struct\_multi\_scale\_frame\_refinement\_v1 "
+            "with the baseline."
+        )
+
+        self.assertTrue(filters.is_identifier_catalog_fragment(identifier))
+        self.assertTrue(filters.is_translation_exempt_fragment(identifier))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(identifier, identifier)
+        )
+        self.assertFalse(filters.is_identifier_catalog_fragment(sentence))
+        self.assertFalse(filters.is_translation_exempt_fragment(sentence))
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(sentence, sentence)
+        )
+
+    def test_icml_affiliation_order_metadata_is_exempt(self):
+        source = (
+            r"\icmlsetaffiliationorder{ntu,ucb,ucsd,vbvr,utokyo,cuhk,umich}"
+        )
+
+        self.assertTrue(filters.is_latex_metadata_line(source))
+        self.assertTrue(filters.is_translation_exempt_fragment(source))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(source, source)
+        )
+
+    def test_benchmark_name_catalog_is_exempt_but_explanatory_list_is_not(self):
+        catalog = "Empty-8x8-v0, DoorKey-8x8-v0, FourRooms-v0, and LavaGapS7-v0"
+        prose = "We compare Empty-8x8-v0, DoorKey-8x8-v0, and report results."
+
+        self.assertTrue(filters.is_benchmark_name_catalog(catalog))
+        self.assertTrue(filters.is_translation_exempt_fragment(catalog))
+        self.assertFalse(
+            filters.llm_translation_response_untranslated(catalog, catalog)
+        )
+        self.assertFalse(filters.is_benchmark_name_catalog(prose))
+        self.assertFalse(filters.is_translation_exempt_fragment(prose))
+        self.assertTrue(
+            filters.llm_translation_response_untranslated(prose, prose)
+        )
+
     def test_person_name_catalog_accepts_natural_conjunction(self):
         source = (
             "Junliang Ye, Guocun Wang, Yansong Qu, Yang Li, "
@@ -1185,6 +1250,21 @@ Language: Chinese
             r"本节报告结果~\cite{invented2026}。",
         )
         self.assertNotIn(r"\cite{invented2026}", extra)
+
+    def test_normalize_restores_empty_citation_payload(self):
+        source = (
+            r"The Claude family includes Claude~\citep{Claude-Opus-5,"
+            r"Claude-Opus-4.6}."
+        )
+        response = r"Claude 家族包括 和 ~\citep{,}。"
+
+        normalized = filters.normalize_llm_translation_response(source, response)
+
+        self.assertIn(r"\citep{Claude-Opus-5,Claude-Opus-4.6}", normalized)
+        self.assertEqual(
+            filters.llm_translation_response_invalid(source, normalized),
+            "",
+        )
 
     def test_url_cleanup_preserves_citation_after_footnote_url(self):
         source = (
@@ -2435,6 +2515,29 @@ Language: Chinese
 
         self.assertEqual(count, 1)
         self.assertIn(r"\providecommand{\faGlobe}", fixed)
+
+    def test_fontawesome_fallback_ignores_dead_if_file_exists_branch(self):
+        text = (
+            r"\documentclass{article}" "\n"
+            r"\usepackage{fontawesome5}" "\n"
+            r"\IfFileExists{fontawesome5.sty}{\RequirePackage{fontawesome5}}{"
+            r"\newcommand{\faApple}{\textsf{iOS}}"
+            r"\newcommand{\faWindows}{\textsf{Win}}"
+            r"\newcommand{\faLinux}{\textsf{Linux}}}" "\n"
+            r"\newcommand{\links}{\faApple\ \faWindows\ \faLinux}" "\n"
+            r"\begin{document}\links\end{document}" "\n"
+        )
+
+        fixed, count = filters.add_fontawesome_legacy_aliases(text)
+
+        self.assertGreaterEqual(count, 3)
+        self.assertIn(r"\providecommand{\faApple}", fixed)
+        self.assertIn(r"\providecommand{\faWindows}", fixed)
+        self.assertIn(r"\providecommand{\faLinux}", fixed)
+        self.assertLess(
+            fixed.index(r"\usepackage{fontawesome5}"),
+            fixed.index("paper-trans fallback"),
+        )
 
     def test_fontawesome_fallback_precedes_local_input(self):
         text = (

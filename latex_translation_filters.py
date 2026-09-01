@@ -848,6 +848,53 @@ def normalize_llm_translation_response(source: str, response: str) -> str:
         ):
             response_value = corrected
 
+    # A common relay/model failure is an otherwise well-formed citation with
+    # an empty key list (``\\citep{,}`` or ``\\citep{}``). When the response
+    # contains the same citation commands in the same order, replace only
+    # those empty payloads with the exact source calls. The final signature
+    # must still match byte-for-byte, so this does not relax the gate.
+    source_citation_matches = list(CITATION_IDENTITY_RE.finditer(source_value))
+    response_citation_matches = list(CITATION_IDENTITY_RE.finditer(response_value))
+    if (
+        len(source_citation_matches) == len(response_citation_matches)
+        and source_citation_matches
+        and all(
+            (
+                source_match.group("command").lower(),
+                source_match.group("star") or "",
+                source_match.group("options"),
+            )
+            == (
+                response_match.group("command").lower(),
+                response_match.group("star") or "",
+                response_match.group("options"),
+            )
+            for source_match, response_match in zip(
+                source_citation_matches,
+                response_citation_matches,
+            )
+        )
+    ):
+        restored = response_value
+        changed = False
+        for source_match, response_match in reversed(
+            list(zip(source_citation_matches, response_citation_matches))
+        ):
+            response_keys = response_match.group("keys")
+            if re.search(r"[A-Za-z0-9]", response_keys):
+                continue
+            restored = (
+                restored[:response_match.start()]
+                + source_match.group(0)
+                + restored[response_match.end():]
+            )
+            changed = True
+        if changed and _critical_latex_signature(restored) == (
+            source_commands,
+            source_citations,
+        ):
+            response_value = restored
+
     source_citation_payloads = Counter(CITATION_COMMAND_RE.findall(source_value))
     response_citation_payloads = Counter(CITATION_COMMAND_RE.findall(response_value))
     missing_citations = list(
@@ -2264,6 +2311,33 @@ def is_structured_identifier_path(text: str) -> bool:
     return bool(re.search(r"(?:\\_|[_+.-])", value))
 
 
+def is_identifier_catalog_fragment(text: str) -> bool:
+    r"""Recognize standalone escaped/raw identifier tokens.
+
+    Dataset and model handles often reach the splitter as a detached
+    ``snake_case`` token (for example ``esmfold\_struct\_...``). They are
+    opaque labels rather than English clauses, so preserving them avoids
+    needless model calls and echo-based quality failures. A surrounding
+    sentence remains eligible because whitespace or sentence punctuation
+    disqualifies the fragment.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value or len(value) > 500 or re.search(r"[.!?。！？:：]", value):
+        return False
+    parts = [
+        part.strip()
+        for part in re.split(r"\s*[,;，、]\s*", value)
+        if part.strip()
+    ]
+    if not parts:
+        return False
+    token_re = re.compile(
+        r"[A-Za-z][A-Za-z0-9]*(?:(?:\\_+|_)[A-Za-z0-9]+)+"
+        r"(?:[.-][A-Za-z0-9]+)*$"
+    )
+    return all(token_re.fullmatch(part) for part in parts)
+
+
 def is_person_name_catalog(text: str) -> bool:
     """Recognize a standalone comma-separated author/contributor list."""
     value = extract_translation_fragment(text or "").strip()
@@ -2304,6 +2378,79 @@ _CONTACT_METADATA_RE = re.compile(
 _EMAIL_ADDRESS_RE = re.compile(
     r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"
 )
+
+_OPAQUE_CATALOG_CONNECTORS = frozenset({
+    "and", "or", "via", "with",
+})
+
+
+def is_email_catalog_fragment(text: str) -> bool:
+    """Recognize a standalone list of e-mail addresses.
+
+    A splitter may detach an author block into only its addresses.  Those
+    identifiers must be preserved byte-for-byte; asking the model to translate
+    them produces an intentional source echo that the quality gate must not
+    treat as a failed prose translation.  Keep the predicate strict so a
+    sentence that merely mentions an address remains translatable.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value or len(value) > 500:
+        return False
+    matches = list(_EMAIL_ADDRESS_RE.finditer(value))
+    if not matches:
+        return False
+    residual = _EMAIL_ADDRESS_RE.sub(" ", value)
+    residual = re.sub(
+        r"\\(?:email|emails|emailtext|href|url|nolinkurl)\*?",
+        " ",
+        residual,
+        flags=re.IGNORECASE,
+    )
+    residual = re.sub(r"[{}\[\](),;，、:~\s]+", " ", residual)
+    words = [word.lower() for word in re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", residual)]
+    return not words or all(word in {"email", "emails", "address", "addresses"} for word in words)
+
+
+def is_benchmark_name_catalog(text: str) -> bool:
+    """Recognize a standalone comma-separated benchmark/name catalog.
+
+    Lists such as ``Empty-8x8-v0, DoorKey-8x8-v0, ...`` are labels, not
+    English clauses.  Require several items, no sentence punctuation, and a
+    strong identifier shape on each item so explanatory lists still reach the
+    translator.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value or len(value) > 500 or re.search(r"[.!?。！？:]", value):
+        return False
+    value = re.sub(r"\\(?:and|ampersand)\b", ",", value, flags=re.IGNORECASE)
+    value = re.sub(r",\s+(?:and|or)\s+", ", ", value, flags=re.IGNORECASE)
+    parts = [
+        part.strip()
+        for part in re.split(r"\s*[,;，、]\s*|\s+(?:and|or)\s+", value)
+        if part.strip()
+    ]
+    if len(parts) < 3:
+        return False
+
+    def name_like(part: str) -> bool:
+        tokens = re.findall(
+            r"[A-Za-z][A-Za-z0-9]*(?:[-_.+][A-Za-z0-9]+)*",
+            part,
+        )
+        if not tokens or " ".join(tokens) != re.sub(r"\s+", " ", part).strip():
+            return False
+        if any(token.lower() in _OPAQUE_CATALOG_CONNECTORS for token in tokens):
+            return False
+        return any(
+            any(char.isdigit() for char in token)
+            or any(char in token for char in "-_.+")
+            or token.isupper()
+            or (len(token) > 1 and any(char.isupper() for char in token[1:]))
+            for token in tokens
+        )
+
+    accepted = sum(name_like(part) for part in parts)
+    return accepted == len(parts)
 
 
 def is_contact_metadata_fragment(text: str) -> bool:
@@ -2759,25 +2906,7 @@ def is_plain_prose_line_for_rescue(text: str) -> bool:
     value = (text or "").strip()
     if not value or value.startswith("%"):
         return False
-    if (
-        is_latex_metadata_line(value)
-        or is_affiliation_metadata_fragment(value)
-        or is_contact_metadata_fragment(value)
-        or is_bracketed_heading_fragment(value)
-        or is_algorithmic_pseudocode_fragment(value)
-    ):
-        return False
-    if is_formatting_label_fragment(value) or is_unbalanced_latex_fragment(value):
-        return False
-    if is_inline_prompt_source_data_block(value):
-        return False
-    if is_tikz_drawing_fragment(value) or is_tikz_style_definition_fragment(value):
-        return False
-    if is_http_endpoint_catalog(value):
-        return False
-    if is_detached_citation_key_list(value):
-        return False
-    if is_bracketed_key_value_option_list(value):
+    if is_translation_exempt_fragment(value):
         return False
     if re.search(
         r"\\(?:begin|end)\{|\\(?:\[|\])|\\(?:section|subsection|subsubsection)"
@@ -2795,8 +2924,9 @@ def is_latex_metadata_line(text: str) -> bool:
     """Identify author/institution metadata that may remain in English."""
     return bool(re.match(
         r"^\s*\\(?:"
-        r"author|affiliation|icmlaffiliation|institute|institution|address|"
-        r"email"
+        r"author|affiliation|icml(?:author|affiliation|correspondingauthor|"
+        r"setaffiliationorder|keywords|title|titlerunning|setsymbol|finalcopy)|"
+        r"institute|institution|address|email"
         r")\b",
         text or "",
         flags=re.IGNORECASE,
@@ -2975,52 +3105,54 @@ def _qualifying_mixed_english_clause(matches):
     }]
 
 
+def is_translation_exempt_fragment(text: str) -> bool:
+    """Return whether a fragment is structural data rather than paper prose.
+
+    This is the single source of truth for splitter eligibility, response
+    validation, and short-line rescue.  Keeping the composition here prevents
+    those paths from slowly growing different allow-lists.
+    """
+    value = extract_translation_fragment(text or "").strip()
+    if not value:
+        return True
+    predicates = (
+        is_latex_metadata_line,
+        is_structured_identifier_path,
+        is_identifier_catalog_fragment,
+        is_person_name_catalog,
+        is_email_catalog_fragment,
+        is_contact_metadata_fragment,
+        is_benchmark_name_catalog,
+        is_bracketed_heading_fragment,
+        is_algorithmic_pseudocode_fragment,
+        is_affiliation_metadata_fragment,
+        is_graphics_path_fragment,
+        is_formatting_label_fragment,
+        is_unbalanced_latex_fragment,
+        is_tool_call_result_fragment,
+        is_structural_input_command_fragment,
+        is_structural_command_data_fragment,
+        is_latex_configuration_command_fragment,
+        is_inline_prompt_source_data_block,
+        is_tikz_drawing_fragment,
+        is_tikz_style_definition_fragment,
+        is_http_endpoint_catalog,
+        is_detached_citation_key_list,
+        is_pure_latex_math_fragment,
+        is_latex_key_value_option_list,
+        is_citation_heavy_proper_name_catalog,
+    )
+    return any(predicate(value) for predicate in predicates)
+
+
 def llm_translation_response_untranslated(source: str, response: str) -> bool:
     """Detect prose-like source chunks whose response still lacks Chinese."""
     if llm_translation_response_failed(response):
         return True
     raw_source = extract_translation_fragment(source)
-    if (
-        is_structured_identifier_path(raw_source)
-        or is_person_name_catalog(raw_source)
-        or is_contact_metadata_fragment(raw_source)
-        or is_bracketed_heading_fragment(raw_source)
-        or is_algorithmic_pseudocode_fragment(raw_source)
-        or is_affiliation_metadata_fragment(raw_source)
-        or is_graphics_path_fragment(raw_source)
-        or is_formatting_label_fragment(raw_source)
-        or is_unbalanced_latex_fragment(raw_source)
-        or is_tool_call_result_fragment(raw_source)
-        or is_structural_input_command_fragment(raw_source)
-        or is_structural_command_data_fragment(raw_source)
-        or is_latex_configuration_command_fragment(raw_source)
-    ):
+    if is_translation_exempt_fragment(raw_source):
         return False
     source_value = strip_inline_code_commands(raw_source)
-    if is_inline_prompt_source_data_block(source_value):
-        return False
-    if is_structural_command_data_fragment(source_value):
-        return False
-    if (
-        is_graphics_path_fragment(source_value)
-        or is_formatting_label_fragment(source_value)
-        or is_unbalanced_latex_fragment(source_value)
-    ):
-        return False
-    if (
-        is_tikz_drawing_fragment(source_value)
-        or is_tikz_style_definition_fragment(source_value)
-        or is_http_endpoint_catalog(source_value)
-        or is_detached_citation_key_list(source_value)
-        or is_pure_latex_math_fragment(source_value)
-    ):
-        return False
-    if is_latex_key_value_option_list(source_value):
-        return False
-    if is_latex_configuration_command_fragment(source_value):
-        return False
-    if is_citation_heavy_proper_name_catalog(source_value):
-        return False
     if is_translated_heading_proper_name_catalog(
         source_value,
         response or "",
@@ -3761,10 +3893,23 @@ def add_fontawesome_legacy_aliases(
         "faGem": ("gem", "*"),
     }
     combined = source + "\n" + (sibling_text or "")
+    # Some templates define legacy names only in the ``fontawesome5``-absent
+    # branch of ``\IfFileExists``. A plain textual definition scan sees that
+    # dead branch and incorrectly suppresses the fallback even when the
+    # package is present but does not export the old alias.
+    conditional_fontawesome = bool(re.search(
+        r"\\IfFileExists\s*\{\s*fontawesome5\.sty\s*\}",
+        combined,
+        flags=re.IGNORECASE,
+    ))
+    package_loaded = _latex_package_loaded(combined, "fontawesome5")
     names = [
         name
         for name in fontawesome_command_names(combined)
-        if not _latex_command_defined(combined, name)
+        if (
+            not _latex_command_defined(combined, name)
+            or (conditional_fontawesome and package_loaded)
+        )
     ]
     if not names:
         return source, removed_blocks

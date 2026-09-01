@@ -273,6 +273,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_http_endpoint_catalogs",
             "protect_detached_citation_key_lists",
             "protect_structured_identifier_paths",
+            "protect_identifier_catalog_fragments",
             "protect_person_name_catalogs",
             "protect_contact_author_metadata",
             "protect_bracketed_heading_fragments",
@@ -292,6 +293,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_code_command_fragments",
             "protect_pure_math_fragments",
             "restore_missing_citation_payloads",
+            "centralize_translation_exempt_fragment_policy",
             "throttle_latex_chunk_requests",
             "retry_failed_translation_chunks",
             "retry_untranslated_prose_with_explicit_instruction",
@@ -323,7 +325,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；只修改共享谓词或失败 slot 策略。",
+        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一由 is_translation_exempt_fragment 判定，只修改共享谓词或失败 slot 策略。",
     },
     "quality.pdf_sustained_untranslated": {
         "patches": (

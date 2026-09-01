@@ -26,7 +26,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-08-28-v70-editorial-boundary"
+    "paper-trans-splitter-2026-09-01-v71-eligibility"
 )
 
 
@@ -192,21 +192,7 @@ def _patch_latex_translation_splitter():
         stripped = text.strip()
         if not stripped or stripped.startswith("%"):
             return False
-        if (
-            _ltf.is_latex_key_value_option_list(stripped)
-            or _ltf.is_latex_configuration_command_fragment(stripped)
-            or _ltf.is_affiliation_metadata_fragment(stripped)
-            or _ltf.is_contact_metadata_fragment(stripped)
-            or _ltf.is_bracketed_heading_fragment(stripped)
-            or _ltf.is_algorithmic_pseudocode_fragment(stripped)
-            or _ltf.is_structural_input_command_fragment(stripped)
-            or _ltf.is_structural_command_data_fragment(stripped)
-            or _ltf.is_graphics_path_fragment(stripped)
-            or _ltf.is_formatting_label_fragment(stripped)
-            or _ltf.is_tikz_drawing_fragment(stripped)
-            or _ltf.is_tikz_style_definition_fragment(stripped)
-            or _ltf.is_unbalanced_latex_fragment(stripped)
-        ):
+        if _ltf.is_translation_exempt_fragment(stripped):
             return False
         if command_only_re.match(stripped):
             return False
@@ -559,40 +545,7 @@ def _patch_latex_translation_splitter():
         stripped = text.strip()
         if not stripped:
             return False
-        if _ltf.is_inline_prompt_source_data_block(stripped):
-            return False
-        if (
-            _ltf.is_affiliation_metadata_fragment(stripped)
-            or _ltf.is_contact_metadata_fragment(stripped)
-            or _ltf.is_bracketed_heading_fragment(stripped)
-            or _ltf.is_algorithmic_pseudocode_fragment(stripped)
-            or _ltf.is_structural_input_command_fragment(stripped)
-            or _ltf.is_graphics_path_fragment(stripped)
-            or _ltf.is_formatting_label_fragment(stripped)
-            or _ltf.is_unbalanced_latex_fragment(stripped)
-        ):
-            return False
-        if _ltf.is_citation_heavy_proper_name_catalog(stripped):
-            return False
-        if _ltf.is_tikz_drawing_fragment(stripped):
-            return False
-        if _ltf.is_http_endpoint_catalog(stripped):
-            return False
-        if _ltf.is_detached_citation_key_list(stripped):
-            return False
-        if _ltf.is_structured_identifier_path(stripped):
-            return False
-        if _ltf.is_person_name_catalog(stripped):
-            return False
-        if _ltf.is_tool_call_result_fragment(stripped):
-            return False
-        if _ltf.is_structural_command_data_fragment(stripped):
-            return False
-        if _ltf.is_latex_key_value_option_list(stripped):
-            return False
-        if _ltf.is_latex_configuration_command_fragment(stripped):
-            return False
-        if _ltf.is_pure_latex_math_fragment(stripped):
+        if _ltf.is_translation_exempt_fragment(stripped):
             return False
         if _is_section_heading(stripped):
             rough = _rough_text(stripped)
