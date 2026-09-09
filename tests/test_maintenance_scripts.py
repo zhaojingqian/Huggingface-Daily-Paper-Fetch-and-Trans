@@ -180,7 +180,9 @@ class MaintenanceScriptsTest(unittest.TestCase):
     def test_alert_helper_does_not_embed_smtp_credentials(self):
         content = ALERT_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("SMTP_PASSWORD", content)
-        self.assertIn("/root/scholar-citation-monitor/config.env", content)
+        from scripts.send_maintenance_alert import DEFAULT_CONFIG
+        self.assertEqual(Path(DEFAULT_CONFIG).name, "scholar.env")
+        self.assertEqual(Path(DEFAULT_CONFIG).parent.name, ".env.d")
         self.assertNotIn("@gmail.com", content)
 
     def test_maintenance_docker_calls_time_out_with_failure(self):

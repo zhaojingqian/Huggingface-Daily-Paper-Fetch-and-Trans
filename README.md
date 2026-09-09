@@ -553,7 +553,8 @@ Environment=GPT_ACADEMIC_CONTAINER=gpt-academic-latex-slim
 `rm -rf` 或 `docker restart`。生命周期脚本会非阻塞竞争
 `locks/full-translation.lock`；翻译繁忙时跳过本轮维护。缓存常规保留 3 天，
 高水位时保留 1 天；清理失败或磁盘仍危险时使用
-`/root/scholar-citation-monitor/config.env` 中的 SMTP 配置发送 Gmail 告警。
+`/root/workspace/.env.d/scholar.env` 中的 SMTP 配置发送 Gmail 告警；
+配置路径由告警入口统一维护，发送错误保留在清理日志中。
 
 周日 02:00 的 `scripts/repair_weekly_current.py` 与 weekly 抓取并行启动，但
 会先等待 `weekly/<当前 ISO 周>/index.json` 出现，再等待抓取锁释放。随后
@@ -568,7 +569,7 @@ patch、五模式统计、同步数量和残留 ID 到
 `paperhub/patch_catalog.py` 维护，具体实现集中在
 `paperhub/translation_runtime.py`、`paperhub/latex_pipeline.py` 和
 `latex_translation_filters.py`。
-批处理若实时收到 `translate.api_quota`，会在当前论文写入诊断后把
+批处理若实时收到 `translate.api_quota` 或 `infrastructure.disk_full`，会在当前论文写入诊断后把
 `abort_reason` 传到最外层 coordinator，立即停止剩余索引、topic 和 mode，
 不会继续让论文逐篇重复失败，并通过现有 SMTP 配置发送 Gmail 告警；
 恢复额度后重新运行同一 retry 命令即可继续。

@@ -10,6 +10,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "preflight_translation_disk_watermark",
             "cleanup_completed_retry_runtime_cache",
             "daily_watermark_cache_cleanup",
+            "propagate_disk_abort_to_outer_coordinator",
         ),
         "source": (
             "translate_full.py / scripts/cleanup_docker_cache.sh / "

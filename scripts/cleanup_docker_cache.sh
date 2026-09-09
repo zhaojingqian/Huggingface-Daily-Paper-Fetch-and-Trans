@@ -20,7 +20,6 @@ EPHEMERAL_GRACE_MINUTES="${PAPER_TRANS_EPHEMERAL_GRACE_MINUTES:-120}"
 DOCKER_TIMEOUT="${PAPER_TRANS_DOCKER_CONTROL_TIMEOUT:-60}"
 PYTHON="$PAPER_TRANS_PYTHON"
 ALERT_SCRIPT="${ROOT}/scripts/send_maintenance_alert.py"
-ALERT_CONFIG="${PAPER_TRANS_ALERT_CONFIG:-/root/scholar-citation-monitor/config.env}"
 RECLAIM_HELPER="${ROOT}/scripts/reclaim_translation_cache.py"
 ALERT_ATTEMPTED=0
 
@@ -36,8 +35,8 @@ alert() {
         log "[WARN] 告警脚本不存在: ${ALERT_SCRIPT}"
         return 1
     fi
-    if "$PYTHON" "$ALERT_SCRIPT" --config "$ALERT_CONFIG" \
-        --subject "$subject" --body "$body" >/dev/null 2>&1; then
+    if "$PYTHON" "$ALERT_SCRIPT" \
+        --subject "$subject" --body "$body" >>"$LOG" 2>&1; then
         log "[ALERT] Gmail 告警已发送: ${subject}"
         return 0
     fi

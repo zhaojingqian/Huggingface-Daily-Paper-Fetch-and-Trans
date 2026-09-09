@@ -11,9 +11,21 @@ import run_papers
 
 class RunPapersRetryTest(unittest.TestCase):
     def test_live_quota_failure_stops_remaining_batch(self):
+        self._assert_resource_failure_stops_batch("translate.api_quota")
+
+    def test_live_disk_failure_stops_remaining_batch(self):
+        self._assert_resource_failure_stops_batch("infrastructure.disk_full")
+
+    def test_disk_failure_stops_batch_without_writable_diagnostic(self):
+        self._assert_resource_failure_stops_batch("infrastructure.disk_full", diagnostic=False)
+
+    def _assert_resource_failure_stops_batch(self, category, diagnostic=True):
         with tempfile.TemporaryDirectory() as tmp:
             translate_full = Mock(
-                return_value={"pdf_path": None, "error": "quota exhausted"}
+                return_value={"pdf_path": None, "error": (
+                    "[Errno 28] No space left on device"
+                    if category == "infrastructure.disk_full" else "quota exhausted"
+                )}
             )
             fake_translate_mod = types.SimpleNamespace(
                 CONTAINER_NAME="latex",
@@ -30,8 +42,8 @@ class RunPapersRetryTest(unittest.TestCase):
             ]
 
             def read_diagnosis(path, default):
-                if "2608.90001" in path and translate_full.called:
-                    return {"category": "translate.api_quota"}
+                if diagnostic and "2608.90001" in path and translate_full.called:
+                    return {"category": category}
                 return default
 
             with patch.dict(sys.modules, {"translate_full": fake_translate_mod}), \
@@ -50,7 +62,7 @@ class RunPapersRetryTest(unittest.TestCase):
 
         self.assertEqual(result["pdf_attempted"], 1)
         self.assertEqual(result["pdf_failed"], 1)
-        self.assertEqual(result["abort_reason"], "translate.api_quota")
+        self.assertEqual(result["abort_reason"], category)
         translate_full.assert_called_once()
         alert.assert_called_once()
 

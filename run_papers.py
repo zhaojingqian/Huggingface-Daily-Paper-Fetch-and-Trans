@@ -7,7 +7,7 @@ import os, sys, json, time, subprocess
 from datetime import datetime
 from pathlib import Path
 
-from failure_taxonomy import is_failure_retryable
+from failure_taxonomy import classify_failure, is_failure_retryable
 from paperhub import paper_store
 from paperhub.json_io import read_json, write_json_atomic
 from paperhub.publication_lock import (
@@ -740,16 +740,20 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
                     os.path.join(LOGS_DIR, "pdf_errors", f"{aid}.json"),
                     {},
                 )
-                if latest.get("category") == "translate.api_quota":
-                    abort_reason = "translate.api_quota"
+                # ENOSPC may prevent writing the diagnostic itself.
+                live_failure = classify_failure("translate", plugin_error=error)
+                if live_failure.get("category") == "infrastructure.disk_full":
+                    latest = live_failure
+                if latest.get("category") in {"translate.api_quota", "infrastructure.disk_full"}:
+                    abort_reason = latest["category"]
                     print(
-                        f"{label} 🛑 翻译 API 余额不足，停止本批剩余全文翻译，"
+                        f"{label} 🛑 {abort_reason}，停止本批剩余全文翻译，"
                         "避免逐篇重复失败",
                         flush=True,
                     )
                     _send_pdf_retry_alert(
-                        "全文翻译 API 余额不足",
-                        f"论文 {aid} 返回 translate.api_quota，当前 retry 批次已熔断。\n"
+                        f"全文翻译暂停：{abort_reason}",
+                        f"论文 {aid} 返回 {abort_reason}，当前 retry 批次已熔断。\n"
                         f"错误: {error[:500]}",
                     )
                     break

@@ -13,7 +13,7 @@ import sys
 import time
 
 
-DEFAULT_CONFIG = "/root/scholar-citation-monitor/config.env"
+DEFAULT_CONFIG = str(Path(os.environ.get("WORKSPACE_ROOT", "/root/workspace")) / ".env.d" / "scholar.env")
 
 
 def parse_bool(value, default=False):
