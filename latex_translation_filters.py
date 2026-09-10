@@ -2396,12 +2396,19 @@ def is_email_catalog_fragment(text: str) -> bool:
     value = extract_translation_fragment(text or "").strip()
     if not value or len(value) > 500:
         return False
-    matches = list(_EMAIL_ADDRESS_RE.finditer(value))
-    if not matches:
+    # Shared-domain author notation is an address list, not prose. Match the
+    # whole local-part group so punctuation or ordinary prose cannot hide in it.
+    local = r"[A-Za-z0-9._%+\-]+"
+    address = re.compile(
+        r"(?:\\?\{\s*" + local + r"(?:\s*,\s*" + local + r")+\s*\\?\}|"
+        + local + r")@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
+        re.IGNORECASE,
+    )
+    residual, count = address.subn(" ", value)
+    if not count:
         return False
-    residual = _EMAIL_ADDRESS_RE.sub(" ", value)
     residual = re.sub(
-        r"\\(?:email|emails|emailtext|href|url|nolinkurl)\*?",
+        r"\\(?:email|emails|emailtext|href|url|nolinkurl|quad|qquad)\b\*?",
         " ",
         residual,
         flags=re.IGNORECASE,
@@ -4661,14 +4668,17 @@ def repair_malformed_proof_headings(text: str) -> Tuple[str, int]:
     return MALFORMED_PROOF_HEADING_RE.subn(r"\1Proof", text or "")
 
 
-def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
+def separate_custom_macro_cjk_glue(text: str, definitions: str = "") -> Tuple[str, int]:
     r"""Separate no-argument custom macros from glued CJK text/punctuation.
 
     Translated TeX commonly turns ``\name\ 中文`` into ``\name\中文`` or
     ``\name中文``. XeLaTeX can parse the glued part as an undefined command.
-    The fix is to terminate known zero-argument custom macros with ``{}``.
+    Terminate known zero-argument custom macros with whitespace directly.
     """
     macro_names = set()
+    for match in ZERO_ARG_COMMAND_DEF_RE.finditer(definitions):
+        if match.group(3) in (None, "0"):
+            macro_names.add(match.group(1) or match.group(2))
     definition_spans = []
     for m in ZERO_ARG_COMMAND_DEF_RE.finditer(text or ""):
         arg_count = m.group(3)
@@ -4697,23 +4707,11 @@ def separate_custom_macro_cjk_glue(text: str) -> Tuple[str, int]:
         if in_definition(m.start()):
             return m.group(0)
         total += 1
-        return "\\" + m.group(1) + "{}"
+        return "\\" + m.group(1) + " "
 
     new_text = slash_cjk_re.sub(replace, text)
     new_text = glued_re.sub(replace, new_text)
 
-    brace_cjk_re = re.compile(
-        r"\\(" + names_pat + r")\{\}(?=" + CJK_COMMAND_FOLLOW_RE + r")"
-    )
-
-    def replace_brace(m) -> str:
-        nonlocal total
-        if in_definition(m.start()):
-            return m.group(0)
-        total += 1
-        return "\\" + m.group(1) + "{} "
-
-    new_text = brace_cjk_re.sub(replace_brace, new_text)
     new_text, stripped = strip_redundant_macro_empty_groups(new_text, macro_names)
     total += stripped
     return new_text, total

@@ -174,6 +174,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "separate_builtin_layout_commands_from_cjk",
             "patch_bbding_symbol_fallbacks",
             "patch_missing_custom_macro_definitions",
+            "reuse_package_definitions_for_cjk_delimiters",
             "repair_common_text_command_typos",
             "repair_malformed_proof_headings",
         ),
@@ -326,7 +327,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一由 is_translation_exempt_fragment 判定，只修改共享谓词或失败 slot 策略。",
+        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据（含共享域名的分组邮箱）统一由 is_translation_exempt_fragment 判定，只修改共享谓词或失败 slot 策略。",
     },
     "quality.pdf_sustained_untranslated": {
         "patches": (

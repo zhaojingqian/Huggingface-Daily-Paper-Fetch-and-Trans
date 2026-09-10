@@ -444,7 +444,7 @@ def patch_custom_macro_cjk_glue(trans_tex_path):
                 pass
 
     new_text, total = _ltf.repair_duplicated_macro_initials(text)
-    new_text, separated = _ltf.separate_custom_macro_cjk_glue(new_text)
+    new_text, separated = _ltf.separate_custom_macro_cjk_glue(new_text, sibling_definitions)
     total += separated
     new_text, builtin_layout = _ltf.separate_builtin_layout_ascii_glue(
         new_text,

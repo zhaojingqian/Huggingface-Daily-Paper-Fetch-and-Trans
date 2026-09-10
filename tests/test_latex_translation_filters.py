@@ -1171,6 +1171,16 @@ Language: Chinese
             filters.llm_translation_response_untranslated(source, source)
         )
 
+    def test_grouped_email_local_parts_are_metadata_not_prose(self):
+        for source in (r"\{yuling.shi, 171263615, xiaodong.gu\}@sjtu.edu.cn \quad",
+                       r"{alice,bob}@example.org"):
+            with self.subTest(source=source):
+                self.assertTrue(filters.is_translation_exempt_fragment(source))
+                self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+                prose = "Please contact " + source + " for the full report."
+                self.assertFalse(filters.is_translation_exempt_fragment(prose))
+                self.assertTrue(filters.llm_translation_response_untranslated(prose, prose))
+
     def test_email_mention_inside_normal_sentence_still_requires_translation(self):
         source = "Please email gansiyuan@smail.nju.edu.cn for the full report."
 
@@ -2132,6 +2142,16 @@ Language: Chinese
                 self.assertGreater(len(parts), 1)
                 self.assertTrue(all(len(part) <= 600 for part in parts))
 
+    def test_package_macro_definitions_share_the_cjk_delimiter_repair(self):
+        definitions = r"\newcommand{\method}{Method} \newcommand{\arg}[1]{#1}"
+        source = r"\method下运行，\arg中文，\unknown未定义。"
+        fixed, count = filters.separate_custom_macro_cjk_glue(source, definitions)
+        self.assertGreater(count, 0)
+        self.assertIn(r"\method 下运行", fixed)
+        self.assertIn(r"\arg中文", fixed)
+        self.assertIn(r"\unknown未定义", fixed)
+        self.assertEqual(filters.separate_custom_macro_cjk_glue(fixed, definitions), (fixed, 0))
+
     def test_separate_custom_macro_cjk_glue(self):
         text = (
             r"\newcommand{\methodshort}{Data2Story}" "\n"
@@ -2147,7 +2167,7 @@ Language: Chinese
 
         fixed, count = filters.separate_custom_macro_cjk_glue(text)
 
-        self.assertEqual(count, 12)
+        self.assertEqual(count, 4)
         self.assertIn(r"\methodshort 并非", fixed)
         self.assertIn(r"\methodshort ，", fixed)
         self.assertIn(r"\yespart 标记", fixed)
@@ -2238,7 +2258,7 @@ Language: Chinese
 
         fixed, count = filters.separate_custom_macro_cjk_glue(text)
 
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 1)
         self.assertIn(r"\Ours 通过", fixed)
 
     def test_custom_macro_empty_group_rewrite_keeps_cjk_terminator(self):
@@ -2249,7 +2269,7 @@ Language: Chinese
 
         fixed, count = filters.separate_custom_macro_cjk_glue(text)
 
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 1)
         self.assertIn(r"\name 处于", fixed)
         self.assertNotIn(r"\name处", fixed)
 
@@ -2261,7 +2281,7 @@ Language: Chinese
 
         fixed, count = filters.separate_custom_macro_cjk_glue(text)
 
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 1)
         self.assertIn(r"\ourmethod 通过", fixed)
 
     def test_collapse_spaced_cjk_characters(self):
