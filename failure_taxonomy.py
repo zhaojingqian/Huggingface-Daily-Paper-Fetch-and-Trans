@@ -185,15 +185,20 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
                 "源码包或被引用的 TeX 文件缺失；先恢复源码，再重新翻译。",
                 _evidence(plugin, r"Tex源文件缺失|source.*not found|找不到.*(?:tex|sty|cls)"),
             )
-        if re.search(r"401|403|unauthori[sz]ed|invalid.*api.?key", plugin, re.I):
+        # A traceback line number is not an HTTP status. Require transport
+        # context for numeric codes; explicit provider messages stand alone.
+        http_status = r"(?:HTTP(?:/\d(?:\.\d)?)?\s*|(?:status|error)(?:[_ ]code)?[\s\"':=]*)"
+        auth_pattern = http_status + r"(?:401|403)\b|unauthori[sz]ed|invalid[^\n]*api.?key"
+        rate_pattern = http_status + r"429\b|rate.?limit|too many requests"
+        if re.search(auth_pattern, plugin, re.I):
             return _result(
                 "translate.api_auth", "api", "manual_review", "fix_api_credentials",
-                "API 鉴权失败；修复凭据后再重试。", _evidence(plugin, r"401|403|unauthori[sz]ed|invalid.*api.?key"),
+                "API 鉴权失败；修复凭据后再重试。", _evidence(plugin, auth_pattern),
             )
-        if re.search(r"429|rate.?limit|too many requests", plugin, re.I):
+        if re.search(rate_pattern, plugin, re.I):
             return _result(
                 "translate.api_rate_limit", "api", "retry_later", "backoff_translation",
-                "API 触发限流；退避后重新翻译。", _evidence(plugin, r"429|rate.?limit|too many requests"),
+                "API 触发限流；退避后重新翻译。", _evidence(plugin, rate_pattern),
             )
         if re.search(r"timeout|timed out|connection reset|temporary failure", plugin, re.I):
             return _result(

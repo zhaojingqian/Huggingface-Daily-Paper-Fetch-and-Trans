@@ -42,10 +42,10 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
     },
     "translate.api_auth": {
-        "patches": ("fix_api_credentials",),
-        "source": "config_private.py / translate_full.py",
+        "patches": ("require_http_status_evidence", "fix_api_credentials"),
+        "source": "failure_taxonomy.py / config_private.py / translate_full.py",
         "strategy": "manual_review",
-        "note": "凭据类失败不自动重试；先修复 API key 或代理配置，再重跑翻译。",
+        "note": "HTTP 状态须有传输上下文，traceback 行号不是状态码；真实凭据失败不自动重试。",
     },
     "translate.api_rate_limit": {
         "patches": (

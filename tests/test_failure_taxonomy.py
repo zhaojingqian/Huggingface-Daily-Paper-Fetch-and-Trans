@@ -93,6 +93,21 @@ class FailureTaxonomyTest(unittest.TestCase):
         self.assertFalse(auth["retryable"])
         self.assertEqual(timeout["retry_strategy"], "retry_translation")
 
+    def test_http_classification_requires_transport_evidence(self):
+        for code in (401, 403, 429):
+            with self.subTest(code=code):
+                trace = (
+                    f'Traceback:\n  File "concurrent/futures/_base.py", line {code}, '
+                    'in __get_result\nRuntimeError: 检测到程序终止。'
+                )
+                result = classify_failure("translate", plugin_error=trace)
+                self.assertEqual(result["category"], "translate.plugin_runtime")
+                for message in (f"HTTP {code}", f"HTTP/1.1 {code}",
+                                f"Error code: {code}", f'"status_code": {code}'):
+                    result = classify_failure("translate", plugin_error=message)
+                    self.assertEqual(result["category"], "translate.api_rate_limit"
+                                     if code == 429 else "translate.api_auth")
+
     def test_stale_container_bundle_has_its_own_infrastructure_category(self):
         result = classify_failure(
             "translate",
