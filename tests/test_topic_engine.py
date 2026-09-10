@@ -194,7 +194,7 @@ class TopicEngineTest(unittest.TestCase):
                     [{"arxiv_id": "2607.00001", "rank": 1, "pdf_zh_failed": True}],
                 )
 
-                def fake_retry(papers, label, processed_ids=None):
+                def fake_retry(papers, label, processed_ids=None, reconcile_only=False):
                     self.assertIn("opd/2026-07-05", label)
                     papers[0]["pdf_status"] = "ok"
                     if processed_ids is not None:

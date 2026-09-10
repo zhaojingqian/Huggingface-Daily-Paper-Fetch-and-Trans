@@ -682,7 +682,7 @@ def repair_topic(topic=None, key=None, days=None, scan_all=False, processed_ids=
     return total_fixed
 
 
-def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False, processed_ids=None):
+def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False, processed_ids=None, reconcile_only=False):
     """Retry topic pdf_status=failed entries using the same retry logic as daily."""
     from run_papers import retry_failed_pdf_entries
 
@@ -713,6 +713,7 @@ def retry_topic_pdf(topic=None, key=None, days=None, scan_all=False, processed_i
             papers,
             label=f"[retry-topic-pdf] {slug}/{k}",
             processed_ids=processed,
+            reconcile_only=reconcile_only,
         )
         total_ok += result["ok"]
         total_fail += result["failed"]

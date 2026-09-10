@@ -10,6 +10,26 @@ import run_papers
 
 
 class RunPapersRetryTest(unittest.TestCase):
+    def test_reconcile_only_publishes_valid_pdf_without_retrying_missing_pdf(self):
+        papers = [{"arxiv_id": "ready", "pdf_status": "failed"},
+                  {"arxiv_id": "missing", "pdf_status": "failed"},
+                  {"arxiv_id": "tainted", "pdf_status": "failed"}]
+        with patch("translate_full.translate_full") as translate, \
+             patch("run_papers.subprocess.run") as docker, \
+             patch("run_papers.paper_store.read_raw", return_value={}), \
+             patch("run_papers._pdf_quality_tainted", return_value=False), \
+             patch("run_papers.read_json", side_effect=lambda path, default: (
+                 {"retry_strategy": "retry_translation"} if "tainted.json" in path else {}
+             )), \
+             patch("run_papers._pdf_store_hit", side_effect=lambda aid: aid != "missing"), \
+             patch("run_papers._paper_store_update_pdf_status"), \
+             patch("run_papers._clear_stale_failure_artifacts"):
+            result = run_papers.retry_failed_pdf_entries(papers, reconcile_only=True)
+        self.assertEqual(papers[0]["pdf_status"], "ok")
+        self.assertEqual(result["residual_ids"], ["missing", "tainted"])
+        translate.assert_not_called()
+        docker.assert_not_called()
+
     def test_live_quota_failure_stops_remaining_batch(self):
         self._assert_resource_failure_stops_batch("translate.api_quota")
 

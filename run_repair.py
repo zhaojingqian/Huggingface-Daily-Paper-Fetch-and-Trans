@@ -289,7 +289,7 @@ def refetch_missing(mode="daily", days=3, key=None, return_stats=False):
 
 
 def retry_pdf_keys(
-    mode, days, scan_all, key, return_stats=False, processed_ids=None
+    mode, days, scan_all, key, return_stats=False, processed_ids=None, reconcile_only=False
 ):
     """
     根据参数确定要重试 PDF 的 key 列表，调用 run_papers.retry_pdf()。
@@ -305,6 +305,7 @@ def retry_pdf_keys(
             key=key,
             return_stats=True,
             processed_ids=processed_ids,
+            reconcile_only=reconcile_only,
         )
         _merge_stats(stats, result)
         _log(f"[retry-pdf:{mode}] {key} — {_stats_line(stats)}")
@@ -317,6 +318,7 @@ def retry_pdf_keys(
             key=None,
             return_stats=True,
             processed_ids=processed_ids,
+            reconcile_only=reconcile_only,
         )
         _merge_stats(stats, result)
         _log(f"[retry-pdf:{mode}] 全量完成 — {_stats_line(stats)}")
@@ -338,6 +340,7 @@ def retry_pdf_keys(
         keys=targets,
         return_stats=True,
         processed_ids=processed_ids,
+        reconcile_only=reconcile_only,
     )
     _merge_stats(stats, result)
     _log(f"[retry-pdf:{mode}] 完成 — {_stats_line(stats)}")
@@ -514,7 +517,7 @@ def repair_topic_keys(
 
 
 def retry_topic_pdf_keys(
-    topic, days, scan_all, key, return_stats=False, processed_ids=None
+    topic, days, scan_all, key, return_stats=False, processed_ids=None, reconcile_only=False
 ):
     """根据参数确定 topic PDF 重试范围，调用 topic_engine.retry_topic_pdf()。"""
     from topic_engine import retry_topic_pdf, topic_repair_targets
@@ -528,6 +531,7 @@ def retry_topic_pdf_keys(
             key=key,
             scan_all=True,
             processed_ids=processed_ids,
+            reconcile_only=reconcile_only,
         )
         _, residual_ids = _topic_pdf_failures(topic, days, scan_all, key)
         stats = _new_stats()
@@ -544,6 +548,7 @@ def retry_topic_pdf_keys(
             topic=topic,
             scan_all=True,
             processed_ids=processed_ids,
+            reconcile_only=reconcile_only,
         )
         _, residual_ids = _topic_pdf_failures(topic, days, scan_all, key)
         stats = _new_stats()
@@ -565,6 +570,7 @@ def retry_topic_pdf_keys(
         days=days,
         scan_all=False,
         processed_ids=processed_ids,
+        reconcile_only=reconcile_only,
     )
     _, residual_ids = _topic_pdf_failures(topic, days, scan_all, key)
     stats = _new_stats()
@@ -592,6 +598,8 @@ def main():
                         help="组合模式：顺序执行补翻译（默认）+ 补索引（--refetch）")
     parser.add_argument("--retry-pdf", dest="retry_pdf", action="store_true",
                         help="PDF 重试模式：对 pdf_status=failed 的条目重新翻译全文 PDF")
+    parser.add_argument("--sync-pdf", action="store_true",
+                        help="仅校验已有 PDF 并同步状态，不下载、翻译或编译")
     args = parser.parse_args()
 
     actions = [
@@ -600,12 +608,13 @@ def main():
             ("--post", args.post),
             ("--refetch", args.refetch),
             ("--retry-pdf", args.retry_pdf),
+            ("--sync-pdf", args.sync_pdf),
         )
         if enabled
     ]
     if len(actions) > 1:
         parser.error(
-            "--post、--refetch、--retry-pdf 是互斥执行模式，"
+            "--post、--refetch、--retry-pdf、--sync-pdf 是互斥执行模式，"
             f"不能同时指定：{', '.join(actions)}"
         )
     if args.refetch and args.mode and args.mode not in REFETCH_MODES:
@@ -709,9 +718,9 @@ def main():
         sys.exit(1 if stats["residual_failures"] else 0)
 
     # ── PDF 重试模式 ─────────────────────────────────────────────────────────
-    if args.retry_pdf:
+    if args.retry_pdf or args.sync_pdf:
         modes = [args.mode] if args.mode else CONTENT_MODES
-        _log(f"开始 retry-pdf (modes={modes}, key={args.key or 'auto'}, "
+        _log(f"开始 {'sync-pdf' if args.sync_pdf else 'retry-pdf'} (modes={modes}, key={args.key or 'auto'}, "
              f"days={args.days if not args.scan_all else 'all'})")
         stats = _new_stats()
         processed_pdf_ids = set()
@@ -724,6 +733,7 @@ def main():
                     args.key,
                     return_stats=True,
                     processed_ids=processed_pdf_ids,
+                    reconcile_only=args.sync_pdf,
                 )
             else:
                 result = retry_pdf_keys(
@@ -733,6 +743,7 @@ def main():
                     args.key,
                     return_stats=True,
                     processed_ids=processed_pdf_ids,
+                    reconcile_only=args.sync_pdf,
                 )
             _merge_stats(stats, result)
             if stats.get("abort_reason"):

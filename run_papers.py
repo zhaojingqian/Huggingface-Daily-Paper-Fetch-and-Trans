@@ -534,7 +534,7 @@ def _run_locked(mode, key, limit, do_full_translate):
     return result_stats["residual_failures"] == 0
 
 
-def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
+def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None, reconcile_only=False):
     """
     对一组 slim index paper entries 中 pdf_status=failed 的条目重试全文 PDF。
     若条目标记 ok 但 paper store PDF 已缺失，会先降级为 failed 再重试。
@@ -613,7 +613,7 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
             changed = True
 
     abort_reason = ""
-    failed = [p for p in papers if p.get("pdf_status") == "failed"]
+    failed = [] if reconcile_only else [p for p in papers if p.get("pdf_status") == "failed"]
     for slim in failed:
         aid = slim.get("arxiv_id", "")
         if not aid:
@@ -783,7 +783,7 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None):
     return result
 
 
-def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=None):
+def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=None, reconcile_only=False):
     """
     扫描 pdf_status=failed 的条目，重新尝试全文 PDF 翻译，成功后更新 paper store 与 slim index。
     mode=None 时扫描全部 (daily/weekly/monthly/manual)。
@@ -871,6 +871,7 @@ def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=
                 papers,
                 label=f"[retry-pdf] {m}/{k}",
                 processed_ids=processed,
+                reconcile_only=reconcile_only,
             )
             changed = result["changed"]
 

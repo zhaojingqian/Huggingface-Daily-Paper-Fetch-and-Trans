@@ -295,6 +295,15 @@ class RepairRefetchScheduleTest(unittest.TestCase):
         )
         self.assertEqual(stats["residual_failures"], 2)
 
+    def test_sync_pdf_cli_routes_to_reconciliation_without_retry(self):
+        argv = ["run_repair.py", "--sync-pdf", "--mode", "daily", "--key", "2026-07-27"]
+        with patch.object(sys, "argv", argv), patch("run_repair._log"), \
+             patch("run_papers.retry_pdf", return_value={"residual_ids": []}) as retry:
+            with self.assertRaises(SystemExit) as raised:
+                run_repair.main()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertTrue(retry.call_args.kwargs["reconcile_only"])
+
     def test_retry_pdf_cli_exits_nonzero_when_residuals_remain(self):
         result = {
             "pdf_attempted": 1,
