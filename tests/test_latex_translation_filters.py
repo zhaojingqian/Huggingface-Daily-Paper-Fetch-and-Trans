@@ -3199,12 +3199,20 @@ Language: Chinese
     def test_standalone_repository_path_is_structural(self):
         path = r"icloud-photos-downloader/icloud\_photos\_downloader"
 
-        self.assertTrue(filters.is_structured_identifier_path(path))
-        self.assertFalse(filters.is_structured_identifier_path("input/output"))
-        self.assertFalse(filters.is_structured_identifier_path(
+        self.assertTrue(filters.is_identifier_catalog_fragment(path))
+        self.assertFalse(filters.is_identifier_catalog_fragment("input/output"))
+        self.assertFalse(filters.is_identifier_catalog_fragment(
             "We compare input/output behavior across systems."
         ))
         self.assertFalse(filters.llm_translation_response_untranslated(path, path))
+
+    def test_repository_catalog_uses_the_same_identifier_boundary(self):
+        catalog = "dzhng/deep-research, modelscope/ms-agent, gpt-researcher."
+        self.assertTrue(filters.is_identifier_catalog_fragment(catalog))
+        self.assertFalse(filters.llm_translation_response_untranslated(catalog, catalog))
+        prose = "We compare dzhng/deep-research with modelscope/ms-agent."
+        self.assertFalse(filters.is_identifier_catalog_fragment(prose))
+        self.assertTrue(filters.llm_translation_response_untranslated(prose, prose))
 
     def test_standalone_tool_call_result_is_structural(self):
         source = (

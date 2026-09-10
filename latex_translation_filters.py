@@ -2290,39 +2290,15 @@ def _rewrap_braced_prose_response(source: str, response: str) -> str:
     return leading + "{" + stripped + "}" + trailing
 
 
-def is_structured_identifier_path(text: str) -> bool:
-    r"""Recognize a standalone repository/package path, not slash prose.
-
-    Splitter output can expose identifiers such as
-    ``icloud-photos-downloader/icloud\_photos\_downloader`` as an isolated
-    slot. Translating that value would corrupt it, while retrying an exact
-    model echo can fail the whole paper. Require the entire fragment to be a
-    path and at least one explicit identifier separator so ordinary prose such
-    as ``input/output`` remains eligible for translation.
-    """
-    value = extract_translation_fragment(text or "").strip()
-    value = re.sub(r"[.,;:]$", "", value).strip()
-    if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.+\\-]*"
-        r"(?:/[A-Za-z0-9][A-Za-z0-9_.+\\-]*)+",
-        value,
-    ):
-        return False
-    return bool(re.search(r"(?:\\_|[_+.-])", value))
-
-
 def is_identifier_catalog_fragment(text: str) -> bool:
-    r"""Recognize standalone escaped/raw identifier tokens.
+    r"""Recognize identifier/path catalogs, never prose mentioning a path.
 
-    Dataset and model handles often reach the splitter as a detached
-    ``snake_case`` token (for example ``esmfold\_struct\_...``). They are
-    opaque labels rather than English clauses, so preserving them avoids
-    needless model calls and echo-based quality failures. A surrounding
-    sentence remains eligible because whitespace or sentence punctuation
-    disqualifies the fragment.
+    Every item must be a machine-shaped token. At least one snake_case or
+    punctuated repository path supplies evidence beyond ordinary slash prose.
     """
-    value = extract_translation_fragment(text or "").strip()
-    if not value or len(value) > 500 or re.search(r"[.!?。！？:：]", value):
+    value = extract_translation_fragment(text or "").strip().rstrip(".,;:。")
+    value = value.replace(r"\_", "_")
+    if not value or len(value) > 500:
         return False
     parts = [
         part.strip()
@@ -2332,10 +2308,15 @@ def is_identifier_catalog_fragment(text: str) -> bool:
     if not parts:
         return False
     token_re = re.compile(
-        r"[A-Za-z][A-Za-z0-9]*(?:(?:\\_+|_)[A-Za-z0-9]+)+"
-        r"(?:[.-][A-Za-z0-9]+)*$"
+        r"[A-Za-z0-9][A-Za-z0-9_.+\-]*(?:/[A-Za-z0-9][A-Za-z0-9_.+\-]*)*"
     )
-    return all(token_re.fullmatch(part) for part in parts)
+    return all(
+        token_re.fullmatch(part) and re.search(r"[_/.+\-]", part)
+        for part in parts
+    ) and any(
+        "_" in part or ("/" in part and re.search(r"[.+\-]", part))
+        for part in parts
+    )
 
 
 def is_person_name_catalog(text: str) -> bool:
@@ -3124,7 +3105,6 @@ def is_translation_exempt_fragment(text: str) -> bool:
         return True
     predicates = (
         is_latex_metadata_line,
-        is_structured_identifier_path,
         is_identifier_catalog_fragment,
         is_person_name_catalog,
         is_email_catalog_fragment,

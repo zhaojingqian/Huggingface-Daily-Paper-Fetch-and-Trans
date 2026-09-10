@@ -7,6 +7,22 @@ from paperhub import latex_pipeline
 
 
 class LatexPipelineMacroTest(unittest.TestCase):
+    def test_optional_list_fallback_keeps_one_standard_list_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.tex"
+            path.write_text(
+                "\\documentclass{article}\n\\usepackage{paralist}\n"
+                "\\begin{document}\n\\begin{itemize}[leftmargin=*]\n"
+                "\\item 正文\n\\end{itemize}\n\\end{document}\n",
+                encoding="utf-8",
+            )
+            latex_pipeline.patch_enumitem_for_optional_lists(str(path))
+            fixed = path.read_text(encoding="utf-8")
+            self.assertIn(r"\usepackage[olditem,oldenum]{paralist}", fixed)
+            self.assertEqual(fixed.count(r"\usepackage{enumitem}"), 1)
+            latex_pipeline.patch_enumitem_for_optional_lists(str(path))
+            self.assertEqual(path.read_text(encoding="utf-8"), fixed)
+
     def test_quality_gate_reuses_precomputed_report(self):
         report = {
             "ok": True,

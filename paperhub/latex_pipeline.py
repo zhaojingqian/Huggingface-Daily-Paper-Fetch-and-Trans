@@ -1633,6 +1633,13 @@ def patch_enumitem_for_optional_lists(trans_tex_path):
     )
     if not ok:
         return 0
+    # enumitem owns standard lists; paralist keeps its compact/inline lists
+    # without replacing only the opening half of itemize/enumerate.
+    new_text = _re.sub(
+        r'(?m)^(\s*)\\usepackage\{paralist\}',
+        r'\1\\usepackage[olditem,oldenum]{paralist}',
+        new_text,
+    )
     with open(trans_tex_path, 'w', encoding='utf-8') as f:
         f.write(new_text)
     print("[driver] 🔧 patch_enumitem_for_optional_lists: 补充 enumitem", flush=True)

@@ -7,6 +7,20 @@ from scripts.analyze_translation_chunks import analyze, analyze_tex
 
 
 class AnalyzeTranslationChunksTest(unittest.TestCase):
+    def test_tex_scan_shares_chunk_metadata_eligibility(self):
+        tex = (
+            "\\begin{document}\n"
+            r"\{yuling.shi,171263615,xiaodong.gu\}@sjtu.edu.cn \quad" "\n"
+            "dzhng/deep-research, modelscope/ms-agent, gpt-researcher.\n"
+            "\\end{document}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.tex"
+            path.write_text(tex, encoding="utf-8")
+            report = analyze_tex(path)
+        self.assertEqual(report["prose_lines"], 0)
+        self.assertEqual(report["long_english_lines"], 0)
+
     def test_tex_scan_detects_english_inside_custom_text_macro(self):
         tex = (
             "\\begin{document}\n"

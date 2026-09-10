@@ -92,22 +92,7 @@ def analyze_tex(path) -> Dict[str, object]:
         ) or (
             inline_source_data
             or structural_input_data
-            or filters.is_latex_metadata_line(code)
-            or filters.is_affiliation_metadata_fragment(code)
-            or filters.is_contact_metadata_fragment(code)
-            or filters.is_bracketed_heading_fragment(code)
-            or filters.is_algorithmic_pseudocode_fragment(code)
-            or filters.is_graphics_path_fragment(code)
-            or filters.is_formatting_label_fragment(code)
-            or filters.is_unbalanced_latex_fragment(code)
-            or filters.is_tikz_drawing_fragment(code)
-            or filters.is_tikz_style_definition_fragment(code)
-            or filters.is_citation_heavy_proper_name_catalog(code)
-            or filters.is_structured_identifier_path(code)
-            or filters.is_person_name_catalog(code)
-            or filters.is_tool_call_result_fragment(code)
-            or filters.is_structural_command_data_fragment(code)
-            or filters.is_latex_configuration_command_fragment(code)
+            or filters.is_translation_exempt_fragment(code)
         )
         structural = any(filters.is_tracked_env(env) for env in begins + ends)
         if in_document and not protected and not structural:
