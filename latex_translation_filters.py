@@ -120,6 +120,8 @@ def rank_main_tex_candidate(path: str, content: str, candidates: Iterable[str]) 
     referenced_stems = {PurePosixPath(ref).stem for ref in references}
 
     score = 0
+    if re.search(r"\\begin\s*\{document\}", value):
+        score += 200
     if basename in {"main.tex", "paper.tex", "root.tex", "manuscript.tex", "article.tex"}:
         score += 100
     if basename in {"paper_body.tex", "body.tex", "content.tex"}:
@@ -1369,6 +1371,10 @@ SINGLE_LINE_SOURCE_DATA_DIRECTIVE_RE = re.compile(
     r"conclusion|outlook)\b)"
     r"|exclude\s+(?:every|all)\s+word\b(?=.*\b(?:supplied|forbidden|list)\b)"
     r"|end\s+with\s+the\s+exact\s+supplied\s+phrase\b"
+    r"|no\s+(?:text|content)\s+other\s+than\s+the\s+(?:specified|requested)\s+"
+    r"(?:text|content)\s+may\s+appear\b"
+    r"|only\s+the\s+specified\b(?=.*\b(?:text|content)\b)"
+    r"(?=.*\bquotation\s+marks\b)(?=.*\bmay\s+appear\b)"
     r"|(?:include|preserve|use|omit)\s+the\s+exact\s+supplied\b"
     r"(?=.*\b(?:template|format|phrase|fields?|list)\b)"
     r")"
@@ -1714,7 +1720,7 @@ def is_latex_key_value_option_list(text: str) -> bool:
 _LATEX_CONFIGURATION_COMMANDS = frozenset({
     "setlist", "setlistdepth", "setlength", "addtolength",
     "setcounter", "addtocounter", "hypersetup", "captionsetup",
-    "pgfkeys", "tikzset", "lstset", "geometry",
+    "pgfkeys", "tikzset", "lstset", "geometry", "newgeometry",
 })
 _FONT_DEFINITION_COMMAND_RE = re.compile(
     r"\A\s*\\(?:newfontfamily|newfontface|setmainfont|setsansfont|"
@@ -1906,6 +1912,15 @@ def is_translated_heading_proper_name_catalog(
     )
     if not source_match:
         return False
+    if not source_match.group("tail").strip():
+        source_probe = _natural_language_probe(source).strip(" ()[].")
+        if is_benchmark_name_catalog(source_probe):
+            return True
+        response_probe = _natural_language_probe(response or "")
+        retained_words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", response_probe)
+        if (len(re.findall(r"[\u4e00-\u9fff]", response_probe)) >= 4
+                and retained_words and all(word[0].isupper() for word in retained_words)):
+            return True
     if len(re.findall(r"[\u4e00-\u9fff]", response or "")) < 4:
         return False
     tail = MATH_SPAN_RE.sub(" ", source_match.group("tail"))
@@ -1934,6 +1949,13 @@ def is_translated_heading_proper_name_catalog(
 def _natural_language_probe(text: str) -> str:
     """Remove non-prose LaTeX payloads before language-ratio decisions."""
     value = extract_translation_fragment(text)
+    # A detached author list and its prose footnote have different semantics.
+    # Measure the footnote, not the unchanged proper names preceding it.
+    footnote = re.search(r"\\footnote(?:text)?\b", value)
+    if footnote:
+        prefix = re.sub(r"\\[A-Za-z@]+\*?(?:\{[^{}]*\})?", " ", value[:footnote.start()])
+        if is_person_name_catalog(prefix):
+            value = value[footnote.start():]
     value = _hide_marked_acronym_expansions(value)
     value = strip_inline_code_commands(value)
     # Formatting commands with a configuration argument and a human-text
@@ -2126,6 +2148,13 @@ def _mixed_language_probe(text: str) -> str:
     # Failure-box task/trajectory/result payloads are verbatim source data.
     # Keep their surrounding explanation prose eligible for translation.
     value = _strip_source_data_inline_macros(value)
+    # Image prompts can enumerate literal on-image text without quotation
+    # marks. Hide only the explicitly delimited payload, not the surrounding
+    # instructions or ordinary discussion of a prompt.
+    value = re.sub(
+        r"指定文字\s*(?:顶部|如下|[：:]).*?只允许出现以上指定文字",
+        " ", value,
+    )
     # Some papers render an entire prompt template directly with ``\\`` line
     # breaks instead of a tracked box environment.  Narrow directive markers
     # distinguish that source data from normal paper prose.
@@ -2297,6 +2326,22 @@ def is_identifier_catalog_fragment(text: str) -> bool:
     punctuated repository path supplies evidence beyond ordinary slash prose.
     """
     value = extract_translation_fragment(text or "").strip().rstrip(".,;:。")
+    # Directory-tree branches carry paths, sometimes inside listings' TeX
+    # escape wrappers. Require every line to be a branch with an opaque path.
+    branches = [re.fullmatch(r"[\s|`+│├└─-]*(?:--|──)\s*(.+)", line)
+                for line in value.splitlines() if line.strip()]
+    if branches and all(branches):
+        paths = []
+        for branch in branches:
+            path = branch.group(1).strip()
+            if path.startswith("(*@") and path.endswith("@*)"):
+                path = path[3:-3].strip()
+            wrapper = re.fullmatch(r"\\[A-Za-z@]+\{(.*)\}", path)
+            if wrapper:
+                path = wrapper.group(1)
+            paths.append(path.replace(r"\{", "{").replace(r"\}", "}").replace(r"\_", "_"))
+        return all("/" in path and re.fullmatch(r"[A-Za-z0-9_./{},+\-]+", path)
+                   for path in paths)
     value = value.replace(r"\_", "_")
     if not value or len(value) > 500:
         return False
@@ -3199,6 +3244,24 @@ TRANSLATION_STRUCTURAL_UNIT_RE = re.compile(
 )
 
 
+def latex_logical_lines(text: str) -> List[str]:
+    """Keep multiline prose-command arguments whole without changing bytes."""
+    commands = re.compile(r"\\(?:section|subsection|subsubsection|paragraph|subparagraph|caption|footnote|footnotetext)\*?(?:\[[^\]]*\])?\s*\{")
+    lines = []
+    start = 0
+    while start < len(text):
+        end = text.find("\n", start)
+        end = len(text) if end < 0 else end + 1
+        for match in commands.finditer(text, start, end):
+            close = _matching_unescaped_brace(text, match.end() - 1)
+            if close >= end:
+                newline = text.find("\n", close)
+                end = len(text) if newline < 0 else newline + 1
+        lines.append(text[start:end])
+        start = end
+    return lines
+
+
 def starts_translation_structural_unit(text: str) -> bool:
     return bool(TRANSLATION_STRUCTURAL_UNIT_RE.match((text or "").lstrip()))
 
@@ -3827,7 +3890,7 @@ def is_dynamic_tex_include_target(target: str) -> bool:
     return bool(re.search(r"\\[A-Za-z@]+|#[1-9]", value))
 
 
-def requires_runtime_tex_scope(text: str) -> bool:
+def requires_runtime_tex_scope(text: str, caller_prefix: str) -> bool:
     r"""Return true when flattening a TeX file can change its execution scope.
 
     Files that change catcodes or use ``@``-named internals must be read by
@@ -3836,7 +3899,7 @@ def requires_runtime_tex_scope(text: str) -> bool:
     valid generated figures fail before their local setup runs.
     """
     source = text or ""
-    return bool(
+    return _unescaped_brace_balance(caller_prefix) > 0 and bool(
         re.search(r"\\make(?:atletter|atother)\b", source)
         or re.search(r"\\catcode\s*`", source)
     )

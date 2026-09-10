@@ -10,6 +10,21 @@ import run_papers
 
 
 class RunPapersRetryTest(unittest.TestCase):
+    def test_full_sync_discovers_indexes_not_job_files_or_archive_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.mkdir(os.path.join(tmp, "archive"))
+            os.mkdir(os.path.join(tmp, "published"))
+            with open(os.path.join(tmp, "jobs.json"), "w") as handle:
+                json.dump({}, handle)
+            with open(os.path.join(tmp, "published", "index.json"), "w") as handle:
+                json.dump({"papers": []}, handle)
+            with patch("run_papers.mode_dir", return_value=tmp), \
+                 patch("run_papers.mode_index_path", side_effect=lambda mode, key: os.path.join(tmp, key, "index.json")):
+                result = run_papers.retry_pdf(mode="manual", return_stats=True, reconcile_only=True)
+                self.assertEqual(result["residual_ids"], [])
+                explicit = run_papers.retry_pdf(mode="manual", key="archive", return_stats=True, reconcile_only=True)
+                self.assertEqual(explicit["residual_ids"], ["manual/archive:index"])
+
     def test_reconcile_only_publishes_valid_pdf_without_retrying_missing_pdf(self):
         papers = [{"arxiv_id": "ready", "pdf_status": "failed"},
                   {"arxiv_id": "missing", "pdf_status": "failed"},

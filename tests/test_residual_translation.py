@@ -1,4 +1,7 @@
 import unittest
+import os
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 from paperhub.residual_translation import (
     candidate_line_numbers,
@@ -9,6 +12,23 @@ from paperhub.residual_translation import (
 
 
 class ResidualTranslationTests(unittest.TestCase):
+    def test_restored_translation_failure_never_reenters_plugin(self):
+        driver = (Path(__file__).resolve().parents[1] / "full_translate_driver.py").read_text()
+        body = driver.split("# ── 主逻辑：", 1)[1].split("\n", 1)[1]
+        body = body.split("# ── 输出结果", 1)[0]
+        for original_exists in (False, True):
+            source_cache = Mock()
+            source_cache.restore_workfolder.return_value = True
+            namespace = dict(os=os, arxiv_id="test", ARXIV_CACHE_DIR="cache",
+                             keep_translation=True, no_cache=False, source_cache=source_cache,
+                             repair_terminal_translation_residuals=Mock(),
+                             patch_and_recompile=Mock(return_value=None), run_translation=Mock())
+            with patch("os.path.exists", side_effect=lambda path: original_exists or path.endswith("merge_translate_zh.tex")):
+                exec(compile(body, "driver-main", "exec"), namespace)
+            namespace["run_translation"].assert_not_called()
+            namespace["repair_terminal_translation_residuals"].assert_called_once()
+            namespace["patch_and_recompile"].assert_called_once()
+
     def test_selects_unique_mixed_and_long_lines(self):
         report = {
             "samples": [(7, "long"), {"line": 8}],
@@ -58,6 +78,13 @@ class ResidualTranslationTests(unittest.TestCase):
             normalize_residual_response("说明\n```latex\n正文\n```"),
             "说明\n```latex\n正文\n```",
         )
+
+    def test_large_residual_queue_processes_one_bounded_batch(self):
+        report = {"ok": False, "cjk_pct": 80,
+                  "mixed_english_clause_lines": 13,
+                  "mixed_english_clause_samples": [{"line": n} for n in range(1, 14)]}
+        self.assertTrue(terminal_repair_eligible(report))
+        self.assertEqual(candidate_line_numbers(report), list(range(1, 13)))
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         "strategy": "manual_review",
         "note": (
             "余额不足向最外层传播 abort_reason，停止剩余 index/topic/mode；"
-            "已完成 chunk 按模型和 splitter 版本留账，下次只请求缺口；"
+            "已完成 chunk 按模型、原始片段和当前校验复用，切分版本仅作为来源记录，下次只请求缺口；"
             "充值或显式切换到同一凭据可用且质量验证通过的模型。"
         ),
     },
@@ -250,10 +250,12 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "normalize_tex_include_target",
             "preserve_dynamic_tex_include_targets",
             "restore_source_manifest",
+            "rank_main_tex_candidate",
+            "requires_runtime_tex_scope",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "restore_source",
-        "note": "清理 input/include 路径空白并校验源码清单，再继续翻译。",
+        "note": "规范 input/include 并校验源码清单；实际 document 入口优先于模板，顶层模板可展开，参数作用域内的 catcode 敏感文件留给 TeX 读取。",
     },
     "quality.untranslated_prose": {
         "patches": (
@@ -302,7 +304,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "正常正文保持 1200 字符上下文；结构门禁失败时仅细分该 slot 串行重试。高覆盖 TeX 若只剩少量英文接缝，仅定向重译门禁行并按质量分数逐行提交，不再整篇重译。",
+        "note": "正文长度沿用共享 chunk 策略；结构门禁失败时仅细分该 slot。高覆盖 TeX 按有限批次定向重译门禁行，逐行验证质量改善；超出一批不拒绝全部修复，发布仍检查整篇。",
     },
     "quality.translation_chunk_invalid": {
         "patches": (
@@ -327,7 +329,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据（含共享域名的分组邮箱）统一由 is_translation_exempt_fragment 判定，只修改共享谓词或失败 slot 策略。",
+        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一由 is_translation_exempt_fragment 判定并直接保留，不调用模型；多行标题、图注和脚注按完整参数切分，作者元数据与脚注正文分别判定。只修改共享谓词或失败 slot 策略。",
     },
     "quality.pdf_sustained_untranslated": {
         "patches": (

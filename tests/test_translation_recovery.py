@@ -1,6 +1,8 @@
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -8,6 +10,26 @@ from paperhub import translation_runtime
 
 
 class TranslationRecoveryTest(unittest.TestCase):
+    def test_structural_sources_never_reach_translation_api(self):
+        request = mock.Mock(side_effect=AssertionError("structural data must not call API"))
+        utils = types.SimpleNamespace(
+            request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency=request,
+        )
+        package = types.SimpleNamespace(crazy_utils=utils)
+        source = r"\newgeometry{top=0.9cm,bottom=1.9cm,left=2cm,right=2cm}"
+        with mock.patch.dict(sys.modules, {"crazy_functions": package}), \
+             mock.patch.object(translation_runtime, "_load_translation_recovery", return_value={}), \
+             mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False):
+            translation_runtime._patch_latex_llm_rate_limit_handling()
+            generator = utils.request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
+                inputs_array=[source], inputs_show_user_array=["layout"],
+                history_array=[[]], sys_prompt_array=["translate"],
+            )
+            with self.assertRaises(StopIteration) as done:
+                next(generator)
+        self.assertEqual(done.exception.value, [source, source])
+        request.assert_not_called()
+
     def setUp(self):
         self.env = mock.patch.dict(
             os.environ,
@@ -53,7 +75,7 @@ class TranslationRecoveryTest(unittest.TestCase):
                     {0: "这是一段已经翻译完成的中文正文。"},
                 )
 
-    def test_recovery_is_invalidated_by_model_or_splitter_version(self):
+    def test_recovery_requires_same_model_and_source_not_same_splitter_version(self):
         sources = ["A translated paragraph with enough words to validate."]
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "paper.json")
@@ -82,8 +104,9 @@ class TranslationRecoveryTest(unittest.TestCase):
                     json.dump(payload, handle)
                 self.assertEqual(
                     translation_runtime._load_translation_recovery(sources),
-                    {},
+                    {0: "这是一段中文翻译结果。"},
                 )
+                self.assertEqual(translation_runtime._load_translation_recovery(["Different source paragraph."]), {})
 
     def test_recovery_matches_transport_whitespace_and_reordered_chunks(self):
         sources = [

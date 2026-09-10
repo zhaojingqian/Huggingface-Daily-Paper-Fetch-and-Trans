@@ -101,11 +101,11 @@ def install_gpt_academic_patches() -> bool:
                     clean = _rm_comments_simple(handle.read())
             except Exception:
                 continue
-            if r"\documentclass" in clean:
+            if r"\documentclass" in clean or _re.search(r"\\begin\s*\{document\}", clean):
                 candidates.append(texf)
 
         if not candidates:
-            raise RuntimeError("无法找到一个主Tex文件（包含documentclass关键字）")
+            raise RuntimeError("无法找到主 TeX（documentclass 或 document 环境入口）")
         if len(candidates) == 1:
             print(f"[driver] ✅ 主 Tex 文件: {candidates[0]}", flush=True)
             return candidates[0]
@@ -171,7 +171,7 @@ def install_gpt_academic_patches() -> bool:
                         content = handle.read()
                 except Exception:
                     content = "\n\nWarning from GPT-Academic: LaTex source file is missing!\n\n"
-                if _ltf.requires_runtime_tex_scope(content):
+                if _ltf.requires_runtime_tex_scope(content, main_file[:match.start()]):
                     print(
                         f"[driver] ⚠️  保留作用域敏感 TeX include，交由 TeX 运行时解析: {target}",
                         flush=True,

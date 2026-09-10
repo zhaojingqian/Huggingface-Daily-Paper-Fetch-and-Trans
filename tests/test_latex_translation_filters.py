@@ -9,6 +9,42 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_multiline_prose_commands_remain_whole_and_byte_preserving(self):
+        text = "Before\n\\paragraph{A multiline\nheading.} Body.\nAfter\n"
+        parts = filters.latex_logical_lines(text)
+        self.assertEqual("".join(parts), text)
+        self.assertEqual(parts, ["Before\n", "\\paragraph{A multiline\nheading.} Body.\n", "After\n"])
+        incomplete = "\\paragraph{Incomplete\nBody\n"
+        self.assertEqual(filters.latex_logical_lines(incomplete), incomplete.splitlines(keepends=True))
+
+    def test_detached_metadata_boundaries_do_not_require_retranslation(self):
+        for source in (
+            r"\newgeometry{top=0.9cm,bottom=1.9cm,left=2cm,right=2cm}",
+            "No text other than the specified text may appear.",
+            "Only the specified Chinese and English text inside the quotation marks above may appear; do not generate any other language.",
+            r"| |-- (*@\node{components/\{artifacts,common\}/}@*)" "\n"
+            r"| `-- (*@\node{contexts/BrainContext.tsx}@*)",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(filters.is_translation_exempt_fragment(source))
+                self.assertFalse(filters.llm_translation_response_untranslated(source, source))
+        self.assertFalse(filters.is_identifier_catalog_fragment("|-- This ordinary sentence mentions src/file.py"))
+
+    def test_short_heading_translation_and_formula_catalog_are_not_english_echoes(self):
+        source = r"\paragraph{Reinforcement Learning (RL)}"
+        translated = r"\paragraph{强化学习（Reinforcement Learning, RL）}"
+        self.assertFalse(filters.llm_translation_response_untranslated(source, translated))
+        self.assertTrue(filters.llm_translation_response_untranslated(source, source))
+        catalog = r"\paragraph{$\beta$ (KDRL, KDRL-mask, HDPO).}"
+        self.assertFalse(filters.llm_translation_response_untranslated(catalog, catalog))
+
+    def test_author_names_do_not_dilute_translated_footnote(self):
+        prefix = r"Steve Yves, Shan Yang, Liefeng Bo, Zilong Zheng, Kai Yu, Eng-Siong Chng, Xie Chen\textsuperscript{*}\begingroup\def\thefootnote{*}"
+        source = prefix + r"\footnotetext[0]{Xie Chen is the corresponding author.}\endgroup"
+        translated = prefix + r"\footnotetext[0]{Xie Chen 是通讯作者。}\endgroup"
+        self.assertFalse(filters.llm_translation_response_untranslated(source, translated))
+        self.assertTrue(filters.llm_translation_response_untranslated(source, source))
+
     def test_tex_comment_split_uses_backslash_parity(self):
         literal_percent = r"\% keeps the following text"
         comment_after_even_run = r"\\% drops the following text"
@@ -29,6 +65,10 @@ class LatexTranslationFiltersTest(unittest.TestCase):
         self.assertGreater(
             filters.rank_main_tex_candidate("extract/main.tex", entrypoint, candidates),
             filters.rank_main_tex_candidate("extract/paper_body.tex", body, candidates),
+        )
+        self.assertGreater(
+            filters.rank_main_tex_candidate("main.tex", r"\input{template}\begin{document}Body\end{document}", candidates),
+            filters.rank_main_tex_candidate("template.tex", r"\documentclass{article}", candidates),
         )
 
     def test_plain_rescue_leaves_split_formatting_fragments_opaque(self):
@@ -636,9 +676,20 @@ class LatexTranslationFiltersTest(unittest.TestCase):
             response,
         ))
 
+    def test_literal_display_payload_does_not_hide_surrounding_prose(self):
+        payload = "指定文字顶部：Bridges and gardens unfold beside the water. 只允许出现以上指定文字。"
+        self.assertTrue(filters.mixed_untranslated_english_clauses(
+            "下面这段说明还没有翻译。" + payload
+            + "This method improves the accuracy of the model."
+        ))
+        self.assertTrue(filters.mixed_untranslated_english_clauses(
+            "本文讨论指定文字的处理方法。This method improves the accuracy of the model."
+        ))
+
     def test_mixed_clause_gate_keeps_names_quotes_and_code(self):
         source = "This sentence must be translated into Chinese."
         for response in (
+            "绘制一张城市海报。指定文字顶部：Bridges and gardens unfold beside the water. 只允许出现以上指定文字，准确渲染。",
             "我们遵循 Values in the Wild 和 LongBench v2 的评估设置。",
             "系统使用 \\textit{first care, then order, then the business of the day} 作为示例。",
             "输入句子为：``Here we see that constraints imposed by GS-EC make it superior than GS-GR in terms of retrieval.''",
@@ -2495,9 +2546,10 @@ Language: Chinese
         self.assertEqual(filters.normalize_tex_include_target(" 6_conclusion \n"), "6_conclusion")
 
     def test_requires_runtime_tex_scope_detects_catcode_sensitive_include(self):
-        self.assertTrue(filters.requires_runtime_tex_scope(r"\makeatletter\n\@ifundefined{x}{}{}"))
-        self.assertTrue(filters.requires_runtime_tex_scope(r"\catcode`\@=11"))
-        self.assertFalse(filters.requires_runtime_tex_scope(r"\textbf{普通正文}"))
+        self.assertTrue(filters.requires_runtime_tex_scope(r"\makeatletter\n\@ifundefined{x}{}{}", r"\resizebox{1cm}{!}{"))
+        self.assertTrue(filters.requires_runtime_tex_scope(r"\catcode`\@=11", r"\wrapper{"))
+        self.assertFalse(filters.requires_runtime_tex_scope(r"\textbf{普通正文}", r"\wrapper{"))
+        self.assertFalse(filters.requires_runtime_tex_scope(r"\makeatletter\documentclass{article}", ""))
 
     def test_fontawesome_command_names_excludes_argument_based_fa_icon(self):
         text = r"\faRobot \faCheckCircle \faIcon{github} \faRobot"

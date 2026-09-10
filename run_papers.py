@@ -813,7 +813,8 @@ def retry_pdf(mode=None, key=None, keys=None, return_stats=False, processed_ids=
             if key is not None
             else list(keys)
             if keys is not None
-            else sorted(os.listdir(mode_path))
+            else sorted(k for k in os.listdir(mode_path)
+                        if os.path.isfile(mode_index_path(m, k)))
         )
 
         for k in selected_keys:
@@ -977,7 +978,8 @@ def repair(mode=None, key=None, keys=None, return_stats=False, processed_ids=Non
             if key is not None
             else list(keys)
             if keys is not None
-            else sorted(os.listdir(mode_path))
+            else sorted(k for k in os.listdir(mode_path)
+                        if os.path.isfile(mode_index_path(m, k)))
         )
         for k in selected_keys:
             idx_file = mode_index_path(m, k)

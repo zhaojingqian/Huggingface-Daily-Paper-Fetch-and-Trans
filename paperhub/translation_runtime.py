@@ -26,7 +26,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-09-01-v71-eligibility"
+    "paper-trans-splitter-2026-09-10-v72-logical-lines"
 )
 
 
@@ -52,8 +52,8 @@ def _load_translation_recovery(sources):
         return {}
     if not isinstance(payload, dict):
         return {}
-    if payload.get("splitter") != SPLITTER_CACHE_VERSION:
-        return {}
+    # Splitter versions invalidate temp.pkl, not independently validated work:
+    # exact source/model identity and today's gates own response reuse below.
     model = os.environ.get("PAPER_TRANS_EFFECTIVE_MODEL", "")
     if payload.get("model", "") != model:
         return {}
@@ -383,7 +383,7 @@ def _patch_latex_translation_splitter():
 
     def _split_preserved_text(text: str, state: dict):
         nodes = []
-        for line in text.splitlines(keepends=True):
+        for line in _ltf.latex_logical_lines(text):
             if r"\begin{document}" in line:
                 _append(nodes, line, True)
                 state["in_document"] = True
@@ -604,7 +604,7 @@ def _patch_latex_translation_splitter():
         }
         promoted = 0
         for node in nodes:
-            for line in node.string.splitlines(keepends=True):
+            for line in _ltf.latex_logical_lines(node.string):
                 if r"\begin{document}" in line:
                     state["in_document"] = True
                 state["env_stack"] = _promote_semantic_frame(
@@ -803,9 +803,13 @@ def _patch_latex_llm_rate_limit_handling():
             for item in inputs
         ]
         recovered = _load_translation_recovery(validation_sources)
+        # Structural source data has an authoritative answer already. Never
+        # ask the model to change it and then reject that change as corruption.
+        recovered.update({index: source for index, source in enumerate(validation_sources)
+                          if _ltf.is_translation_exempt_fragment(source)})
         if recovered and not args and inputs:
             print(
-                f"[driver] ♻️  已加载 {len(recovered)} 个已完成 chunk 恢复账本",
+                f"[driver] ♻️  可复用/原样保留 {len(recovered)} 个 chunk",
                 flush=True,
             )
             missing = [

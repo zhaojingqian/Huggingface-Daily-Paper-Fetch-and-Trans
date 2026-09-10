@@ -11,7 +11,7 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 
 ## 当前能力
 
-<!-- translation chunk policy: v71-eligibility -->
+<!-- translation chunk policy: v72-logical-lines -->
 
 | 功能 | 状态 | 说明 |
 |---|---:|---|
@@ -30,7 +30,7 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 
 ### 翻译运行时边界（2026-09-01）
 
-当前 chunk 策略版本为 `v71-eligibility`；后文旧版本号仅保留为变更历史。
+当前 chunk 策略版本为 `v72-logical-lines`；多行标题、图注和脚注按完整参数处理。恢复账本按相同模型、源片段及当前校验复用，切分升级只使切分缓存失效。
 
 Docker 仍是全文翻译的必要运行时边界：宿主机没有 TeX 编译器或
 gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前 slim 镜像约
@@ -180,7 +180,7 @@ splitter 优化基于 gpt-academic 原始 `LatexPaperSplit`：先保留上游 ma
 会再次套用类似上游 `post_process` 的语义收口，过短、命令占比过高或
 空白/分隔符类 chunk 会降级回 preserve。相邻正文及其间纯空白会合并为
 上下文更完整、普通正文最长 2400 字符的请求；结构/引用密集片段按共享策略
-降为 1900/1500，超长正文继续按句子边界拆分，作者、单位、邮箱、宏定义和纯环境配置不送模型。当前 **chunk v71-eligibility** 还会剥离
+降为 1900/1500，超长正文继续按句子边界拆分，作者、单位、邮箱、宏定义和纯环境配置不送模型。当前策略还会剥离
 gpt-academic 拼在 fragment 前的英文翻译指令，只用真实论文片段检查漏译；
 inline code、URL 和 TeX 注释也不参与正文覆盖率。纯 `[key=value, ...]` 配置
 片段、`\setlist`/`\hypersetup` 等纯布局配置命令与 citation-heavy 的模型/数据集名称目录保持结构、不送模型，避免误判为
@@ -574,7 +574,7 @@ patch、五模式统计、同步数量和残留 ID 到
 不会继续让论文逐篇重复失败，并通过现有 SMTP 配置发送 Gmail 告警；
 恢复额度后重新运行同一 retry 命令即可继续。
 
-全文翻译当前使用 chunk v71-eligibility。正文按数学邻接、章节结构和自然句边界
+全文翻译的当前 chunk 版本见本文开头。正文按数学邻接、章节结构和自然句边界
 整理，普通首轮请求上限 2400 字符，结构/引用密集片段自动降为 1900/1500。引用密度只作为失败诊断证据，不再把
 所有段落预拆成 120/350 字符；结构门禁失败后只细分对应 slot。
 上游若从 citation key 中间切断片段，会优先闭合引用再送模型。纯 TikZ path、
