@@ -1267,7 +1267,7 @@ def clean_latex_intermediates(workfolder):
 
 
 def sanitize_latex_aux_file(workfolder):
-    """Drop fragile aux rows while keeping citation and compact label data."""
+    """Drop broken aux rows without changing the compiler-owned label schema."""
     import re as _re
 
     aux_path = os.path.join(workfolder, 'merge_translate_zh.aux')
@@ -1280,8 +1280,7 @@ def sanitize_latex_aux_file(workfolder):
         return 0
     kept = []
     removed = 0
-    compacted = 0
-    label_re = _re.compile(r'^\\newlabel\{([^{}]+)\}\{\{([^{}]*)\}\{([^{}]*)\}')
+    label_re = _re.compile(r'^\\newlabel\{[^{}]+\}\{')
     for line in lines:
         stripped = line.lstrip()
         if stripped.startswith(r'\@writefile'):
@@ -1289,25 +1288,18 @@ def sanitize_latex_aux_file(workfolder):
             continue
         if stripped.startswith(r'\newlabel'):
             m = label_re.match(stripped)
-            if m:
-                kept.append(r'\newlabel{' + m.group(1) + '}{{' + m.group(2) + '}{' + m.group(3) + '}}' + '\n')
-                if kept[-1] != line:
-                    compacted += 1
+            if m and _ltf._matching_unescaped_brace(stripped, m.end() - 1) == len(stripped.rstrip()) - 1:
+                kept.append(line)
                 continue
             removed += 1
             continue
         kept.append(line)
 
-    if removed or compacted:
+    if removed:
         with open(aux_path, 'w', encoding='utf-8') as f:
             f.writelines(kept)
-        detail = []
-        if removed:
-            detail.append(f"移除 {removed} 行")
-        if compacted:
-            detail.append(f"压缩 {compacted} 个 newlabel")
-        print(f"[driver] 🧹 sanitize_latex_aux_file: {', '.join(detail)}", flush=True)
-    return removed + compacted
+        print(f"[driver] 🧹 sanitize_latex_aux_file: 移除 {removed} 行", flush=True)
+    return removed
 
 
 def synthesize_bbl_from_tex(workfolder, trans_tex_path):

@@ -1106,6 +1106,11 @@ def llm_translation_response_invalid(source: str, response: str) -> str:
     """
     source_value = extract_translation_fragment(source)
     value = response or ""
+    # URLs are literal payloads, unlike href's visible translated caption.
+    # Validate before the prose probe hides URL commands and their arguments.
+    url_payload = re.compile(r"\\(?:url|nolinkurl|href)\s*\{([^{}]*)\}")
+    if Counter(url_payload.findall(source_value)) != Counter(url_payload.findall(value)):
+        return "latex_url_payload_mismatch"
     # A protected inline prompt/schema should have been removed by the
     # splitter.  If an upstream boundary nevertheless leaks a complete block,
     # accept only an exact pass-through and force a retry for any mutation.
@@ -1163,6 +1168,7 @@ def translation_retry_system_prompt(prompt: str, reason: str) -> str:
         "critical_latex_structure_mismatch",
         "citation_structure_mismatch",
         "latex_brace_balance_mismatch",
+        "latex_url_payload_mismatch",
         "request_or_untranslated",
     }:
         return value
@@ -1410,6 +1416,13 @@ def is_inline_prompt_source_data_block(text: str) -> bool:
     example, or discuss a prompt, and must remain eligible for translation.
     """
     value = extract_translation_fragment(text)
+    markup = re.sub(r"\\(?:allowbreak|par)(?:\{\})?", "", value)
+    markup = markup.replace(r"\textless{}", "<").replace(r"\textgreater{}", ">").replace(r"\_", "_").strip()
+    if re.fullmatch(r"</?[A-Za-z_][\w:-]*(?:\s+[\w:-]+=(?:\"[^\"]*\"|'[^']*'))*\s*/?>", markup):
+        return True
+    scalar = re.fullmatch(r"<(?P<tag>[A-Za-z_][\w:-]*)>(?P<body>[^<>]+)</(?P=tag)>", markup)
+    if scalar and re.fullmatch(r"[A-Za-z0-9_./:+-]+", scalar.group("body")):
+        return True
     if _is_single_line_source_instruction(value):
         return True
     if TRANSLATION_PROMPT_TEMPLATE_RE.search(value):
@@ -1617,8 +1630,7 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
             inner = inner.rstrip()[:-1].rstrip()
             trimmed_closers += 1
             items = _split_top_level_option_items(inner)
-    minimum_items = 2 if bracketed else 3
-    if not items or len(items) < minimum_items or any(not item for item in items):
+    if not items or any(not item for item in items):
         return False
 
     assignment_count = 0
@@ -1706,7 +1718,7 @@ def is_latex_key_value_option_list(text: str) -> bool:
     r"""Recognize bracketed or splitter-detached LaTeX configuration lists.
 
     Upstream can detach the contents of ``[...]`` into a standalone chunk.
-    Requiring three items and two assignments for the unbracketed form avoids
+    Requiring two assignments and checking their values avoids
     treating ordinary comma-separated paper prose as configuration.
     """
     return _is_key_value_option_list(text, allow_unbracketed=True)
@@ -2143,6 +2155,9 @@ def _hide_marked_acronym_expansions(text: str) -> str:
 def _mixed_language_probe(text: str) -> str:
     """Return ordinary prose while hiding literal English examples/code."""
     value = extract_translation_fragment(text)
+    value = re.sub(r"\\allowbreak(?:\{\})?", "", value)
+    # A literal SQL null predicate is data, even inside translated prose.
+    value = re.sub(r"\b[A-Za-z_]\w*(?:\.\w+)*\s+IS\s+(?:NOT\s+)?NULL\b", " ", value)
     if is_tikz_drawing_fragment(value):
         return ""
     # Failure-box task/trajectory/result payloads are verbatim source data.
@@ -2434,7 +2449,7 @@ def is_email_catalog_fragment(text: str) -> bool:
     if not count:
         return False
     residual = re.sub(
-        r"\\(?:email|emails|emailtext|href|url|nolinkurl|quad|qquad)\b\*?",
+        r"\\(?:email|emails|emailtext|href|url|nolinkurl|quad|qquad|centering|small|par)\b\*?",
         " ",
         residual,
         flags=re.IGNORECASE,
@@ -2452,7 +2467,7 @@ def is_benchmark_name_catalog(text: str) -> bool:
     strong identifier shape on each item so explanatory lists still reach the
     translator.
     """
-    value = extract_translation_fragment(text or "").strip()
+    value = extract_translation_fragment(text or "").strip().rstrip(".。")
     if not value or len(value) > 500 or re.search(r"[.!?。！？:]", value):
         return False
     value = re.sub(r"\\(?:and|ampersand)\b", ",", value, flags=re.IGNORECASE)
@@ -2462,7 +2477,7 @@ def is_benchmark_name_catalog(text: str) -> bool:
         for part in re.split(r"\s*[,;，、]\s*|\s+(?:and|or)\s+", value)
         if part.strip()
     ]
-    if len(parts) < 3:
+    if len(parts) < 2:
         return False
 
     def name_like(part: str) -> bool:
@@ -2480,10 +2495,12 @@ def is_benchmark_name_catalog(text: str) -> bool:
             or token.isupper()
             or (len(token) > 1 and any(char.isupper() for char in token[1:]))
             for token in tokens
-        )
+        ) or (len(tokens) > 1 and all(token[0].isupper() for token in tokens))
 
     accepted = sum(name_like(part) for part in parts)
-    return accepted == len(parts)
+    return accepted == len(parts) and bool(re.search(
+        r"[A-Za-z][0-9]|[A-Za-z][-_.+][A-Za-z0-9]|[a-z][A-Z]|\b[A-Z]{2,}\b", value
+    ))
 
 
 def is_contact_metadata_fragment(text: str) -> bool:
@@ -2713,6 +2730,9 @@ def is_structural_input_command_fragment(text: str) -> bool:
 def is_tool_call_result_fragment(text: str) -> bool:
     """Recognize a standalone rendered function call followed by its result."""
     value = extract_translation_fragment(text or "").strip()
+    probe = re.sub(r"\\allowbreak(?:\{\})?", "", value).replace(r"\{", "{")
+    if re.match(r'\{\s*"request"\s*:\s*\{\s*"code"\s*:\s*"', probe):
+        return True
     return bool(
         re.match(
             r"^\\texttt\{[A-Za-z][A-Za-z0-9]*(?:\\_+[A-Za-z0-9]+)*"
@@ -2783,7 +2803,11 @@ def _is_code_like_environment_fragment(value: str) -> bool:
     code signatures avoids hiding ordinary prose that merely says "if" or
     "return".
     """
-    probe = value.replace(r"\_", "_")
+    probe = re.sub(r"\\allowbreak(?:\{\})?", "", value).replace(r"\_", "_")
+    if (re.match(r"\s*SELECT\b", probe, re.IGNORECASE)
+            and re.search(r"\bFROM\s+[A-Za-z_]\w*", probe, re.IGNORECASE)
+            and re.search(r"\b(?:WHERE|JOIN|GROUP\s+BY|ORDER\s+BY)\b", probe, re.IGNORECASE)):
+        return True
     has_environment = bool(re.search(r"\\begin\{[A-Za-z][^{}]*\}", probe))
     if len(probe) > 2400:
         return False
@@ -3184,6 +3208,13 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
     raw_source = extract_translation_fragment(source)
     if is_translation_exempt_fragment(raw_source):
         return False
+    # Table labels have independent language ratios. Other cells' benchmark
+    # names must not dilute a correctly translated label or hide a prose echo.
+    source_cells = re.split(r"(?<!\\)&", raw_source)
+    response_cells = re.split(r"(?<!\\)&", response or "")
+    if len(source_cells) >= 3 and len(source_cells) == len(response_cells):
+        return any(llm_translation_response_untranslated(a, b)
+                   for a, b in zip(source_cells, response_cells))
     source_value = strip_inline_code_commands(raw_source)
     if is_translated_heading_proper_name_catalog(
         source_value,
@@ -3245,16 +3276,24 @@ TRANSLATION_STRUCTURAL_UNIT_RE = re.compile(
 
 
 def latex_logical_lines(text: str) -> List[str]:
-    """Keep multiline prose-command arguments whole without changing bytes."""
+    """Keep prose-command arguments and math spans whole without changing bytes."""
     commands = re.compile(r"\\(?:section|subsection|subsubsection|paragraph|subparagraph|caption|footnote|footnotetext)\*?(?:\[[^\]]*\])?\s*\{")
+    spans = [(m.start(), m.end()) for m in MATH_SPAN_RE.finditer(text)]
+    for match in commands.finditer(text):
+        close = _matching_unescaped_brace(text, match.end() - 1)
+        if close >= 0:
+            spans.append((match.start(), close + 1))
+    spans.sort()
+    span_index = 0
     lines = []
     start = 0
     while start < len(text):
         end = text.find("\n", start)
         end = len(text) if end < 0 else end + 1
-        for match in commands.finditer(text, start, end):
-            close = _matching_unescaped_brace(text, match.end() - 1)
-            if close >= end:
+        while span_index < len(spans) and spans[span_index][0] < end:
+            close = spans[span_index][1]
+            span_index += 1
+            if close > end:
                 newline = text.find("\n", close)
                 end = len(text) if newline < 0 else newline + 1
         lines.append(text[start:end])

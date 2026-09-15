@@ -10,6 +10,21 @@ from paperhub import translation_runtime
 
 
 class TranslationRecoveryTest(unittest.TestCase):
+    def test_merge_restores_source_whitespace_without_inventing_boundaries(self):
+        toolbox = types.SimpleNamespace(fix_content=lambda translated, source: translated.strip())
+        actions = types.SimpleNamespace()
+        package = types.SimpleNamespace(latex_toolbox=toolbox, latex_actions=actions)
+        with mock.patch.dict(sys.modules, {"crazy_functions.latex_fns": package}):
+            translation_runtime._patch_latex_fix_content_artifacts()
+            for source, translated, expected in (
+                ("config\\par\n", "配置\\par", "配置\\par\n"),
+                ("\nstatus", "状态", "\n状态"),
+                ("{caption}", "{标题}", "{标题}"),
+            ):
+                self.assertEqual(toolbox.fix_content(translated, source), expected)
+                self.assertEqual(toolbox.fix_content(expected, source), expected)
+            self.assertIs(actions.fix_content, toolbox.fix_content)
+
     def test_structural_sources_never_reach_translation_api(self):
         request = mock.Mock(side_effect=AssertionError("structural data must not call API"))
         utils = types.SimpleNamespace(
@@ -19,7 +34,7 @@ class TranslationRecoveryTest(unittest.TestCase):
         source = r"\newgeometry{top=0.9cm,bottom=1.9cm,left=2cm,right=2cm}"
         with mock.patch.dict(sys.modules, {"crazy_functions": package}), \
              mock.patch.object(translation_runtime, "_load_translation_recovery", return_value={}), \
-             mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False):
+             mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False) as save:
             translation_runtime._patch_latex_llm_rate_limit_handling()
             generator = utils.request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
                 inputs_array=[source], inputs_show_user_array=["layout"],
@@ -29,6 +44,7 @@ class TranslationRecoveryTest(unittest.TestCase):
                 next(generator)
         self.assertEqual(done.exception.value, [source, source])
         request.assert_not_called()
+        save.assert_called_once_with([source], [source, source])
 
     def setUp(self):
         self.env = mock.patch.dict(

@@ -9,7 +9,47 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_url_payload_survives_translation_with_localized_caption(self):
+        source = r"See \href{https://example.org/docs}{the documentation}."
+        good = r"参阅\href{https://example.org/docs}{文档}。"
+        self.assertEqual(filters.llm_translation_response_invalid(source, good), "")
+        self.assertEqual(filters.llm_translation_response_invalid(
+            source, good.replace("example.org/docs", "example.")), "latex_url_payload_mismatch")
+        self.assertEqual(filters.llm_translation_response_invalid(
+            source, "参阅文档。"), "latex_url_payload_mismatch")
+
+    def test_detached_catalogs_keep_layout_but_not_prose(self):
+        for text in (
+            r"{\centering\small \{name.one, name.two\}@gmail.com\par}",
+            "GSM8K, GSM-Symbolic, Minerva Math, and MATH-500.",
+            "BigCodeBench, HumanEval, DS-1000, MBPP, MultiPL-E HumanEval, and MultiPL-E MBPP.",
+            "PIQA, CommonsenseQA, and SocialIQA.",
+            r"style=memoryprompt, backgroundcolor=\color{Frame!8!white},",
+            r"SELECT COUNT(*)\allowbreak{} AS cnt FROM items\_\allowbreak{}g1 WHERE active=1",
+            r'\textless{}ARTIFACT id="1" type="sheet" change="deleted"\textgreater{}\par',
+            r'\textless{}path\textgreater{}site\_\allowbreak{}2024.xlsx\textless{}/\allowbreak{}path\textgreater{}\par',
+            r'\{"request":\allowbreak{} \{"code":\allowbreak{} "python example.py"\}\}',
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(filters.is_translation_exempt_fragment(text))
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            r"\paragraph{Uni-MMMU-GaU and RealUnify-GEU.}",
+            r"\paragraph{Uni-MMMU-GaU 和 RealUnify-GEU。}"))
+        for text in ("New Method, Better Results.", "We SELECT examples FROM the dataset WHERE possible."):
+            self.assertFalse(filters.is_translation_exempt_fragment(text))
+        self.assertFalse(filters.is_email_catalog_fragment("Contact name.one@gmail.com to request access."))
+        table = r"\rowcolor{blue!5}\cellcolor{white}Method & M500 & A24 & Oly & Min & GSM8K & K\&K & LD & Track"
+        self.assertFalse(filters.llm_translation_response_untranslated(table, table.replace("Method", "方法")))
+        self.assertTrue(filters.llm_translation_response_untranslated(
+            "This method improves the results & A & B", "This method improves the results & A & B"))
+        sql_prose = r"非空文本应使用 body IS NOT NULL AND TRIM(body)\allowbreak{} \textless{}\textgreater{} 空字符串进行筛选。"
+        self.assertFalse(filters.mixed_untranslated_english_clauses(sql_prose))
+        self.assertTrue(filters.mixed_untranslated_english_clauses(sql_prose + " This method improves the results."))
+
     def test_multiline_prose_commands_remain_whole_and_byte_preserving(self):
+        math = "Before\nThe variance is $\\gamma\nV_{WM}$ divided by $1 +\nV_{WM}/V_E$.\nAfter\n"
+        self.assertEqual(filters.latex_logical_lines(math),
+                         ["Before\n", "The variance is $\\gamma\nV_{WM}$ divided by $1 +\nV_{WM}/V_E$.\n", "After\n"])
         text = "Before\n\\paragraph{A multiline\nheading.} Body.\nAfter\n"
         parts = filters.latex_logical_lines(text)
         self.assertEqual("".join(parts), text)

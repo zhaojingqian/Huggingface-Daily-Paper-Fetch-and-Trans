@@ -181,7 +181,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
-        "note": "优先补兼容命令、图标 fallback、中文误转义，并修复 \\par 等内建布局命令与中文粘连。",
+        "note": "先查首个编译错误与源码：合并保留源空白，aux 清理保留完整标签字段；只有确认缺失的命令才补兼容定义，避免用假宏掩盖命令粘连或交叉引用损坏。",
     },
     "compile.numeric_syntax": {
         "patches": (
@@ -329,7 +329,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一由 is_translation_exempt_fragment 判定并直接保留，不调用模型；多行标题、图注和脚注按完整参数切分，作者元数据与脚注正文分别判定。只修改共享谓词或失败 slot 策略。",
+        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一判定并原样保留；多行正文命令与公式保持完整，表格语言校验逐单元格复用，元数据不稀释正文。URL 参数保持原文，合并保留源边界空白。只修改共享谓词或失败 slot 策略。",
     },
     "quality.pdf_sustained_untranslated": {
         "patches": (

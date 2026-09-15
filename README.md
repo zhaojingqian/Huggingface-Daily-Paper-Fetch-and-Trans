@@ -11,7 +11,7 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 
 ## 当前能力
 
-<!-- translation chunk policy: v72-logical-lines -->
+<!-- translation chunk policy: v73-math-lines -->
 
 | 功能 | 状态 | 说明 |
 |---|---:|---|
@@ -30,7 +30,7 @@ Paper Hub 自动抓取 Hugging Face 热门 AI 论文，翻译标题、摘要和�
 
 ### 翻译运行时边界（2026-09-01）
 
-当前 chunk 策略版本为 `v72-logical-lines`；多行标题、图注和脚注按完整参数处理。恢复账本按相同模型、源片段及当前校验复用，切分升级只使切分缓存失效。
+当前 chunk 策略版本为 `v73-math-lines`；多行标题、图注、脚注及公式保持完整边界。恢复账本按相同模型、源片段及当前校验复用，切分升级只使切分缓存失效。
 
 Docker 仍是全文翻译的必要运行时边界：宿主机没有 TeX 编译器或
 gpt-academic 源码，容器同时提供字体、TeX 和受限进程组。当前 slim 镜像约

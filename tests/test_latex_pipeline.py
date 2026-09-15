@@ -7,6 +7,17 @@ from paperhub import latex_pipeline
 
 
 class LatexPipelineMacroTest(unittest.TestCase):
+    def test_aux_cleanup_preserves_two_and_five_field_label_schemas(self):
+        labels = (r"\newlabel{plain}{{1}{2}}" "\n"
+                  r"\newlabel{eq:test}{{3}{4}{\textbf{标题}}{equation.3}{}}" "\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "merge_translate_zh.aux"
+            path.write_text(labels + r"\@writefile{toc}{fragile}" + "\n"
+                            + r"\newlabel{broken}{{1}{2}" + "\n")
+            self.assertEqual(latex_pipeline.sanitize_latex_aux_file(tmp), 2)
+            self.assertEqual(path.read_text(), labels)
+            self.assertEqual(latex_pipeline.sanitize_latex_aux_file(tmp), 0)
+
     def test_optional_list_fallback_keeps_one_standard_list_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper.tex"

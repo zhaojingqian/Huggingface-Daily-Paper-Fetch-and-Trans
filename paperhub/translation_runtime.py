@@ -26,7 +26,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-09-10-v72-logical-lines"
+    "paper-trans-splitter-2026-09-15-v73-math-lines"
 )
 
 
@@ -737,15 +737,21 @@ def _patch_latex_fix_content_artifacts():
     def _patched_fix_content(final_tex, node_string):
         fixed = _orig_fix_content(final_tex, node_string)
         cleaned, total = _ltf.strip_llm_translation_artifacts(fixed)
-        if not total:
-            return fixed
-        if not cleaned.strip():
+        if total and not cleaned.strip():
             print(
                 "[driver] ⚠️  fix_content: 翻译结果仅剩非原文残留，回退原始 chunk",
                 flush=True,
             )
             return node_string
-        print(f"[driver] 🔧 fix_content: 清理 {total} 处非原文翻译残留", flush=True)
+        if total:
+            print(f"[driver] 🔧 fix_content: 清理 {total} 处非原文翻译残留", flush=True)
+        # Source whitespace is a TeX token boundary, not model-owned prose.
+        # Restore lost edges before concatenation can turn \par + status
+        # into an undefined command. Never invent separators absent in source.
+        if node_string[:1].isspace() and not cleaned[:1].isspace():
+            cleaned = node_string[:len(node_string) - len(node_string.lstrip())] + cleaned
+        if node_string[-1:].isspace() and not cleaned[-1:].isspace():
+            cleaned += node_string[len(node_string.rstrip()):]
         return cleaned
 
     _ltb.fix_content = _patched_fix_content
@@ -1014,6 +1020,7 @@ def _patch_latex_llm_rate_limit_handling():
                             "critical_latex_structure_mismatch",
                             "citation_structure_mismatch",
                             "latex_brace_balance_mismatch",
+                            "latex_url_payload_mismatch",
                         }
                         or (
                             invalid_reasons.get(index) == "request_or_untranslated"
@@ -1191,10 +1198,12 @@ def _patch_latex_llm_rate_limit_handling():
                     f"第 {round_index} 轮重试后",
                 )
 
+        # Translation success is independent of later compilation success.
+        # Persist validated responses on both outcomes before handing off TeX.
+        persist_recovery(result)
         if remaining:
             # Never cache a temp.pkl where request failures are silently
             # merged back into the output as English source text.
-            persist_recovery(result)
             raise RuntimeError(
                 "LLM request/untranslated/structural failures remain in "
                 f"{len(remaining)} translation chunks after bounded retry"
