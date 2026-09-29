@@ -292,9 +292,12 @@ weekly 抓取与全模式 repair。
 
 ```bash
 systemctl status paper-trans-web.service
-systemctl restart paper-trans-web.service
+workspace-ctl restart paper
 tail -f /root/workspace/apps/paper-trans/logs/web.log
 ```
+
+更新 Web 服务及其导入模块后，先确认没有运行中的手动任务，再通过上述入口重启并验证 `/submit`。
+Python 常驻进程不会随源码更新自动重载；若出现磁盘源码已存在的函数仍无法导入，先核对进程启动时间，勿添加兼容别名或动态 reload。
 
 ---
 
