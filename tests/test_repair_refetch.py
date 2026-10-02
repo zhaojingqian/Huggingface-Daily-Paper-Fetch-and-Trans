@@ -10,6 +10,16 @@ import run_repair
 
 
 class RepairRefetchScheduleTest(unittest.TestCase):
+    def test_recent_manual_keys_require_an_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            today = datetime.now().date().isoformat()
+            os.mkdir(os.path.join(temp, today))
+            with patch.object(run_repair, "mode_dir", return_value=temp):
+                self.assertEqual(run_repair._existing_recent_keys("manual", 30), [])
+                with open(os.path.join(temp, today, "index.json"), "w") as handle:
+                    json.dump({"papers": []}, handle)
+                self.assertEqual(run_repair._existing_recent_keys("manual", 30), [today])
+
     def test_weekly_current_key_is_refetchable_after_sunday_trigger(self):
         self.assertEqual(
             run_repair._pending_refetch_key("weekly", datetime(2026, 6, 28, 1, 59)),

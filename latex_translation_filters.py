@@ -120,7 +120,7 @@ def rank_main_tex_candidate(path: str, content: str, candidates: Iterable[str]) 
     referenced_stems = {PurePosixPath(ref).stem for ref in references}
 
     score = 0
-    if re.search(r"\\begin\s*\{document\}", value):
+    if re.search(r"\\(?:begin|end)\s*\{document\}", value):
         score += 200
     if basename in {"main.tex", "paper.tex", "root.tex", "manuscript.tex", "article.tex"}:
         score += 100
@@ -568,7 +568,7 @@ LLM_TRANSLATION_TASK_ECHO_RE = re.compile(
 
 _CRITICAL_LATEX_COMMAND_RE = re.compile(
     r"\\(?P<name>begin|end|item|caption|captionof|section|subsection|subsubsection|"
-    r"paragraph|subparagraph|label|ref|eqref|autoref|cref|Cref)\*?\b"
+    r"paragraph|subparagraph|label|ref|eqref|autoref|cref|Cref|[A-Za-z]+name)\*?\b"
 )
 _MOVABLE_REFERENCE_COMMANDS = frozenset({
     "cite", "citep", "citet", "citealt", "citealp", "ref", "eqref",
@@ -1197,15 +1197,15 @@ TRANSLATION_PROMPT_MARKERS = (
     "Answer me only with the translated text:\r\n\r\n",
 )
 INLINE_CODE_COMMAND_RE = re.compile(
-    r"\\(?:[A-Za-z@]*tt|cmd|path|url|nolinkurl)\*?"
+    r"\\(?:[A-Za-z@]*tt|code|cmd|path|url|nolinkurl)\*?"
     r"(?:\[[^\]]*\])?\{[^{}]*\}"
 )
 INLINE_CODE_OPEN_RE = re.compile(
-    r"\\(?:[A-Za-z@]*tt|cmd|path|url|nolinkurl)\*?"
+    r"\\(?:[A-Za-z@]*tt|code|cmd|path|url|nolinkurl)\*?"
     r"(?:\[[^\]]*\])?\{"
 )
 CITATION_COMMAND_RE = re.compile(
-    r"\\(?:cite|citep|citet|citealp|citeauthor|citeyear|parencite|textcite)"
+    r"\\(?:cite|citep|citet|citenum|citealp|citeauthor|citeyear|parencite|textcite)"
     r"\*?(?:\[[^\]]*\]){0,2}\{[^{}]*\}",
     re.IGNORECASE,
 )
@@ -1418,6 +1418,10 @@ def is_inline_prompt_source_data_block(text: str) -> bool:
     value = extract_translation_fragment(text)
     markup = re.sub(r"\\(?:allowbreak|par)(?:\{\})?", "", value)
     markup = markup.replace(r"\textless{}", "<").replace(r"\textgreater{}", ">").replace(r"\_", "_").strip()
+    if len(re.findall(r"<\|[A-Za-z_]+\|>", markup)) >= 2:
+        payload = re.sub(r"<[^<>]+>|\\[A-Za-z@]+|\[[^\]]*\]", " ", markup)
+        if all(len(word) == 1 and word.isupper() for word in re.findall(r"[A-Za-z]+", payload)):
+            return True
     if re.fullmatch(r"</?[A-Za-z_][\w:-]*(?:\s+[\w:-]+=(?:\"[^\"]*\"|'[^']*'))*\s*/?>", markup):
         return True
     scalar = re.fullmatch(r"<(?P<tag>[A-Za-z_][\w:-]*)>(?P<body>[^<>]+)</(?P=tag)>", markup)
@@ -1769,6 +1773,8 @@ def is_latex_configuration_command_fragment(text: str) -> bool:
     if not match or match.group("name").lower() not in _LATEX_CONFIGURATION_COMMANDS:
         return False
     body = match.group("body").strip()
+    if match.group("name").lower() == "hypersetup":
+        return _unescaped_brace_balance(value) == 0
     if not body:
         return True
     if is_latex_key_value_option_list(body):
@@ -1918,7 +1924,7 @@ def is_translated_heading_proper_name_catalog(
 ) -> bool:
     """Allow a translated short heading followed only by a proper-name list."""
     source_match = re.match(
-        r"^\s*\\(?:paragraph|subparagraph)\*?\{[^{}]*\}\s*(?P<tail>.*)$",
+        r"^\s*\\(?:section|subsection|subsubsection|paragraph|subparagraph)\*?\{[^{}]*\}\s*(?P<tail>.*)$",
         source or "",
         flags=re.DOTALL,
     )
@@ -1936,7 +1942,7 @@ def is_translated_heading_proper_name_catalog(
     if len(re.findall(r"[\u4e00-\u9fff]", response or "")) < 4:
         return False
     tail = MATH_SPAN_RE.sub(" ", source_match.group("tail"))
-    if len(re.findall(r"[,;\n]", tail)) < 4:
+    if len(re.findall(r"[,;\n]", tail)) < 2:
         return False
     tokens = re.findall(
         r"\b[A-Za-z][A-Za-z0-9]*(?:[-_.+][A-Za-z0-9]+)*\b",
@@ -2002,7 +2008,10 @@ def _natural_language_probe(text: str) -> str:
     value = re.sub(r"\\item\s*\[([^\]]+)\]", r" \1 ", value)
     value = CITATION_COMMAND_RE.sub(" ", value)
     value = REFERENCE_PAYLOAD_COMMAND_RE.sub(" ", value)
-    value = MATH_SPAN_RE.sub(" ", value)
+    # A detached chunk can start inside $...$. Pairing its closing delimiter
+    # with the next opening one would hide actual prose, not mathematics.
+    if len(re.findall(r"(?<!\\)\$", value)) % 2 == 0:
+        value = MATH_SPAN_RE.sub(" ", value)
     value = re.sub(
         r"\\(?:begin|end)\{[^{}]+\}(?:\[[^\]]*\])?",
         " ",
@@ -2109,7 +2118,7 @@ def _hide_marked_acronym_expansions(text: str) -> str:
     marker_re = re.compile(
         r"(?:"
         r"\\underline\{\\texttt\{[A-Z]\}\}"
-        r"|\\(?:underline|textbf|textit)\{[A-Z][a-z]?\}"
+        r"|\\(?:underline|textbf|textit)\{[A-Z]{1,3}[a-z]?\}"
         r")[A-Za-z][A-Za-z-]*"
     )
     head_re = re.compile(
@@ -2125,12 +2134,16 @@ def _hide_marked_acronym_expansions(text: str) -> str:
         first = markers[0]
         absolute_start = start + first.start()
         tail = value[absolute_start:window_end]
-        terminal = re.search(r"[,.;:!?)]|$", tail)
+        terminal = re.search(r"[,.;:!?)，。；：！？）]|$", tail)
         absolute_end = absolute_start + (
             terminal.start() if terminal else len(tail)
         )
         if absolute_end > absolute_start:
             spans.append((absolute_start, absolute_end))
+
+    for parenthesis in re.finditer(r"[(（]([^()（）]{1,320})[)）]", value):
+        if len(list(marker_re.finditer(parenthesis.group(1)))) >= 3:
+            spans.append(parenthesis.span())
 
     for head in head_re.finditer(value):
         window_end = min(len(value), head.end() + 320)
@@ -2144,10 +2157,16 @@ def _hide_marked_acronym_expansions(text: str) -> str:
         window_end = min(len(value), first.start() + 240)
         window = value[first.start():window_end]
         markers = list(marker_re.finditer(window))
-        if len(markers) >= 3 and "\\underline" in window:
+        if len(markers) >= 3 and ("\\underline" in window or head_re.search(window)):
             _expansion_span(first.start(), window_end, markers)
 
-    for start, end in sorted(set(spans), reverse=True):
+    merged = []
+    for start, end in sorted(set(spans)):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
         value = value[:start] + " " + value[end:]
     return value
 
@@ -2220,6 +2239,7 @@ def is_tikz_drawing_fragment(text: str) -> bool:
         re.search(r"(?i)(?:^|\s)(?:arc|plot)\s*\[[^\]\n]+\]", value)
         and re.search(r"(?i)--\s*cycle\b", value)
     )
+    raw_path = raw_path or bool(re.match(r"\s*\([-+.\d,\s]+\)\.\.controls\s*\(", value))
     return bool(
         (commands and (
             "path picture bounding box" in lowered
@@ -2236,6 +2256,9 @@ def is_tikz_drawing_fragment(text: str) -> bool:
 def is_tikz_style_definition_fragment(text: str) -> bool:
     """Return true for pgf/TikZ style declarations split across lines."""
     value = text or ""
+    if (re.match(r"\s*(?:forked edges,\s*for tree=|scale only axis=)", value)
+            and value.count("=") >= 3):
+        return True
     return bool(re.search(
         r"(?i)(?:^|[,{\s])[A-Za-z0-9_.:-]+\s*/\."
         r"(?:style|append\s+style|initial)\s*=",
@@ -2468,17 +2491,22 @@ def is_benchmark_name_catalog(text: str) -> bool:
     translator.
     """
     value = extract_translation_fragment(text or "").strip().rstrip(".。")
+    value = re.sub(r"~?\[\s*\]", "", CITATION_COMMAND_RE.sub("", value)).strip()
     if not value or len(value) > 500 or re.search(r"[.!?。！？:]", value):
         return False
     value = re.sub(r"\\(?:and|ampersand)\b", ",", value, flags=re.IGNORECASE)
     value = re.sub(r",\s+(?:and|or)\s+", ", ", value, flags=re.IGNORECASE)
     parts = [
         part.strip()
-        for part in re.split(r"\s*[,;，、]\s*|\s+(?:and|or)\s+", value)
+        for part in re.split(r"\s*[,;，、]\s*|\s+(?:and|or|/)\s+", value)
         if part.strip()
     ]
     if len(parts) < 2:
-        return False
+        tokens = value.split()
+        return (1 <= len(tokens) <= 6 and bool(re.search(r"\d", value))
+                and bool(re.search(r"[a-z][A-Z]|[A-Za-z]-[A-Za-z]", value))
+                and all(re.fullmatch(r"(?:[A-Z][A-Za-z0-9_.+-]*|[0-9.]+)", token)
+                        for token in tokens))
 
     def name_like(part: str) -> bool:
         tokens = re.findall(
@@ -2489,13 +2517,16 @@ def is_benchmark_name_catalog(text: str) -> bool:
             return False
         if any(token.lower() in _OPAQUE_CATALOG_CONNECTORS for token in tokens):
             return False
+        if any(token.isalpha() and token.islower() and token not in _CATALOG_NAME_WORDS
+               for token in tokens):
+            return False
         return any(
             any(char.isdigit() for char in token)
             or any(char in token for char in "-_.+")
             or token.isupper()
             or (len(token) > 1 and any(char.isupper() for char in token[1:]))
             for token in tokens
-        ) or (len(tokens) > 1 and all(token[0].isupper() for token in tokens))
+        ) or all(token[0].isupper() for token in tokens)
 
     accepted = sum(name_like(part) for part in parts)
     return accepted == len(parts) and bool(re.search(
@@ -2811,6 +2842,9 @@ def _is_code_like_environment_fragment(value: str) -> bool:
     has_environment = bool(re.search(r"\\begin\{[A-Za-z][^{}]*\}", probe))
     if len(probe) > 2400:
         return False
+    if (re.match(r"\s*(?:import\s+[A-Za-z_]\w*|from\s+[\w.]+\s+import\b)", probe)
+            and re.search(r"\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\.", probe)):
+        return True
     signals = (
         bool(re.search(r"\bclass\s+[A-Za-z_]\w*(?:\([^\n{}]*\))?\s*:", probe)),
         bool(re.search(r"\bdef\s+[A-Za-z_]\w*\s*\(", probe)),
@@ -2843,6 +2877,18 @@ def is_structural_command_data_fragment(text: str) -> bool:
         return False
     if _is_code_like_environment_fragment(value):
         return True
+    if re.fullmatch(r"(?:\\leavevmode\s*)?\\pdfliteral\s+(?:direct\s*)?\{[^{}]*\}", value):
+        return True
+    if value.count(r"\colorbox") >= 3 and r"\strut" in value:
+        probe = value
+        for box in reversed(list(re.finditer(r"\\colorbox(?:\[[^\]]*\])?\{[^{}]*\}\{", value))):
+            end = _matching_unescaped_brace(value, box.end() - 1)
+            body = value[box.end():end]
+            if end >= 0 and body.startswith(r"\textcolor") and r"\strut" in body:
+                probe = probe[:box.start()] + probe[end + 1:]
+        probe = re.sub(r"\\[A-Za-z@]+|(?<![A-Za-z])(?:pt|plus)\b", "", probe)
+        if not re.search(r"[A-Za-z\u4e00-\u9fff]", probe):
+            return True
     if len(value) > 500:
         return False
     if is_latex_configuration_command_fragment(value):
@@ -3214,7 +3260,7 @@ def llm_translation_response_untranslated(source: str, response: str) -> bool:
     response_cells = re.split(r"(?<!\\)&", response or "")
     if len(source_cells) >= 3 and len(source_cells) == len(response_cells):
         return any(llm_translation_response_untranslated(a, b)
-                   for a, b in zip(source_cells, response_cells))
+                   for a, b in zip(source_cells, response_cells) if a.strip() or b.strip())
     source_value = strip_inline_code_commands(raw_source)
     if is_translated_heading_proper_name_catalog(
         source_value,
@@ -4616,6 +4662,8 @@ ZERO_ARG_LAYOUT_COMMANDS = (
     "newpage",
     "hfill",
     "vfill",
+    "ldots",
+    "cdots",
     "par",
 )
 
@@ -4941,6 +4989,7 @@ def disable_microtype_package_loads(text: str) -> Tuple[str, int]:
     # only the invocation (rather than commenting its full line) preserves any
     # surrounding AtBeginDocument/AtEndOfClass braces.
     command_patterns = (
+        re.compile(r"\\SetTracking\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}\s*\{[^{}]*\}"),
         re.compile(r"\\DisableLigatures\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}"),
         re.compile(r"\\(?:UseMicrotypeSet|microtypesetup)\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}"),
     )

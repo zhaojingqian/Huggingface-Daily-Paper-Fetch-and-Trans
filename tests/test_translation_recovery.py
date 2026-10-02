@@ -10,6 +10,32 @@ from paperhub import translation_runtime
 
 
 class TranslationRecoveryTest(unittest.TestCase):
+    def test_missing_chunks_use_normal_concurrency_not_retry_cap(self):
+        calls = []
+        def request(**options):
+            calls.append(options)
+            if False:
+                yield
+            return [value for source in options["inputs_array"]
+                    for value in (source, "这是一段完整的中文翻译正文。")]
+
+        utils = types.SimpleNamespace(
+            request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency=request)
+        sources = ["This paragraph describes the experimental results in detail."] * 21
+        with mock.patch.dict(sys.modules, {"crazy_functions": types.SimpleNamespace(crazy_utils=utils)}), \
+             mock.patch.dict(os.environ, {"PAPER_TRANS_LLM_WORKERS": "50"}), \
+             mock.patch.object(translation_runtime, "_load_translation_recovery", return_value={0: "这是一段完整的中文翻译正文。"}), \
+             mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False):
+            translation_runtime._patch_latex_llm_rate_limit_handling()
+            generator = utils.request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
+                inputs_array=sources, inputs_show_user_array=["paragraph"] * 21,
+                history_array=[[]] * 21, sys_prompt_array=["translate"] * 21)
+            with self.assertRaises(StopIteration) as done:
+                next(generator)
+        self.assertEqual(len(done.exception.value), 42)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["max_workers"], 20)
+
     def test_merge_restores_source_whitespace_without_inventing_boundaries(self):
         toolbox = types.SimpleNamespace(fix_content=lambda translated, source: translated.strip())
         actions = types.SimpleNamespace()

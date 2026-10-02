@@ -101,7 +101,7 @@ def install_gpt_academic_patches() -> bool:
                     clean = _rm_comments_simple(handle.read())
             except Exception:
                 continue
-            if r"\documentclass" in clean or _re.search(r"\\begin\s*\{document\}", clean):
+            if r"\documentclass" in clean or _re.search(r"\\(?:begin|end)\s*\{document\}", clean):
                 candidates.append(texf)
 
         if not candidates:

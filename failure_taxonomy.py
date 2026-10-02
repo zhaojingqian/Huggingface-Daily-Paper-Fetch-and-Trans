@@ -179,6 +179,12 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
                 "编译工作目录解析失败；规范化容器绝对路径后复用翻译缓存重编译。",
                 _evidence(plugin, r"FileNotFoundError.*(?:workfolder|gpt_log/arxiv_cache)"),
             )
+        if "LaTeX source unavailable: arXiv returned PDF only" in plugin:
+            return _result(
+                "translate.source_missing", "source", "manual_review", "verify_source_manifest",
+                "arXiv 仅提供 PDF，未提供 LaTeX 源码；取得源码前不要重复调用 LaTeX 翻译。",
+                "LaTeX source unavailable: arXiv returned PDF only",
+            )
         if re.search(r"Tex源文件缺失|source.*not found|找不到.*(?:tex|sty|cls)", plugin, re.I):
             return _result(
                 "translate.source_missing", "source", "restore_source", "verify_source_manifest",

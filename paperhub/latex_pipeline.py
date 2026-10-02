@@ -1184,6 +1184,22 @@ def patch_local_xelatex_compatibility_fallbacks(workfolder):
                 text = f.read()
         except Exception:
             continue
+        if os.path.basename(path) == 'colortbl.sty' and r'\insert@pcolumn' in text:
+            # A bundled new colortbl must not shadow the distribution's pair
+            # when its required array interface is absent. Keep a local copy.
+            import subprocess
+            system = subprocess.run(['kpsewhich', 'array.sty', 'colortbl.sty'],
+                                    cwd='/', capture_output=True, text=True, timeout=10)
+            paths = system.stdout.splitlines()
+            if system.returncode == 0 and len(paths) == 2 and all(os.path.isfile(p) for p in paths):
+                array_path = os.path.join(os.path.dirname(path), 'array.sty')
+                with open(array_path if os.path.isfile(array_path) else paths[0], encoding='utf-8') as handle:
+                    compatible = r'\insert@pcolumn' in handle.read()
+                if not compatible and os.path.realpath(paths[1]) != os.path.realpath(path):
+                    os.rename(path, path + '.incompatible')
+                    total += 1
+                    print('[driver] 🔧 使用发行版配套 array/colortbl，移除不兼容本地包的遮蔽', flush=True)
+                    continue
         fixed, count = _ltf.add_xelatex_compatibility_fallbacks(text)
         if not count:
             continue

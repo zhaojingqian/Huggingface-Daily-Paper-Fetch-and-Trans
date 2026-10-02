@@ -7,6 +7,25 @@ from paperhub import latex_pipeline
 
 
 class LatexPipelineMacroTest(unittest.TestCase):
+    def test_incompatible_bundled_colortbl_uses_distribution_pair(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as system:
+            local = Path(tmp) / 'colortbl.sty'
+            local.write_text(r'\insert@pcolumn')
+            array = Path(system) / 'array.sty'
+            color = Path(system) / 'colortbl.sty'
+            array.write_text(r'\insert@column')
+            color.write_text(r'\insert@column')
+            result = mock.Mock(returncode=0, stdout=f'{array}\n{color}\n')
+            with mock.patch('subprocess.run', return_value=result):
+                self.assertEqual(latex_pipeline.patch_local_xelatex_compatibility_fallbacks(tmp), 1)
+                self.assertFalse(local.exists())
+                self.assertEqual(Path(str(local) + '.incompatible').read_text(), r'\insert@pcolumn')
+                self.assertEqual(latex_pipeline.patch_local_xelatex_compatibility_fallbacks(tmp), 0)
+                local.write_text(r'\insert@pcolumn')
+                (Path(tmp) / 'array.sty').write_text(r'\def\insert@pcolumn{}')
+                self.assertEqual(latex_pipeline.patch_local_xelatex_compatibility_fallbacks(tmp), 0)
+                self.assertTrue(local.exists())
+
     def test_aux_cleanup_preserves_two_and_five_field_label_schemas(self):
         labels = (r"\newlabel{plain}{{1}{2}}" "\n"
                   r"\newlabel{eq:test}{{3}{4}{\textbf{标题}}{equation.3}{}}" "\n")

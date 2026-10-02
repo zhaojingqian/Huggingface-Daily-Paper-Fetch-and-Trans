@@ -181,7 +181,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
-        "note": "先查首个编译错误与源码：合并保留源空白，aux 清理保留完整标签字段；只有确认缺失的命令才补兼容定义，避免用假宏掩盖命令粘连或交叉引用损坏。",
+        "note": "先查首个编译错误与源码：合并保留源空白，aux 清理保留完整标签字段；colortbl/array 接口不匹配时采用发行版配套包，不伪造内部宏；禁用 microtype 同时清除其配置命令。只有确认缺失的命令才补兼容定义。",
     },
     "compile.numeric_syntax": {
         "patches": (
@@ -253,9 +253,9 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "rank_main_tex_candidate",
             "requires_runtime_tex_scope",
         ),
-        "source": "full_translate_driver.py / latex_translation_filters.py",
+        "source": "full_translate_driver.py / latex_translation_filters.py / paperhub/translation_source.py",
         "strategy": "restore_source",
-        "note": "规范 input/include 并校验源码清单；实际 document 入口优先于模板，顶层模板可展开，参数作用域内的 catcode 敏感文件留给 TeX 读取。",
+        "note": "规范 input/include 并校验源码清单；实际 document 入口（含只有 end 的组装主文件）优先于模板。PDF-only 响应立即归为源码不可用并停止网络重试，需作者提供 LaTeX，不当作临时下载故障。",
     },
     "quality.untranslated_prose": {
         "patches": (
@@ -329,7 +329,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",
-        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一判定并原样保留；多行正文命令与公式保持完整，表格语言校验逐单元格复用，元数据不稀释正文。URL 参数保持原文，合并保留源边界空白。只修改共享谓词或失败 slot 策略。",
+        "note": "读取 abnormal reason，区分请求、漏译与结构门禁；结构数据统一判定并原样保留，包括绘图参数、代码/协议 token、PDF 指令与元数据；缩写展开和专名目录不豁免尾随正文。表格逐单元格校验，URL 和 *name 命令保持原文，合并保留源边界空白。只修改共享谓词或失败 slot 策略。",
     },
     "quality.pdf_sustained_untranslated": {
         "patches": (

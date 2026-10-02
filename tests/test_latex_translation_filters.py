@@ -9,6 +9,74 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_empty_table_cells_are_not_failed_responses(self):
+        source = r"& Fields for orthogonal Fourier data set to zero & Centered residual family $A^u$ \\\\"
+        translated = r"& 正交傅里叶数据的场置零 & 中心化残差族 $A^u$ \\\\"
+        self.assertFalse(filters.llm_translation_response_untranslated(source, translated))
+        self.assertTrue(filters.llm_translation_response_untranslated(source, source))
+
+    def test_unpaired_math_boundary_must_not_hide_translated_prose(self):
+        equation = r"log p(A|s) + log p(B|s) + log p(C|s) + log p(D|s)$"
+        source = equation + "\nThis trained function estimates mutual information accurately.\n$H(S) - H(S|A)$"
+        translated = equation + "\n这个训练后的函数能够准确估计互信息。\n$H(S) - H(S|A)$"
+        self.assertFalse(filters.llm_translation_response_untranslated(source, translated))
+        self.assertTrue(filters.llm_translation_response_untranslated(source, source))
+        self.assertIn("准确估计互信息", filters._natural_language_probe(translated))
+
+    def test_token_visualization_allows_nested_return_markers_not_outer_prose(self):
+        token = r"\colorbox[HTML]{FFFFFF}{\textcolor{black}{\tiny\ttfamily\strut .\textcolor{gray}{$\hookleftarrow$}}}"
+        source = r"1pt\relax\allowbreak{}" + (token + r"\hskip 0pt plus 1pt\relax\allowbreak{}") * 3
+        self.assertTrue(filters.is_structural_command_data_fragment(source))
+        self.assertFalse(filters.is_structural_command_data_fragment("This explains the results. " + source))
+
+    def test_recent_structural_fragments_and_macro_boundaries(self):
+        acronym = r'本文介绍的方法称为 \textbf{TR}ajectory-\textbf{A}ligned \textbf{C}redit Assignment for Us\textbf{ER} Simulation（\textbf{TRACER}）。'
+        self.assertFalse(filters.mixed_untranslated_english_clauses(acronym))
+        self.assertTrue(filters.mixed_untranslated_english_clauses(acronym + ' This method improves the results.'))
+        self.assertFalse(filters.mixed_untranslated_english_clauses(
+            r'我们介绍新的方法（Instance-aware \textbf{Ru}bric Rewards for Reinforcement \textbf{LE}a\textbf{R}ning）。'))
+        self.assertTrue(filters._hide_marked_acronym_expansions(
+            r'\textbf{ABC} (\textbf{A}lpha \textbf{B}eta \textbf{C}ode). Keep this sentence.').endswith('. Keep this sentence.'))
+        tokens = r'1pt\relax\allowbreak{}\colorbox[HTML]{FFFFFF}{\textcolor{black}{\tiny\ttfamily\strut and}}\hskip 0pt plus ' * 3
+        self.assertTrue(filters.is_translation_exempt_fragment(tokens))
+        self.assertFalse(filters.is_translation_exempt_fragment('This explains the example: ' + tokens))
+        self.assertEqual(filters.llm_translation_response_invalid(
+            r'\appendixname~\ref{app:eval} specifies the protocol.',
+            r'\appendix名称~\ref{app:eval} 规定协议。'), 'critical_latex_structure_mismatch')
+        for value in (
+            r'TextWorld / Jericho / TextArena~[\citenum{cote2018,haus2020,guertler2025}]',
+            r'\subsection{StepAudio 3 ASR Max}',
+            r'\subsection{Bullet Safety-Gym SafetyCarReach-v0}',
+            r'\leavevmode\pdfliteral direct{/Span << /ActualText <FEFFFFE5> >> BDC}',
+            r'$\rightarrow$ \textbf{<|speak|> <delegate> T </delegate><|chunk\_eos|><|turn\_eos|>} </unit>\\[2pt]',
+            r'forked edges, for tree={grow=east,reversed=true,anchor=west,',
+        ):
+            self.assertFalse(filters.llm_translation_response_untranslated(value, value), value)
+        self.assertTrue(filters.llm_translation_response_untranslated(
+            'This ordinary paragraph should still be translated.',
+            'This ordinary paragraph should still be translated.'))
+        candidates = ['main.tex', 'paper_preamble.tex']
+        self.assertGreater(
+            filters.rank_main_tex_candidate('main.tex', r'\input{paper_preamble.tex}\input{paper_body.tex}\end{document}', candidates),
+            filters.rank_main_tex_candidate('paper_preamble.tex', r'\documentclass{article}\begin{document}', candidates))
+        self.assertTrue(filters.is_translation_exempt_fragment(
+            r'import numpy as np\\ count\_data = np.loadtxt("data.csv")'))
+        self.assertTrue(filters.is_translation_exempt_fragment(
+            r'\hypersetup{pdfauthor={First Person, Second Person},pdftitle={A long English title: metadata only}}'))
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            r'\code{status} $\in\{$\code{candidate}, \code{stable}$\}$ and a',
+            r'\code{status} $\in\{$\code{candidate}, \code{stable}$\}$ 以及一个'))
+        self.assertFalse(filters.llm_translation_response_untranslated(
+            r'\subsubsection*{Project Leaders:} Pengfei Yu, Ning Mao, Zhichao Wang',
+            r'\subsubsection*{项目负责人：} Pengfei Yu, Ning Mao, Zhichao Wang'))
+        fixed, count = filters.separate_builtin_layout_ascii_glue(r'\ldots接触')
+        self.assertEqual((fixed, count), (r'\ldots 接触', 1))
+        self.assertEqual(filters.separate_builtin_layout_ascii_glue(fixed), (fixed, 0))
+        fixed, _ = filters.disable_microtype_package_loads(
+            r'\RequirePackage{microtype}\SetTracking{encoding=*,shape=sc}{60}')
+        self.assertNotIn(r'\SetTracking', fixed)
+        self.assertEqual(filters.disable_microtype_package_loads(fixed), (fixed, 0))
+
     def test_url_payload_survives_translation_with_localized_caption(self):
         source = r"See \href{https://example.org/docs}{the documentation}."
         good = r"参阅\href{https://example.org/docs}{文档}。"

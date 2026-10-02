@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -22,6 +23,20 @@ SETUP_SCRIPT = ROOT / "scripts" / "setup_docker_env.sh"
 
 
 class MaintenanceScriptsTest(unittest.TestCase):
+    def test_snapshot_includes_pre_index_manual_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "jobs.json"
+            with mock.patch.object(repair_snapshot, "SUBMIT_JOBS_FILE", str(path)):
+                self.assertEqual(repair_snapshot._manual_submission_failures()["errors"], [])
+                path.write_text(json.dumps({
+                    "2502.14837": {"status": "error", "submitted_at": "2026-09-17", "msg": "import failed"},
+                    "2608.09819": {"status": "done"},
+                }))
+                report = repair_snapshot._manual_submission_failures()
+                self.assertEqual([row["paper_id"] for row in report["errors"]], ["2502.14837"])
+                path.write_text("invalid")
+                self.assertTrue(repair_snapshot._manual_submission_failures()["read_error"])
+
     def test_repair_snapshot_compacts_duplicate_translation_processes(self):
         process_table = """\
   10 python run_daily.py

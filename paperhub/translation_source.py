@@ -15,6 +15,10 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional
 
+
+class SourceUnavailableError(RuntimeError):
+    """The provider returned a PDF instead of a LaTeX source archive."""
+
 try:
     from translation_policy import bounded_int as _bounded_policy_int
 except ImportError:
@@ -233,6 +237,9 @@ class SourceCache:
                             )
                     if os.path.getsize(temporary) < 1024:
                         raise RuntimeError("downloaded source is too small")
+                    with open(temporary, "rb") as handle:
+                        if handle.read(5) == b"%PDF-":
+                            raise SourceUnavailableError("LaTeX source unavailable: arXiv returned PDF only")
                     unsafe_reason = self.safety_error(temporary)
                     if unsafe_reason:
                         raise RuntimeError(
@@ -256,6 +263,8 @@ class SourceCache:
                             os.remove(temporary)
                     except Exception:
                         pass
+                    if isinstance(exc, SourceUnavailableError):
+                        raise
             remaining = total_deadline - time.monotonic()
             if remaining <= 0:
                 break

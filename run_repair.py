@@ -182,6 +182,7 @@ def _existing_recent_keys(mode, days):
             key
             for key in os.listdir(path)
             if len(key) == 10 and key >= cutoff
+            and os.path.isfile(os.path.join(path, key, "index.json"))
         )
     return sorted(set(_recent_keys(mode, days)) & set(os.listdir(path)))
 

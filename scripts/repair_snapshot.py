@@ -13,7 +13,23 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from paperhub.failure_reports import load_failure_records, summarize_failures
-from paperhub.paths import DATA_DIR, LOGS_DIR
+from paperhub.paths import DATA_DIR, LOGS_DIR, SUBMIT_JOBS_FILE
+
+
+def _manual_submission_failures():
+    """Jobs can fail before an index or a PDF diagnostic exists."""
+    try:
+        with open(SUBMIT_JOBS_FILE, encoding="utf-8") as handle:
+            jobs = json.load(handle)
+        return {"errors": [
+            {"paper_id": key, "submitted_at": job.get("submitted_at"),
+             "message": job.get("msg")}
+            for key, job in jobs.items() if job.get("status") == "error"
+        ], "read_error": None}
+    except FileNotFoundError:
+        return {"errors": [], "read_error": None}
+    except (OSError, ValueError, AttributeError) as exc:
+        return {"errors": [], "read_error": str(exc)}
 
 
 def _command(*args):
@@ -123,6 +139,7 @@ def snapshot():
         "indexes": index_files,
         "pdf_status_references": dict(statuses),
         "failures": failure_summary,
+        "manual_submissions": _manual_submission_failures(),
         "active": active,
     }
 
@@ -149,6 +166,9 @@ def main():
     )
     for category, count in report["failures"]["by_category"].items():
         print("{}={}".format(category, count))
+    manual = report["manual_submissions"]
+    print("manual_submission_errors={} read_error={}".format(
+        len(manual["errors"]), manual["read_error"] or "none"))
 
 
 if __name__ == "__main__":

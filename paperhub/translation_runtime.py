@@ -26,7 +26,7 @@ except ImportError:
     )
 
 SPLITTER_CACHE_VERSION = (
-    "paper-trans-splitter-2026-09-15-v73-math-lines"
+    "paper-trans-splitter-2026-10-02-v74-source-boundaries"
 )
 
 
@@ -831,9 +831,7 @@ def _patch_latex_llm_rate_limit_handling():
                     ],
                     "history_array": [histories[index] for index in missing],
                     "sys_prompt_array": [prompts[index] for index in missing],
-                    "max_workers": _retry_worker_count(
-                        len(missing), max_workers,
-                    ),
+                    "max_workers": min(len(missing), max_workers),
                 })
                 print(
                     f"[driver] ♻️  恢复 {len(recovered)} 个已完成 chunk，"

@@ -12,6 +12,11 @@ from paperhub.json_io import write_json_atomic
 
 
 class FailureTaxonomyTest(unittest.TestCase):
+    def test_pdf_only_source_requires_source_not_retranslation(self):
+        result = classify_failure("translate", plugin_error="LaTeX source unavailable: arXiv returned PDF only")
+        self.assertEqual(result["category"], "translate.source_missing")
+        self.assertEqual(result["retry_strategy"], "manual_review")
+
     def test_retry_decision_is_owned_by_taxonomy(self):
         self.assertFalse(
             is_failure_retryable({"retry_strategy": "manual_review"})

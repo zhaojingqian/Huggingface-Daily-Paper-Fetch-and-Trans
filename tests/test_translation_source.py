@@ -1,8 +1,9 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
-from paperhub.translation_source import SourceCache, SourceDownloadPolicy
+from paperhub.translation_source import SourceCache, SourceDownloadPolicy, SourceUnavailableError
 
 
 class _Response:
@@ -34,6 +35,18 @@ class _Session:
 
 
 class TranslationSourceTest(unittest.TestCase):
+    def test_pdf_only_source_stops_without_network_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _Session()
+            cache = SourceCache(cache_dir=tmp, paper_id="2608.19880", proxies={},
+                                session_factory=lambda: session, safety_error=lambda _: None,
+                                policy=SourceDownloadPolicy())
+            with mock.patch.object(_Response, "iter_content", return_value=[b"%PDF-" + b"x" * 2043]):
+                with self.assertRaises(SourceUnavailableError):
+                    cache.prefetch()
+            self.assertEqual(len(session.calls), 1)
+            self.assertFalse(os.path.exists(cache.source_tar + ".part"))
+
     def test_policy_clamps_operator_values(self):
         policy = SourceDownloadPolicy.from_env({
             "PAPER_TRANS_SOURCE_CONNECT_TIMEOUT": "1",
