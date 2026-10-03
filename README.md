@@ -233,7 +233,7 @@ PDF 同时通过翻译、编译和实体门禁后才清除 taint，后续编译�
 
 LaTeX 全文翻译默认使用 50 路首轮并发。首轮不再因 citation/ref 密度预先膨胀请求数；只有结构签名、引用多重集或花括号门禁真正失败的 slot 才自适应拆成最多约 480 字符，并使用最多 16 路的有界并发重试。遇到 429、空响应或漏译也只补对应 slot；补偿后仍失败会拒绝写入 `temp.pkl`。若完整 TeX 已有较高中文覆盖、仅质量门禁命中少量行，末端修复器最多定向重译 12 行，并仅提交质量分数严格改善且 LaTeX 结构不变的结果，再重编译 PDF，避免重跑整篇数百个 chunk。
 
-全文翻译默认使用 `deepseek-v4-flash-0731`；单次覆盖可用
+摘要与全文翻译默认使用 `gpt-6-luna`；单次全文覆盖可用
 `PAPER_TRANS_LLM_MODEL=<model> workspace-ctl paper translate ...`。宿主机只会把
 `PAPER_TRANS_LLM_MODEL`、worker/retry 等明确白名单变量传入容器，不会透传其他
 环境或密钥。`insufficient_user_quota`、余额/额度不足会独立归类为

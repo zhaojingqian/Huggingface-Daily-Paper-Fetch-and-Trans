@@ -28,7 +28,7 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     exit 1
 fi
 
-echo "=== [setup_docker_env] 注册 OpenAI-compatible 模型源: deepseek-v4-flash-0731 ==="
+echo "=== [setup_docker_env] 注册生产 OpenAI-compatible 模型源 ==="
 docker cp "${ROOT_DIR}/scripts/patch_gpt_academic_model.py" \
     "${CONTAINER}:/tmp/patch_gpt_academic_model.py"
 docker exec -u root "$CONTAINER" python3 /tmp/patch_gpt_academic_model.py

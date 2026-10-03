@@ -7,6 +7,7 @@ from unittest import mock
 
 from scripts.render_gpt_academic_config import render_config, write_config
 from paperhub import env_config
+from scripts import patch_gpt_academic_model as model_overlay
 
 
 RUNTIME_ENV = {
@@ -20,6 +21,17 @@ RUNTIME_ENV = {
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_production_model_registration_matches_fallback_and_is_idempotent(self):
+        self.assertEqual(model_overlay.MODEL, env_config.DEFAULT_TRANSLATION_MODEL)
+        self.assertEqual(model_overlay.MODEL, "gpt-6-luna")
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "bridge_all.py"
+            catalog.write_text('model_info = {\n    "gpt-4.1-mini":{},\n}\n')
+            self.assertTrue(model_overlay.patch_model_catalog(catalog))
+            self.assertFalse(model_overlay.patch_model_catalog(catalog))
+            compile(catalog.read_text(), str(catalog), "exec")
+            self.assertEqual(catalog.read_text().count('"gpt-6-luna":'), 1)
+
     def test_http_proxies_share_configured_endpoint_and_disable_cleanly(self):
         with mock.patch.dict(
             os.environ,

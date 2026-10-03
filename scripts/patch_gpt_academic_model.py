@@ -14,10 +14,10 @@ import argparse
 from pathlib import Path
 
 
-MODEL = "deepseek-v4-flash-0731"
+MODEL = "gpt-6-luna"
 
 
-MODEL_BLOCK = '''    "deepseek-v4-flash-0731": {
+MODEL_BLOCK = f'''    "{MODEL}": {{
         "fn_with_ui": chatgpt_ui,
         "fn_without_ui": chatgpt_noui,
         "can_multi_thread": True,
@@ -25,7 +25,7 @@ MODEL_BLOCK = '''    "deepseek-v4-flash-0731": {
         "max_token": 128000,
         "tokenizer": tokenizer_gpt4,
         "token_cnt": get_token_num_gpt4,
-    },
+    }},
 
 '''
 

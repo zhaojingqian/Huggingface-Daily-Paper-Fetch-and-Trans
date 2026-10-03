@@ -10,7 +10,7 @@ _LOADED = False
 
 # The generated gpt-academic runtime config is authoritative in production;
 # this fallback keeps standalone metadata translation on the same model.
-DEFAULT_TRANSLATION_MODEL = "deepseek-v4-flash-0731"
+DEFAULT_TRANSLATION_MODEL = "gpt-6-luna"
 DEFAULT_HTTP_PROXY = "http://127.0.0.1:7890"
 
 

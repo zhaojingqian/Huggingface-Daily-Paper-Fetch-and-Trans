@@ -3,6 +3,7 @@ import tempfile
 from unittest.mock import Mock, patch
 
 import translate_arxiv
+from paperhub.env_config import DEFAULT_TRANSLATION_MODEL
 
 
 class TranslateArxivTest(unittest.TestCase):
@@ -14,7 +15,7 @@ class TranslateArxivTest(unittest.TestCase):
         ):
             config = translate_arxiv.load_api_config()
 
-        self.assertEqual(config["model"], "deepseek-v4-flash-0731")
+        self.assertEqual(config["model"], DEFAULT_TRANSLATION_MODEL)
 
     def test_repairs_odd_latex_backslash_runs_for_json(self):
         self.assertEqual(
