@@ -1601,6 +1601,8 @@ def _is_key_value_option_list(text: str, allow_unbracketed: bool) -> bool:
     if len(value) < 7 or (not bracketed and not allow_unbracketed):
         return False
     inner = value[1:-1] if bracketed else value
+    if allow_unbracketed and not bracketed and inner.startswith("["):
+        inner = inner[1:]
     # A splitter can detach the tail of a macro option while its final group
     # brace remains in the next chunk (for example ``title={#1}, ...
     # xshift=8pt``).  It is still configuration data, not translatable prose;
@@ -1935,6 +1937,16 @@ def is_translated_heading_proper_name_catalog(
         if is_benchmark_name_catalog(source_probe):
             return True
         response_probe = _natural_language_probe(response or "")
+        comparison = re.split(r"\s+vs\.?\s+", source_probe)
+        if len(comparison) == 2 and all(
+            re.fullmatch(r"[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+)* \d+(?:\.\d+)*(?: [A-Z][A-Za-z]+)*", name)
+            for name in comparison
+        ):
+            remainder = response_probe
+            for name in comparison:
+                remainder = remainder.replace(name, "", 1)
+            if re.search(r"[\u4e00-\u9fff]", remainder) and not re.search(r"[A-Za-z]", remainder):
+                return True
         retained_words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", response_probe)
         if (len(re.findall(r"[\u4e00-\u9fff]", response_probe)) >= 4
                 and retained_words and all(word[0].isupper() for word in retained_words)):
@@ -2410,6 +2422,7 @@ def is_person_name_catalog(text: str) -> bool:
     # Remove those non-name payloads before applying the conservative name
     # shape check; a four-name block is still metadata, not prose.
     value = MATH_SPAN_RE.sub(" ", value)
+    value = re.sub(r"\\textsuperscript\{[\d*,\s†‡]+\}", "", value)
     value = re.sub(r"\\(?:and|ampersand)\b", ",", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+\band\b\s+", ", ", value, flags=re.IGNORECASE)
     if re.search(r"[.!?。！？]", value):
@@ -3773,6 +3786,38 @@ def _safe_top_level_line_start(text: str, position: int) -> int:
     """
     source = text or ""
     limit = max(0, min(position, len(source)))
+    # Balanced braces between arguments are not a statement boundary:
+    # \newenvironment{name}[1]\n{opening}\n{closing} is one definition.
+    definition = re.compile(
+        r"\\(?:newenvironment|renewenvironment|newcommand|renewcommand|"
+        r"providecommand|DeclareRobustCommand)\*?"
+    )
+    for match in definition.finditer(source, 0, limit):
+        cursor = match.end()
+        groups = 3 if "environment" in match.group() else 2
+        for _ in range(groups):
+            while cursor < len(source):
+                if source[cursor].isspace():
+                    cursor += 1
+                elif source[cursor] == "%":
+                    newline = source.find("\n", cursor)
+                    cursor = len(source) if newline < 0 else newline + 1
+                elif source[cursor] == "[":
+                    close = source.find("]", cursor + 1)
+                    if close < 0:
+                        break
+                    cursor = close + 1
+                else:
+                    break
+            if cursor >= len(source) or source[cursor] != "{":
+                break
+            close = _find_matching_brace(source, cursor)
+            if close < 0:
+                break
+            cursor = close + 1
+        if match.start() < limit < cursor:
+            limit = match.start()
+            break
     brace_depth = 0
     bracket_depth = 0
     line_start = 0
@@ -4664,6 +4709,7 @@ ZERO_ARG_LAYOUT_COMMANDS = (
     "vfill",
     "ldots",
     "cdots",
+    "slash",
     "par",
 )
 

@@ -892,7 +892,12 @@ def _patch_latex_llm_rate_limit_handling():
                     else ""
                 )
                 source_preview = " ".join(source.split())[:180]
-                response_preview = " ".join(str(response).split())[:180]
+                # Request tracebacks carry the actual cause at the end, not
+                # in the common worker-wrapper prefix.
+                response_preview = " ".join(str(response).split())
+                response_preview = (response_preview[-1200:]
+                                    if _ltf.llm_translation_response_failed(response)
+                                    else response_preview[:180])
                 invalid_reason = invalid_reasons.get(
                     index,
                     "request_or_untranslated",
@@ -1202,6 +1207,12 @@ def _patch_latex_llm_rate_limit_handling():
         if remaining:
             # Never cache a temp.pkl where request failures are silently
             # merged back into the output as English source text.
+            if request_failed:
+                response = str(result[request_failed[0] * 2 + 1])
+                raise RuntimeError(
+                    f"LLM request failures remain in {len(request_failed)} chunks: "
+                    + response[-2000:]
+                )
             raise RuntimeError(
                 "LLM request/untranslated/structural failures remain in "
                 f"{len(remaining)} translation chunks after bounded retry"

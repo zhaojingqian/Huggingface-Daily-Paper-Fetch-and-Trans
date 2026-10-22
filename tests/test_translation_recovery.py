@@ -10,6 +10,35 @@ from paperhub import translation_runtime
 
 
 class TranslationRecoveryTest(unittest.TestCase):
+    def test_request_failure_preserves_cause_for_taxonomy(self):
+        from failure_taxonomy import classify_failure
+
+        source = "This paragraph describes the experimental results in detail."
+        response = "[Local Message] 警告，线程0 Traceback: " + "worker traceback " * 200 + "HTTP 401 Unauthorized"
+
+        def request(**options):
+            if False:
+                yield
+            return [source, response]
+
+        utils = types.SimpleNamespace(
+            request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency=request)
+        with mock.patch.dict(sys.modules, {"crazy_functions": types.SimpleNamespace(crazy_utils=utils)}), \
+             mock.patch.dict(os.environ, {"PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS": "0"}), \
+             mock.patch.object(translation_runtime, "_load_translation_recovery", return_value={}), \
+             mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False):
+            translation_runtime._patch_latex_llm_rate_limit_handling()
+            generator = utils.request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
+                inputs_array=[source], inputs_show_user_array=["paragraph"],
+                history_array=[[]], sys_prompt_array=["translate"])
+            with self.assertRaises(RuntimeError) as failed:
+                next(generator)
+        message = str(failed.exception)
+        self.assertIn("HTTP 401 Unauthorized", message)
+        self.assertLess(len(message), 2100)
+        self.assertEqual(classify_failure("translate", plugin_error=message)["category"],
+                         "translate.api_auth")
+
     def test_missing_chunks_use_normal_concurrency_not_retry_cap(self):
         calls = []
         def request(**options):

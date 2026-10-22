@@ -9,6 +9,21 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_metadata_markers_and_version_comparisons_are_not_prose(self):
+        self.assertTrue(filters.is_latex_key_value_option_list(
+            "[promptbox, colframe=stratA, colbacktitle=stratA, colback=stratA!4!white,"))
+        self.assertFalse(filters.is_latex_key_value_option_list(
+            "[This explains the results, which improve accuracy,"))
+        names = r"Zhiyuan Shi\textsuperscript{*}, Xiang Li\textsuperscript{*}, Xingzhuo Guo\textsuperscript{*}"
+        self.assertTrue(filters.is_person_name_catalog(names))
+        self.assertFalse(filters.is_person_name_catalog(names + ", this method improves results"))
+        source = r"\subsubsection{Kandinsky 6.0 Video Pro vs Kandinsky 5.0 Video Pro}"
+        translated = r"\subsubsection{Kandinsky 6.0 Video Pro 与 Kandinsky 5.0 Video Pro}"
+        self.assertFalse(filters.llm_translation_response_untranslated(source, translated))
+        self.assertTrue(filters.llm_translation_response_untranslated(source, source))
+        self.assertEqual(filters.separate_builtin_layout_ascii_glue(r"数据集\slash或模型"),
+                         (r"数据集\slash 或模型", 1))
+
     def test_empty_table_cells_are_not_failed_responses(self):
         source = r"& Fields for orthogonal Fourier data set to zero & Centered residual family $A^u$ \\\\"
         translated = r"& 正交傅里叶数据的场置零 & 中心化残差族 $A^u$ \\\\"
@@ -2796,6 +2811,20 @@ Language: Chinese
             fixed.index(r"\providecommand{\faVideo}"),
             fixed.index(r"\newcommand{\homepage}"),
         )
+
+    def test_preamble_snippet_keeps_definition_arguments_together(self):
+        for definition in (
+            "\\newenvironment{highlight}[1][Notes]\n{\\faVideo #1}\n{\\faVideo}",
+            "\\newcommand{\\homepage}[1]\n% comment\n{\\faVideo #1}",
+        ):
+            with self.subTest(definition=definition):
+                text = "\\documentclass{article}\n" + definition + "\n\\begin{document}\n"
+                fixed, count = filters.add_fontawesome_legacy_aliases(text)
+                self.assertGreater(count, 0)
+                self.assertIn(definition, fixed)
+                self.assertLess(fixed.index(r"\providecommand{\faVideo}"),
+                                fixed.index(definition))
+                self.assertEqual(filters.add_fontawesome_legacy_aliases(fixed), (fixed, 0))
 
     def test_restore_tcolorbox_opening_options_from_original(self):
         original = (
