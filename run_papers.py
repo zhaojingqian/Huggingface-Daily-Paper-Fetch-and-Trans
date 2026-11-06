@@ -609,8 +609,9 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None, re
         if status == "ok":
             print(f"{label} ⚠️  {aid} — pdf_status=ok 但 paper store 缺 PDF，降级重试", flush=True)
             slim["pdf_status"] = "failed"
-            _paper_store_update_pdf_status(aid, "failed")
             changed = True
+        if slim.get("pdf_status") == "failed" and stored_status != "failed":
+            _paper_store_update_pdf_status(aid, "failed")
 
     abort_reason = ""
     failed = [] if reconcile_only else [p for p in papers if p.get("pdf_status") == "failed"]
