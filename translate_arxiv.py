@@ -194,7 +194,14 @@ def call_llm(messages, config, max_tokens=4000, max_retries=3, response_format=N
             resp = requests.post(url, headers=headers, json=payload,
                                  proxies=proxies, timeout=120)
             resp.raise_for_status()
-            return _extract_chat_completion_text(resp.json())
+            data = resp.json()
+            if any(choice.get("finish_reason") == "length" for choice in data.get("choices", [])):
+                if attempt < max_retries - 1:
+                    payload["max_tokens"] = min(payload["max_tokens"] * 2, max_tokens * 4)
+                    print(f"  ⚠️ LLM 输出截断，预算增至 {payload['max_tokens']} 后重试", flush=True)
+                    continue
+                raise RuntimeError("LLM output truncated after bounded token-budget retries")
+            return _extract_chat_completion_text(data)
         except requests.exceptions.ProxyError:
             if proxies.get("https"):
                 print("  ⚠️ LLM 代理失败，切换直连重试...", flush=True)

@@ -23,14 +23,28 @@ RUNTIME_ENV = {
 class RuntimeConfigTests(unittest.TestCase):
     def test_production_model_registration_matches_fallback_and_is_idempotent(self):
         self.assertEqual(model_overlay.MODEL, env_config.DEFAULT_TRANSLATION_MODEL)
-        self.assertEqual(model_overlay.MODEL, "gpt-6-luna")
+        self.assertEqual(model_overlay.MODEL, "claude-haiku-5-5")
         with tempfile.TemporaryDirectory() as directory:
             catalog = Path(directory) / "bridge_all.py"
             catalog.write_text('model_info = {\n    "gpt-4.1-mini":{},\n}\n')
             self.assertTrue(model_overlay.patch_model_catalog(catalog))
             self.assertFalse(model_overlay.patch_model_catalog(catalog))
             compile(catalog.read_text(), str(catalog), "exec")
-            self.assertEqual(catalog.read_text().count('"gpt-6-luna":'), 1)
+            self.assertEqual(catalog.read_text().count('"claude-haiku-5-5":'), 1)
+            router = Path(directory) / "router.py"
+            router.write_text("def select_api_key(llm_model):\n    if llm_model.startswith('gpt-'):\n        return 'relay'\n")
+            self.assertTrue(model_overlay.patch_key_router(router))
+            self.assertFalse(model_overlay.patch_key_router(router))
+            scope = {}
+            exec(router.read_text(), scope)
+            self.assertEqual(scope['select_api_key'](model_overlay.MODEL), 'relay')
+            self.assertIsNone(scope['select_api_key']('claude-other'))
+
+    @mock.patch.dict(os.environ, {**RUNTIME_ENV, 'GPT_ACADEMIC_LLM_MODEL': 'new-model'}, clear=True)
+    def test_selected_model_is_always_in_available_models(self):
+        scope = {}
+        exec(render_config(), scope)
+        self.assertEqual(scope['AVAIL_LLM_MODELS'][0], 'new-model')
 
     def test_http_proxies_share_configured_endpoint_and_disable_cleanly(self):
         with mock.patch.dict(

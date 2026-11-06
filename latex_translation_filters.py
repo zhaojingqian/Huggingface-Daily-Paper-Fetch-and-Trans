@@ -1764,6 +1764,14 @@ def is_latex_configuration_command_fragment(text: str) -> bool:
     # command and its font name (``\\newfontfamily\\codefont{...}[...]``),
     # so they do not fit the generic key/value command grammar below.  They
     # are preamble configuration, never natural-language paper prose.
+    # Hook names and labels are identifiers. Only command-only bodies are
+    # exempt; a hook that inserts visible prose must still be translated.
+    if re.fullmatch(
+        r"\\AddToHook(?:Next)?\{[A-Za-z0-9_./-]+\}"
+        r"(?:\[[A-Za-z0-9_./-]+\])?\{(?:\s*\\[A-Za-z@]+(?:\{\})?)+\s*\}",
+        value,
+    ):
+        return True
     if (
         _FONT_DEFINITION_COMMAND_RE.match(value)
         and _unescaped_brace_balance(value) == 0
@@ -4357,14 +4365,18 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
          or "listing only" in source)
         and not _latex_command_defined(source, "inputencodingname")
     )
-    class_needs_early_fontspec = bool(
-        re.search(r"\\documentclass(?:\[[^\]]*\])?\{(?:cidr-2025|acmart)\}", source)
-    )
-    needs_fontspec_noops = (
-        (re.search(r"\\(?:setmainfont|setsansfont|setmonofont|newfontfamily)\b", source)
-         or class_needs_early_fontspec)
-        and not _latex_package_loaded(source, "fontspec")
-    )
+    # fontspec owns these commands. Historical no-op fallbacks preempted its
+    # NewDocumentCommand definitions and left trailing font options as text.
+    removed_font_noops = 0
+    for legacy in (
+        r"\providecommand{\setmainfont}[2][]{}",
+        r"\providecommand{\setsansfont}[2][]{}",
+        r"\providecommand{\setmonofont}[2][]{}",
+        r"\providecommand{\newfontfamily}[3][]{\providecommand#2{}}",
+    ):
+        if legacy in source:
+            source = source.replace(legacy, "")
+            removed_font_noops += 1
     needs_xspace_noop = (
         r"\xspace" in source
         and not _latex_command_defined(source, "xspace")
@@ -4455,6 +4467,7 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         + historical_repairs
         + legacy_cjk_setup_repairs
         + ctex_fontset_repairs
+        + removed_font_noops
     )
     if needs_inputencoding:
         insertion = "\n".join([
@@ -4464,24 +4477,6 @@ def add_xelatex_compatibility_fallbacks(text: str) -> Tuple[str, int]:
         markers = ["inputencodingname"] if r"\inputencodingname" in source else []
         source, changed = insert_latex_preamble_snippet(source, insertion, markers)
         total += int(changed)
-
-    if needs_fontspec_noops:
-        lines = [r"% paper-trans fallback for XeLaTeX compatibility commands"]
-        if not _latex_command_defined(source, "setmainfont"):
-            lines.append(r"\providecommand{\setmainfont}[2][]{}")
-        if not _latex_command_defined(source, "setsansfont"):
-            lines.append(r"\providecommand{\setsansfont}[2][]{}")
-        if not _latex_command_defined(source, "setmonofont"):
-            lines.append(r"\providecommand{\setmonofont}[2][]{}")
-        if not _latex_command_defined(source, "newfontfamily"):
-            lines.append(r"\providecommand{\newfontfamily}[3][]{\providecommand#2{}}")
-        if len(lines) > 1:
-            insertion = "\n".join(lines)
-            markers = ["documentclass"] if class_needs_early_fontspec else [
-                "setmainfont", "setsansfont", "setmonofont", "newfontfamily"
-            ]
-            source, changed = insert_latex_preamble_snippet(source, insertion, markers)
-            total += int(changed)
 
     if needs_xspace_noop:
         insertion = "\n".join([
@@ -4672,7 +4667,7 @@ ZERO_ARG_COMMAND_DEF_RE = re.compile(
 CJK_COMMAND_FOLLOW_RE = (
     r"[\u3400-\u4dbf\u4e00-\u9fff"
     r"\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001"
-    r"\uff08\uff09\u300a\u300b\u201c\u201d\u2018\u2019]"
+    r"\uff08\uff09\u300a\u300b\u3010\u3011\u201c\u201d\u2018\u2019]"
 )
 
 CJK_CHAR_CLASS = CJK_COMMAND_FOLLOW_RE
@@ -4851,7 +4846,10 @@ def separate_custom_macro_cjk_glue(text: str, definitions: str = "") -> Tuple[st
     ``\name中文``. XeLaTeX can parse the glued part as an undefined command.
     Terminate known zero-argument custom macros with whitespace directly.
     """
-    macro_names = set()
+    macro_names = set(re.findall(
+        r"\\(?:[gex]?def)\s*\\([A-Za-z@]+)\s*(?=\{)",
+        definitions + "\n" + (text or ""),
+    ))
     for match in ZERO_ARG_COMMAND_DEF_RE.finditer(definitions):
         if match.group(3) in (None, "0"):
             macro_names.add(match.group(1) or match.group(2))
@@ -4973,8 +4971,16 @@ def separate_declaration_command_cjk_glue(text: str) -> Tuple[str, int]:
 
 def remove_spurious_cjk_command_escapes(text: str) -> Tuple[str, int]:
     r"""Remove stray command escapes before CJK text or punctuation."""
-    pattern = re.compile(r"\\(?=" + CJK_COMMAND_FOLLOW_RE + r")")
-    return pattern.subn("", text or "")
+    pattern = re.compile(r"\\+(?=" + CJK_COMMAND_FOLLOW_RE + r")")
+    total = 0
+    def repair(match):
+        nonlocal total
+        value = match.group()
+        if len(value) % 2:
+            total += 1
+            return value[:-1]
+        return value  # An even run contains valid TeX row/line breaks.
+    return pattern.sub(repair, text or ""), total
 
 
 def demote_cleveref_commands(text: str) -> Tuple[str, int]:
@@ -4984,7 +4990,7 @@ def demote_cleveref_commands(text: str) -> Tuple[str, int]:
 
 
 def split_multilabel_references(text: str) -> Tuple[str, int]:
-    """Split core refs only when every individual label exists in this source."""
+    """Repair reference arguments using declared labels as the authority."""
     source = text or ""
     defined_labels = {
         match.group(1).strip()
@@ -4995,6 +5001,29 @@ def split_multilabel_references(text: str) -> Tuple[str, int]:
         r"\\(?P<command>ref|eqref|autoref)\{(?P<labels>[^{}\n]*,[^{}\n]*)\}"
     )
     total = 0
+    # Translation can move a reference's closing brace after a paragraph.
+    # Only a unique declared label followed by CJK punctuation proves where
+    # the argument ends; retain all following prose and nested commands.
+    edits = []
+    covered_until = -1
+    for match in re.finditer(r"\\(?:ref|eqref|autoref)\s*\{", source):
+        if match.start() < covered_until:
+            continue
+        end = _find_matching_brace(source, match.end() - 1)
+        if end < 0:
+            continue
+        argument = source[match.end():end]
+        candidates = [label for label in defined_labels
+                      if argument.startswith(label) and
+                      re.match(r"[），、。；：]", argument[len(label):])]
+        if argument in defined_labels or len(candidates) != 1:
+            continue
+        label = candidates[0]
+        edits.append((match.end(), end + 1, label + "}" + argument[len(label):]))
+        covered_until = end + 1
+    for start, end, replacement in reversed(edits):
+        source = source[:start] + replacement + source[end:]
+    total += len(edits)
 
     def replace(match) -> str:
         nonlocal total

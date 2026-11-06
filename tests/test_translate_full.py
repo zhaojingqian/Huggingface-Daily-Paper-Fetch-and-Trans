@@ -1,5 +1,6 @@
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -262,6 +263,7 @@ class TranslateFullCommandTest(unittest.TestCase):
         root_code = (
             "import subprocess,sys,time;"
             "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+            "print('ready',flush=True);"
             "time.sleep(30)"
         )
         proc = subprocess.Popen(
@@ -273,11 +275,13 @@ class TranslateFullCommandTest(unittest.TestCase):
                 aid,
             ],
             start_new_session=True,
+            stdout=subprocess.PIPE,
         )
         reaper = threading.Thread(target=proc.wait, daemon=True)
         reaper.start()
         try:
-            time.sleep(0.2)
+            self.assertTrue(select.select([proc.stdout], [], [], 5)[0], "child startup timed out")
+            self.assertEqual(proc.stdout.readline(), b"ready\n")
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -305,6 +309,8 @@ class TranslateFullCommandTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
             reaper.join(timeout=2)
+
+            proc.stdout.close()
 
     def test_timeout_stops_container_tree_before_reaping_docker_exec(self):
         class FakeProcess:

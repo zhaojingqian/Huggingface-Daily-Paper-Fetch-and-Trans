@@ -5,6 +5,12 @@ from typing import Dict, Iterable, List
 
 
 PATCH_CATALOG: Dict[str, Dict[str, object]] = {
+    "translate.model_unavailable": {
+        "patches": ("classify_model_absence", "stop_shared_resource_retries"),
+        "source": "failure_taxonomy.py / paperhub/translation_runtime.py / run_papers.py",
+        "strategy": "manual_review",
+        "note": "模型不存在与临时池过载分开；保存有效片段，停止后续 chunk 重试和跨模式批次，等待中转恢复或明确授权切换模型。",
+    },
     "infrastructure.disk_full": {
         "patches": (
             "preflight_translation_disk_watermark",
@@ -178,10 +184,13 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "keep_enumitem_as_standard_list_owner",
             "repair_common_text_command_typos",
             "repair_malformed_proof_headings",
+            "remove_fontspec_noop_overrides",
+            "recognize_zero_argument_primitive_definitions",
+            "preserve_even_cjk_backslash_runs",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
-        "note": "先查首个编译错误与源码：合并保留源空白，aux 清理保留完整标签字段；colortbl/array 接口不匹配时采用发行版配套包，不伪造内部宏；禁用 microtype 同时清除其配置命令。只有确认缺失的命令才补兼容定义。",
+        "note": "先查首个编译错误与源码：fontspec 保留字体命令所有权，删除旧空实现；零参数 def 宏沿用 CJK 边界修复。colortbl/array 使用配套包，不伪造内部宏；禁用 microtype 同时清除其配置。",
     },
     "compile.numeric_syntax": {
         "patches": (
@@ -201,6 +210,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "patch_fragile_cleveref_references",
             "patch_duplicate_end_environments",
             "patch_unbalanced_groups_in_tcolorboxes",
+            "restore_reference_boundary_from_declared_label",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "reuse_translation",
@@ -326,6 +336,7 @@ PATCH_CATALOG: Dict[str, Dict[str, object]] = {
             "protect_structural_input_commands",
             "protect_marked_acronym_expansions",
             "aggregate_layout_option_lists",
+            "protect_command_only_latex_hooks",
         ),
         "source": "full_translate_driver.py / latex_translation_filters.py",
         "strategy": "retry_translation",

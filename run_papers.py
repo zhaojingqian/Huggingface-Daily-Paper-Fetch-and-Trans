@@ -7,7 +7,7 @@ import os, sys, json, time, subprocess
 from datetime import datetime
 from pathlib import Path
 
-from failure_taxonomy import classify_failure, is_failure_retryable
+from failure_taxonomy import classify_failure, is_failure_retryable, is_batch_blocking_failure
 from paperhub import paper_store
 from paperhub.json_io import read_json, write_json_atomic
 from paperhub.publication_lock import (
@@ -744,7 +744,7 @@ def retry_failed_pdf_entries(papers, label="[retry-pdf]", processed_ids=None, re
                 live_failure = classify_failure("translate", plugin_error=error)
                 if live_failure.get("category") == "infrastructure.disk_full":
                     latest = live_failure
-                if latest.get("category") in {"translate.api_quota", "infrastructure.disk_full"}:
+                if is_batch_blocking_failure(latest):
                     abort_reason = latest["category"]
                     print(
                         f"{label} 🛑 {abort_reason}，停止本批剩余全文翻译，"

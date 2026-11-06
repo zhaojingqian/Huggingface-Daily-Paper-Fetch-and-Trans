@@ -7,6 +7,23 @@ from paperhub.env_config import DEFAULT_TRANSLATION_MODEL
 
 
 class TranslateArxivTest(unittest.TestCase):
+    def test_length_truncation_increases_budget_before_parsing(self):
+        budgets = []
+        def post(*args, **kwargs):
+            budgets.append(kwargs['json']['max_tokens'])
+            response = Mock()
+            response.json.return_value = {'choices': [{
+                'finish_reason': 'length' if len(budgets) == 1 else 'stop',
+                'message': {'content': 'partial' if len(budgets) == 1 else 'complete'},
+            }]}
+            return response
+        config = {'api_base': 'https://example.test/v1/chat/completions',
+                  'api_key': 'test', 'model': 'test'}
+        with patch.object(translate_arxiv.requests, 'post', side_effect=post):
+            result = translate_arxiv.call_llm([], config, max_tokens=2000)
+        self.assertEqual(result, 'complete')
+        self.assertEqual(budgets, [2000, 4000])
+
     def test_missing_runtime_config_uses_production_translation_model(self):
         with patch.object(
             translate_arxiv,

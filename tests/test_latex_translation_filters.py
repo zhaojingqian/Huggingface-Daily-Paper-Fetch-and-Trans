@@ -9,6 +9,31 @@ import latex_translation_filters as filters
 
 
 class LatexTranslationFiltersTest(unittest.TestCase):
+    def test_cjk_escape_repair_preserves_tex_row_breaks(self):
+        for size in (1, 2, 3, 4):
+            with self.subTest(size=size):
+                value = '\\' * size + '】中文'
+                expected = '\\' * (size - size % 2) + '】中文'
+                self.assertEqual(filters.remove_spurious_cjk_command_escapes(value),
+                                 (expected, size % 2))
+
+    def test_reference_boundary_uses_declared_label_and_keeps_prose(self):
+        text = r"\ref{fig:overview），这段正文引用\cite{x}，不应被吞掉。}\label{fig:overview}"
+        fixed, count = filters.split_multilabel_references(text)
+        self.assertEqual(count, 1)
+        self.assertEqual(fixed, r"\ref{fig:overview}），这段正文引用\cite{x}，不应被吞掉。\label{fig:overview}")
+        self.assertEqual(filters.split_multilabel_references(fixed), (fixed, 0))
+        unknown = r"\ref{unknown），保留未知内容。}"
+        self.assertEqual(filters.split_multilabel_references(unknown), (unknown, 0))
+
+    def test_primitive_zero_argument_macros_get_cjk_boundaries(self):
+        source = r"\def\Encoder{Example}\def\Arg#1{#1}" + "\n" + r"\Encoder用于测试，\Arg中文"
+        fixed, count = filters.separate_custom_macro_cjk_glue(source)
+        self.assertEqual(count, 1)
+        self.assertIn(r"\Encoder 用于测试", fixed)
+        self.assertIn(r"\Arg中文", fixed)
+        self.assertEqual(filters.separate_custom_macro_cjk_glue(fixed), (fixed, 0))
+
     def test_metadata_markers_and_version_comparisons_are_not_prose(self):
         self.assertTrue(filters.is_latex_key_value_option_list(
             "[promptbox, colframe=stratA, colbacktitle=stratA, colback=stratA!4!white,"))
@@ -1275,6 +1300,16 @@ Language: Chinese
         self.assertFalse(
             filters.llm_translation_response_untranslated(command, command)
         )
+
+    def test_command_only_hook_is_configuration_but_visible_prose_is_not(self):
+        command = r"\AddToHook{para/before}[appendix-reserve]{\reservepage}"
+        self.assertTrue(filters.is_latex_configuration_command_fragment(command))
+        self.assertFalse(filters.llm_translation_response_untranslated(command, command))
+        for prose in (
+            r"\AddToHook{para/before}{This is visible paper prose.}",
+            command + " This explains the results.",
+        ):
+            self.assertFalse(filters.is_latex_configuration_command_fragment(prose))
 
     def test_inline_translation_prompt_template_is_source_data(self):
         template = (
@@ -3084,7 +3119,7 @@ Language: Chinese
         self.assertNotIn(r"\expandafter\providecommand\csname endCJK\endcsname", fixed)
         self.assertIn(r"\ifcsname endCJK\endcsname", fixed)
 
-    def test_add_xelatex_compatibility_fallbacks_for_cidr_fontspec_commands(self):
+    def test_fontspec_commands_are_owned_by_the_package(self):
         text = (
             r"\documentclass[sigplan]{cidr-2025}" "\n"
             r"\begin{document}" "\n"
@@ -3095,11 +3130,12 @@ Language: Chinese
 
         fixed, count = filters.add_xelatex_compatibility_fallbacks(text)
 
+        self.assertEqual((fixed, count), (text, 0))
+        legacy = r"\providecommand{\setmainfont}[2][]{}" + "\n" + text
+        cleaned, count = filters.add_xelatex_compatibility_fallbacks(legacy)
         self.assertEqual(count, 1)
-        self.assertIn(r"\providecommand{\setmonofont}[2][]{}", fixed)
-        self.assertIn(r"\providecommand{\newfontfamily}[3][]{\providecommand#2{}}", fixed)
-        self.assertLess(fixed.index(r"\providecommand{\setmonofont}"), fixed.index(r"\documentclass"))
-        self.assertLess(fixed.index(r"\providecommand{\setmonofont}"), fixed.index(r"\setmonofont"))
+        self.assertNotIn(r"\providecommand{\setmainfont}", cleaned)
+        self.assertEqual(filters.add_xelatex_compatibility_fallbacks(cleaned), (cleaned, 0))
 
     def test_add_xelatex_compatibility_fallbacks_respects_fontspec_package(self):
         text = (

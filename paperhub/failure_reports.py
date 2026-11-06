@@ -56,6 +56,7 @@ def load_failure_records(error_dir: str) -> List[Dict[str, object]]:
                     "infrastructure.disk_full",
                     "translate.api_quota",
                     "translate.api_auth",
+                    "translate.model_unavailable",
                     "quality.translation_chunk_invalid",
                     "infrastructure.driver_incompatible",
                 }

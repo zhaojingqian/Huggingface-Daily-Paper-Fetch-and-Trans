@@ -25,6 +25,7 @@ def _json_value(name, expected_type):
 def render_config():
     model = _required("GPT_ACADEMIC_LLM_MODEL")
     available = _json_value("GPT_ACADEMIC_AVAIL_LLM_MODELS_JSON", list)
+    available = list(dict.fromkeys([model, *available]))
     redirects = _json_value("GPT_ACADEMIC_API_URL_REDIRECT_JSON", dict)
     values = {
         "WEB_PORT": int(os.environ.get("GPT_ACADEMIC_WEB_PORT", "12345")),

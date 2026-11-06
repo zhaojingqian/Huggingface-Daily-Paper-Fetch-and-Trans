@@ -10,6 +10,11 @@ import run_papers
 
 
 class RunPapersRetryTest(unittest.TestCase):
+    def test_model_and_auth_failures_stop_batch(self):
+        for category in ('translate.model_unavailable', 'translate.api_auth'):
+            with self.subTest(category=category):
+                self._assert_resource_failure_stops_batch(category)
+
     def test_full_sync_discovers_indexes_not_job_files_or_archive_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.mkdir(os.path.join(tmp, "archive"))

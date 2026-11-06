@@ -10,13 +10,37 @@ from paperhub import translation_runtime
 
 
 class TranslationRecoveryTest(unittest.TestCase):
+    def test_untranslated_retry_receives_language_repair_instruction(self):
+        source = "This paragraph describes the experimental results in detail."
+        calls = []
+        def request(**options):
+            calls.append(options)
+            if False:
+                yield
+            return [source, source if len(calls) == 1 else "本段详细描述了实验结果。"]
+        utils = types.SimpleNamespace(
+            request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency=request)
+        with mock.patch.dict(sys.modules, {"crazy_functions": types.SimpleNamespace(crazy_utils=utils)}), \
+             mock.patch.object(translation_runtime, "_load_translation_recovery", return_value={}), \
+             mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False):
+            translation_runtime._patch_latex_llm_rate_limit_handling()
+            generator = utils.request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
+                inputs_array=[source], inputs_show_user_array=["paragraph"],
+                history_array=[[]], sys_prompt_array=["Translate"])
+            with self.assertRaises(StopIteration):
+                next(generator)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("translate every natural-language English word", calls[1]['sys_prompt_array'][0])
+
     def test_request_failure_preserves_cause_for_taxonomy(self):
         from failure_taxonomy import classify_failure
 
         source = "This paragraph describes the experimental results in detail."
         response = "[Local Message] 警告，线程0 Traceback: " + "worker traceback " * 200 + "HTTP 401 Unauthorized"
+        calls = []
 
         def request(**options):
+            calls.append(options)
             if False:
                 yield
             return [source, response]
@@ -24,7 +48,7 @@ class TranslationRecoveryTest(unittest.TestCase):
         utils = types.SimpleNamespace(
             request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency=request)
         with mock.patch.dict(sys.modules, {"crazy_functions": types.SimpleNamespace(crazy_utils=utils)}), \
-             mock.patch.dict(os.environ, {"PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS": "0"}), \
+             mock.patch.dict(os.environ, {"PAPER_TRANS_FAILED_CHUNK_RETRY_ROUNDS": "2"}), \
              mock.patch.object(translation_runtime, "_load_translation_recovery", return_value={}), \
              mock.patch.object(translation_runtime, "_save_translation_recovery", return_value=False):
             translation_runtime._patch_latex_llm_rate_limit_handling()
@@ -34,6 +58,7 @@ class TranslationRecoveryTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as failed:
                 next(generator)
         message = str(failed.exception)
+        self.assertEqual(len(calls), 1)
         self.assertIn("HTTP 401 Unauthorized", message)
         self.assertLess(len(message), 2100)
         self.assertEqual(classify_failure("translate", plugin_error=message)["category"],

@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 
 import latex_translation_filters as _ltf
+from failure_taxonomy import classify_failure, is_batch_blocking_failure
 try:
     from translation_policy import (
         bounded_int as _bounded_policy_int,
@@ -933,7 +934,6 @@ def _patch_latex_llm_rate_limit_handling():
             untranslated = []
             structurally_invalid = []
             invalid_reasons = {}
-            quota_failed = []
             normalized_indices = _ltf.normalize_llm_translation_payload(
                 payload,
                 validation_sources,
@@ -954,9 +954,11 @@ def _patch_latex_llm_rate_limit_handling():
                     if index < len(validation_sources)
                     else ""
                 )
-                if _ltf.llm_translation_response_quota_failed(response):
-                    quota_failed.append(index)
                 if _ltf.llm_translation_response_failed(response):
+                    cause = classify_failure("translate", plugin_error=str(response))
+                    if is_batch_blocking_failure(cause):
+                        persist_recovery(payload)
+                        raise RuntimeError(f"{cause['category']}: {cause['evidence']}")
                     request_failed.append(index)
                 else:
                     invalid_reason = _ltf.llm_translation_response_invalid(
@@ -974,13 +976,13 @@ def _patch_latex_llm_rate_limit_handling():
                     or index in structurally_invalid
                 ):
                     failed.append(index)
+                    invalid_reasons.setdefault(index, "request_or_untranslated")
             return (
                 failed,
                 request_failed,
                 untranslated,
                 structurally_invalid,
                 invalid_reasons,
-                quota_failed,
             )
 
         (
@@ -989,14 +991,7 @@ def _patch_latex_llm_rate_limit_handling():
             untranslated,
             structurally_invalid,
             invalid_reasons,
-            quota_failed,
         ) = response_status(result)
-        if quota_failed:
-            persist_recovery(result)
-            raise RuntimeError(
-                "insufficient_user_quota: API balance is insufficient for "
-                f"{len(quota_failed)} translation chunks"
-            )
         if remaining:
             print(
                 f"[driver] ⚠️  chunk 首轮异常: request_failed={len(request_failed)}, "
@@ -1133,14 +1128,7 @@ def _patch_latex_llm_rate_limit_handling():
                         untranslated,
                         structurally_invalid,
                         invalid_reasons,
-                        quota_failed,
                     ) = response_status(result)
-                    if quota_failed:
-                        persist_recovery(result)
-                        raise RuntimeError(
-                            "insufficient_user_quota: API balance is insufficient "
-                            "during adaptive structural retry"
-                        )
                     if not remaining:
                         break
             print(
@@ -1185,14 +1173,7 @@ def _patch_latex_llm_rate_limit_handling():
                 untranslated,
                 structurally_invalid,
                 invalid_reasons,
-                quota_failed,
             ) = response_status(result)
-            if quota_failed:
-                persist_recovery(result)
-                raise RuntimeError(
-                    "insufficient_user_quota: API balance is insufficient for "
-                    f"{len(quota_failed)} translation chunks"
-                )
             if remaining:
                 log_abnormal_chunks(
                     result,

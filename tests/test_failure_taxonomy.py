@@ -12,6 +12,17 @@ from paperhub.json_io import write_json_atomic
 
 
 class FailureTaxonomyTest(unittest.TestCase):
+    def test_model_absence_is_not_transient_pool_overload(self):
+        from failure_taxonomy import is_batch_blocking_failure
+        missing = classify_failure("translate", plugin_error=
+            'RuntimeError: Model gpt-6-luna does not exist, please check the model name for typos')
+        self.assertEqual(missing['category'], 'translate.model_unavailable')
+        self.assertTrue(is_batch_blocking_failure(missing))
+        overloaded = classify_failure("translate", plugin_error=
+            'model_not_found: pool is overloaded; rate_limit_error')
+        self.assertEqual(overloaded['category'], 'translate.api_rate_limit')
+        self.assertFalse(is_batch_blocking_failure(overloaded))
+
     def test_pdf_only_source_requires_source_not_retranslation(self):
         result = classify_failure("translate", plugin_error="LaTeX source unavailable: arXiv returned PDF only")
         self.assertEqual(result["category"], "translate.source_missing")

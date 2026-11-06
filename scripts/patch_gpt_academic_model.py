@@ -14,7 +14,7 @@ import argparse
 from pathlib import Path
 
 
-MODEL = "gpt-6-luna"
+MODEL = "claude-haiku-5-5"
 
 
 MODEL_BLOCK = f'''    "{MODEL}": {{
@@ -43,15 +43,12 @@ def patch_model_catalog(path: Path) -> bool:
 
 def patch_key_router(path: Path) -> bool:
     text = path.read_text(encoding="utf-8")
-    marker = "    if llm_model.startswith('gpt-') or llm_model.startswith('chatgpt-') or \\\n"
-    if "llm_model.startswith('deepseek-')" in text:
+    marker = "    if llm_model.startswith("
+    if f"llm_model == '{MODEL}'" in text:
         return False
     if marker not in text:
         raise RuntimeError(f"OpenAI-compatible key-router marker missing: {path}")
-    replacement = (
-        "    if llm_model.startswith('deepseek-') or "
-        "llm_model.startswith('gpt-') or llm_model.startswith('chatgpt-') or \\\n"
-    )
+    replacement = f"    if llm_model == '{MODEL}' or llm_model.startswith("
     path.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
     return True
 

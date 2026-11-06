@@ -35,6 +35,14 @@ def is_failure_retryable(
     return record.get("retry_strategy") != "manual_review"
 
 
+def is_batch_blocking_failure(record: Dict[str, object]) -> bool:
+    """Shared resource failures cannot be fixed by trying another paper."""
+    return record.get("category") in {
+        "translate.api_quota", "translate.api_auth",
+        "translate.model_unavailable", "infrastructure.disk_full",
+    }
+
+
 QUALITY_FAILURE_SPECS = {
     "quality.translation_chunk_invalid": {
         "family": "translation_quality",
@@ -140,6 +148,17 @@ def classify_failure(phase: str, latex_log: str = "", plugin_error: str = "") ->
         )
 
     if phase == "translate":
+        model_missing = r"model[^\n]*?(?:does not exist|not available|not found|无权限|不存在)"
+        # An overloaded pool may also emit model_not_found; that is transient,
+        # not evidence that the configured model has been removed.
+        if re.search(model_missing, plugin, re.I) and not re.search(
+            r"overloaded|rate.limit|too many requests", plugin, re.I
+        ):
+            return _result(
+                "translate.model_unavailable", "api", "manual_review", "restore_authorized_model",
+                "配置模型不可用；由中转恢复模型或明确授权切换后再重试。",
+                _evidence(plugin, model_missing),
+            )
         if re.search(
             r"configure\(\) got an unexpected keyword argument|"
             r"latex pipeline has not been configured",
